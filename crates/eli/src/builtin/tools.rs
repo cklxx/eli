@@ -201,7 +201,7 @@ fn render_search_entry(entry: &TapeEntry) -> String {
 fn tool_bash() -> Tool {
     Tool::with_context(
         "bash",
-        "Execute shell commands: builds, tests, git ops, grep, diagnostics, package installs. Set background=true for long-running processes, then poll via bash.output. Prefer fs.read/fs.write over cat/echo for file I/O.",
+        "Run a shell command and return its output.\n\nExamples: `cargo build`, `git status`, `grep -r TODO src/`, `npm install`, `docker ps`, `curl -s http://...`.\nFor long-running processes (servers, watchers, tailing logs), set background=true and poll with bash.output.\nFor reading or writing files, prefer fs.read / fs.write over shell redirects.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -290,7 +290,7 @@ fn tool_bash() -> Tool {
 fn tool_bash_output() -> Tool {
     Tool::new(
         "bash.output",
-        "Poll stdout/stderr of a background shell by shell_id. Pass offset to resume from where you left off; combine with limit for chunked reads.",
+        "Read output from a running background shell.\n\nUse after bash(background=true) to check build progress, stream server logs, or wait for a test suite to finish. Pass offset for incremental polling.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -347,7 +347,7 @@ fn tool_bash_output() -> Tool {
 fn tool_bash_kill() -> Tool {
     Tool::new(
         "bash.kill",
-        "Kill a background shell by shell_id. Returns exit code and final status.",
+        "Terminate a background shell.\n\nUse to stop a dev server, cancel a hung build, or clean up a log tail that is no longer needed.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -381,7 +381,7 @@ fn tool_bash_kill() -> Tool {
 fn tool_fs_read() -> Tool {
     Tool::with_context(
         "fs.read",
-        "Read a file's content with line numbers. Use offset/limit to paginate large files. Handles source code, config, logs, data — prefer over bash(cat/head).",
+        "Read a file and return its content.\n\nUse to inspect source code, review configs (toml, yaml, json), check log output, or read data files. Supports offset/limit for large files. Prefer over bash(cat/head/tail).",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -421,7 +421,7 @@ fn tool_fs_read() -> Tool {
 fn tool_fs_write() -> Tool {
     Tool::with_context(
         "fs.write",
-        "Create or overwrite a file with the given content. Auto-creates parent directories. For surgical edits to an existing file, use fs.edit.",
+        "Create a new file or overwrite an existing one.\n\nUse to write a new module, generate a config, save test fixtures, or dump formatted output. Auto-creates parent dirs. For changing a few lines in an existing file, use fs.edit instead.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -457,7 +457,7 @@ fn tool_fs_write() -> Tool {
 fn tool_fs_edit() -> Tool {
     Tool::with_context(
         "fs.edit",
-        "Replace the first occurrence of old text with new text in a file. Narrow the search with start line. Errors if old text is absent. For full rewrites, use fs.write.",
+        "Find-and-replace text in a file (first match only).\n\nUse to rename a variable, fix a typo, update an import, patch a config value, or insert code at a specific location. Specify start line to disambiguate duplicates. For full rewrites, use fs.write.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -519,7 +519,7 @@ fn tool_fs_edit() -> Tool {
 fn tool_skill() -> Tool {
     Tool::with_context(
         "skill",
-        "Load a skill's instructions and metadata by name. Call this before using sidecar tools to discover their parameters and usage rules.",
+        "Load a skill's instructions by name.\n\nUse to discover available capabilities, read a sidecar tool's parameter schema, or retrieve workflow instructions before executing a multi-step skill.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -583,7 +583,7 @@ fn tool_skill() -> Tool {
 fn tool_tape_info() -> Tool {
     Tool::with_context(
         "tape.info",
-        "Return tape metadata: entry count, anchor count, last anchor name, token usage. Check before handoff or reset.",
+        "Get tape metadata: entry count, anchors, token usage.\n\nUse to gauge context size before a handoff, decide whether to reset, or verify the session is on the right tape.",
         serde_json::json!({
             "type": "object",
             "properties": {}
@@ -606,7 +606,7 @@ fn tool_tape_info() -> Tool {
 fn tool_tape_search() -> Tool {
     Tool::with_context(
         "tape.search",
-        "Search past conversation entries (messages, tool results) by keyword. Filter by date range or entry kind. For file content search, use bash(grep) instead.",
+        "Search the conversation tape by keyword.\n\nUse to recall a previous decision, find an earlier tool result, locate an error message from a past turn, or check what was discussed in a date range. For file content search, use bash(grep).",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -678,7 +678,7 @@ fn tool_tape_search() -> Tool {
 fn tool_tape_reset() -> Tool {
     Tool::with_context(
         "tape.reset",
-        "Clear the current tape. Set archive=true to snapshot before wiping. Irreversible without archive.",
+        "Wipe the current tape and start fresh.\n\nUse when context has grown too large, the task has shifted entirely, or a clean slate is needed. Set archive=true to preserve a snapshot first — without it the reset is irreversible.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -704,7 +704,7 @@ fn tool_tape_reset() -> Tool {
 fn tool_tape_handoff() -> Tool {
     Tool::with_context(
         "tape.handoff",
-        "Drop a named checkpoint into the tape with a summary of what was accomplished. Anchors serve as resumption points when context is reloaded.",
+        "Save a named checkpoint to the tape.\n\nUse after finishing a phase, before switching tasks, or when handing off to another agent. Include a summary so future context loads can resume efficiently.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -737,7 +737,7 @@ fn tool_tape_handoff() -> Tool {
 fn tool_tape_anchors() -> Tool {
     Tool::with_context(
         "tape.anchors",
-        "List all anchors in the tape with names and attached state. Shows the session's checkpoint timeline.",
+        "List checkpoints in the tape.\n\nUse to review the session timeline, find a specific handoff point, or decide which anchor to resume from.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -763,7 +763,7 @@ fn tool_tape_anchors() -> Tool {
 fn tool_web_fetch() -> Tool {
     Tool::new(
         "web.fetch",
-        "HTTP GET a URL and return the body as markdown when possible. Supports custom headers. Static content only — no JS rendering or browser interaction.",
+        "Fetch a URL and return the content as markdown.\n\nUse to pull documentation pages, read API responses, download READMEs, or retrieve raw text resources. Supports custom headers and timeout. Static content only — no JS rendering.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -825,7 +825,7 @@ fn tool_web_fetch() -> Tool {
 fn tool_subagent() -> Tool {
     Tool::with_context(
         "subagent",
-        "Spawn an isolated sub-agent for parallel or independent work (research, exploration, delegated subtasks). Specify model, session strategy, and tool/skill allowlists.",
+        "Spawn a sub-agent with its own context.\n\nUse to parallelize independent research, delegate a focused subtask, explore a codebase without polluting the main tape, or run work with a different model. Specify session strategy and tool/skill allowlists.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -869,7 +869,7 @@ fn tool_subagent() -> Tool {
 fn tool_help() -> Tool {
     Tool::new(
         "help",
-        "Print available internal commands and their syntax.",
+        "Show available commands and their syntax.\n\nUse when unsure which tools exist or how to invoke an internal command.",
         serde_json::json!({
             "type": "object",
             "properties": {}
@@ -906,7 +906,7 @@ fn tool_help() -> Tool {
 fn tool_quit() -> Tool {
     Tool::with_context(
         "quit",
-        "End the current session and stop all running tasks.",
+        "End the session and stop all running tasks.\n\nUse when the user says goodbye, the task is complete, or you need to cleanly shut down before a handoff.",
         serde_json::json!({
             "type": "object",
             "properties": {}
@@ -924,7 +924,7 @@ fn tool_quit() -> Tool {
 fn tool_sidecar() -> Tool {
     Tool::new(
         "sidecar",
-        "Proxy a call to an external sidecar plugin (calendar, docs, integrations) by tool name. Load the skill first to discover parameters.",
+        "Call an external sidecar plugin by tool name.\n\nUse for calendar events, doc operations, third-party integrations, or any capability provided by the sidecar. Load the skill first to discover the tool's parameters.",
         serde_json::json!({
             "type": "object",
             "properties": {
