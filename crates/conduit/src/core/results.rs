@@ -306,6 +306,10 @@ pub struct ToolAutoResult {
     pub tool_results: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorPayload>,
+    /// Token usage from the last API response (contains `input_tokens`,
+    /// `output_tokens`, `total_tokens`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Value>,
 }
 
 impl ToolAutoResult {
@@ -317,6 +321,7 @@ impl ToolAutoResult {
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
             error: None,
+            usage: None,
         }
     }
 
@@ -328,6 +333,7 @@ impl ToolAutoResult {
             tool_calls,
             tool_results,
             error: None,
+            usage: None,
         }
     }
 
@@ -343,6 +349,7 @@ impl ToolAutoResult {
             tool_calls: tool_calls.unwrap_or_default(),
             tool_results: tool_results.unwrap_or_default(),
             error: Some(error),
+            usage: None,
         }
     }
 }

@@ -455,6 +455,7 @@ impl LLM {
         tools: &ToolSet,
         context: Option<&ToolContext>,
         tape: Option<&str>,
+        tape_context: Option<&TapeContext>,
     ) -> Result<ToolAutoResult, ConduitError> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -472,6 +473,7 @@ impl LLM {
             tools,
             context,
             tape,
+            tape_context,
         ))
     }
 
@@ -644,6 +646,7 @@ impl LLM {
         tools: &ToolSet,
         context: Option<&ToolContext>,
         tape: Option<&str>,
+        tape_context: Option<&TapeContext>,
     ) -> Result<ToolAutoResult, ConduitError> {
         let schemas = tools.payload().map(|s| s.to_vec());
 
@@ -705,10 +708,9 @@ impl LLM {
                 }
 
                 // Read full context from tape (includes system, messages, tool_call, tool_result)
-                let query = self
-                    .async_tape
-                    .default_context()
-                    .build_query(self.async_tape.query_tape(tape_name));
+                let default_ctx = self.async_tape.default_context().clone();
+                let ctx = tape_context.unwrap_or(&default_ctx);
+                let query = ctx.build_query(self.async_tape.query_tape(tape_name));
                 let entries = match self.async_tape.fetch_entries(&query).await {
                     Ok(entries) => entries,
                     Err(e) if e.kind == ErrorKind::NotFound && query.after_last => {

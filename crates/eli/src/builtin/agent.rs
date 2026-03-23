@@ -7,7 +7,9 @@ use std::time::Instant;
 use chrono::Utc;
 use conduit::core::results::ToolAutoResultKind;
 use conduit::llm::LLM;
-use conduit::{ConduitError, ErrorKind, TapeEntry, Tool, ToolAutoResult, ToolContext, ToolSet};
+use conduit::{
+    ConduitError, ErrorKind, TapeContext, TapeEntry, Tool, ToolAutoResult, ToolContext, ToolSet,
+};
 use regex::Regex;
 use serde_json::Value;
 
@@ -583,6 +585,24 @@ async fn agent_loop(
         .append_event(tape_name, "agent.run.start", step_event)
         .await;
 
+    // --- Grace period: if an auto-handoff anchor was placed recently, keep
+    // using the previous anchor so the model still sees the full context.
+    let tape_ctx_override = match tapes.auto_handoff_grace(tape_name).await {
+        Ok(Some((remaining, ref prev_anchor))) if remaining > 0 && !prev_anchor.is_empty() => {
+            tracing::info!(
+                tape = tape_name,
+                remaining,
+                prev_anchor,
+                "auto-handoff grace: using prev anchor"
+            );
+            Some(TapeContext {
+                anchor: conduit::AnchorSelector::Named(prev_anchor.clone()),
+                ..TapeContext::default()
+            })
+        }
+        _ => None,
+    };
+
     let result = with_tape_runtime(
         tapes.clone(),
         run_tools_once(
@@ -594,6 +614,7 @@ async fn agent_loop(
             tool_state,
             settings,
             allowed_tools,
+            tape_ctx_override.as_ref(),
         ),
     )
     .await;
@@ -622,31 +643,93 @@ async fn agent_loop(
                     });
                     let _ = tapes.append_event(tape_name, "agent.run", event).await;
 
-                    // Auto-handoff when context approaches the budget limit.
-                    // MAX_TOTAL_CONTEXT_CHARS in conduit is 400k; trigger at 80%.
-                    const AUTO_HANDOFF_THRESHOLD: usize = 320_000;
-                    if let Ok(chars) = tapes.context_chars_since_anchor(tape_name).await
-                        && chars >= AUTO_HANDOFF_THRESHOLD
+                    // --- Auto-handoff state machine ---
+                    //
+                    // Grace period active → count down.
+                    // Grace expired → next turn uses LastAnchor (auto-handoff anchor)
+                    //   and sees the summary entry that was placed right after the
+                    //   anchor.
+                    // No grace → check if we should trigger a new auto-handoff.
+                    if let Ok(Some((remaining, prev_anchor))) =
+                        tapes.auto_handoff_grace(tape_name).await
                     {
-                        let summary = outcome
-                            .text
-                            .chars()
-                            .take(500)
-                            .collect::<String>();
-                        let state = serde_json::json!({
-                            "reason": "auto-handoff: context approaching limit",
-                            "context_chars": chars,
-                            "summary": summary,
-                        });
-                        if let Err(e) =
-                            tapes.handoff(tape_name, "auto-handoff", Some(state)).await
-                        {
-                            tracing::warn!(error = %e, "auto-handoff failed");
-                        } else {
+                        if remaining > 0 {
+                            let new_remaining = remaining - 1;
+                            let _ = tapes
+                                .append_event(
+                                    tape_name,
+                                    "auto-handoff.grace",
+                                    serde_json::json!({
+                                        "remaining": new_remaining,
+                                        "prev_anchor": prev_anchor,
+                                    }),
+                                )
+                                .await;
+                            if new_remaining == 0 {
+                                tracing::info!(
+                                    tape = tape_name,
+                                    "auto-handoff grace ended, context will be trimmed next turn"
+                                );
+                            }
+                        }
+                    } else if let Some(usage) = &output.usage {
+                        // No active grace — check whether to trigger.
+                        let input_tokens = usage
+                            .get("input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as usize;
+                        let threshold = settings.context_window * 70 / 100;
+                        if input_tokens >= threshold {
+                            // 1. Remember the current (soon-to-be-previous) anchor.
+                            let prev_anchor_name = tapes
+                                .last_anchor_name(tape_name)
+                                .await
+                                .ok()
+                                .flatten()
+                                .unwrap_or_default();
+
+                            // 2. Write the handoff anchor.
+                            let summary: String =
+                                outcome.text.chars().take(500).collect();
+                            let anchor_state = serde_json::json!({
+                                "reason": "auto-handoff: context approaching limit",
+                                "input_tokens": input_tokens,
+                                "context_window": settings.context_window,
+                                "summary": summary,
+                            });
+                            let _ = tapes
+                                .handoff(tape_name, "auto-handoff", Some(anchor_state))
+                                .await;
+
+                            // 3. Write a system entry right after the anchor so
+                            //    that when the context is later cut here the LLM
+                            //    sees the summary as its first message.
+                            let sys_entry = TapeEntry::system(
+                                &format!(
+                                    "[Context summary from auto-handoff]\n{}",
+                                    summary
+                                ),
+                                Value::Object(Default::default()),
+                            );
+                            let _ = tapes.store().append(tape_name, &sys_entry).await;
+
+                            // 4. Start grace period (2 more rounds with old context).
+                            let _ = tapes
+                                .append_event(
+                                    tape_name,
+                                    "auto-handoff.grace",
+                                    serde_json::json!({
+                                        "remaining": 2,
+                                        "prev_anchor": prev_anchor_name,
+                                    }),
+                                )
+                                .await;
+
                             tracing::info!(
                                 tape = tape_name,
-                                chars = chars,
-                                "auto-handoff: context trimmed"
+                                input_tokens,
+                                context_window = settings.context_window,
+                                "auto-handoff: anchor placed, grace period 2"
                             );
                         }
                     }
@@ -682,6 +765,7 @@ async fn run_tools_once(
     tool_state: &HashMap<String, Value>,
     settings: &AgentSettings,
     allowed_tools: Option<&HashSet<String>>,
+    tape_context: Option<&TapeContext>,
 ) -> Result<ToolAutoResult, ConduitError> {
     // Build tools list from registry.
     let tools: Vec<Tool> = {
@@ -732,6 +816,7 @@ async fn run_tools_once(
             &tool_set,
             Some(&tool_ctx),
             Some(tape_name), // tape name for internal read/write
+            tape_context,    // anchor override for grace period
         )
         .await?;
 
@@ -908,6 +993,7 @@ mod tests {
             max_tokens: 256,
             model_timeout_seconds: None,
             verbose: 0,
+            context_window: 128_000,
         }
     }
 

@@ -211,6 +211,50 @@ impl TapeService {
         }
     }
 
+    /// Get the name of the last anchor in the tape (if any).
+    pub async fn last_anchor_name(&self, tape_name: &str) -> Result<Option<String>, ConduitError> {
+        let query = TapeQuery::new(tape_name).kinds(vec!["anchor".to_owned()]);
+        let entries = self.store.fetch_all(&query).await?;
+        Ok(entries.last().and_then(|e| {
+            e.payload
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_owned())
+        }))
+    }
+
+    /// Find the most recent `auto-handoff.grace` event and return
+    /// `(remaining_rounds, prev_anchor_name)`.
+    pub async fn auto_handoff_grace(
+        &self,
+        tape_name: &str,
+    ) -> Result<Option<(u32, String)>, ConduitError> {
+        let query = TapeQuery::new(tape_name).kinds(vec!["event".to_owned()]);
+        let entries = self.store.fetch_all(&query).await?;
+        // Walk backwards to find the latest grace event.
+        for entry in entries.iter().rev() {
+            if entry
+                .payload
+                .get("name")
+                .and_then(|v| v.as_str())
+                == Some("auto-handoff.grace")
+            {
+                let data = entry.payload.get("data");
+                let remaining = data
+                    .and_then(|d| d.get("remaining"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                let prev_anchor = data
+                    .and_then(|d| d.get("prev_anchor"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                return Ok(Some((remaining, prev_anchor)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Add a handoff anchor to the tape.
     pub async fn handoff(
         &self,

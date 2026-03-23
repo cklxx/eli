@@ -23,7 +23,9 @@ pub use crate::core::results::{
     TextStream, ToolAutoResult, ToolExecution,
 };
 pub use crate::llm::{ApiFormat, EmbedInput, LLM, LLMBuilder, StreamEventFilter};
-pub use crate::tape::{TapeContext, TapeEntry, TapeManager, TapeQuery, TapeSession};
+pub use crate::tape::{
+    AnchorSelector, TapeContext, TapeEntry, TapeManager, TapeQuery, TapeSession,
+};
 pub use crate::tools::{
     Tool, ToolCallResponse, ToolContext, ToolExecutor, ToolSet, normalize_tools, tool_from_fn,
     tool_from_schema,

@@ -6,6 +6,7 @@ use crate::core::errors::ConduitError;
 use crate::core::results::ToolAutoResult;
 use crate::llm::LLM;
 use crate::tape::entries::TapeEntry;
+use crate::tape::context::TapeContext;
 use crate::tools::context::ToolContext;
 use crate::tools::schema::ToolSet;
 
@@ -65,6 +66,7 @@ impl<'a> TapeSession<'a> {
         max_tokens: Option<u32>,
         tools: &ToolSet,
         context: Option<&ToolContext>,
+        tape_context: Option<&TapeContext>,
     ) -> Result<ToolAutoResult, ConduitError> {
         self.llm
             .run_tools(
@@ -77,6 +79,7 @@ impl<'a> TapeSession<'a> {
                 tools,
                 context,
                 Some(&self.tape),
+                tape_context,
             )
             .await
     }
