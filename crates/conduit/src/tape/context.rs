@@ -120,7 +120,8 @@ pub fn apply_context_budget(messages: &mut Vec<Value>) {
     }
 }
 
-/// Truncate a tool result message's content to `limit` chars, cutting at line boundary.
+/// Truncate a tool result message's content to `limit` bytes, cutting at a
+/// char-safe line boundary.
 fn truncate_tool_result_content(msg: &mut Value, limit: usize) {
     let content = match msg.get("content").and_then(|c| c.as_str()) {
         Some(s) => s,
@@ -130,8 +131,16 @@ fn truncate_tool_result_content(msg: &mut Value, limit: usize) {
         return;
     }
 
-    // Cut at last newline before limit
-    let cut = content[..limit].rfind('\n').unwrap_or(limit);
+    // Find the largest char boundary <= limit.
+    let safe_limit = (0..=limit)
+        .rev()
+        .find(|&i| content.is_char_boundary(i))
+        .unwrap_or(0);
+
+    // Cut at last newline before that boundary.
+    let cut = content[..safe_limit]
+        .rfind('\n')
+        .unwrap_or(safe_limit);
     let shown_lines = content[..cut].matches('\n').count() + 1;
     let total_lines = content.matches('\n').count() + 1;
 

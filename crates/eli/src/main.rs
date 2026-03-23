@@ -66,10 +66,13 @@ fn init_tracing() -> anyhow::Result<()> {
 
         tracing::info!(trace_log = %trace_log_path.display(), "eli trace log enabled");
     } else {
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info"));
+        // Always suppress eli_trace on console — it contains full LLM payloads.
+        let filter = filter
+            .add_directive("eli_trace=off".parse().expect("valid directive"));
         tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-            )
+            .with_env_filter(filter)
             .with_target(false)
             .init();
     }
