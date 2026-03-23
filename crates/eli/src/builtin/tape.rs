@@ -244,6 +244,11 @@ impl TapeService {
                     .and_then(|d| d.get("remaining"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32;
+                // remaining == 0 means grace has expired; treat as no active grace
+                // so the caller falls through to the new-handoff trigger branch.
+                if remaining == 0 {
+                    return Ok(None);
+                }
                 let prev_anchor = data
                     .and_then(|d| d.get("prev_anchor"))
                     .and_then(|v| v.as_str())
