@@ -6,7 +6,7 @@ use std::sync::Arc;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::api_format::ApiFormat;
 use super::client_registry::ClientRegistry;
@@ -869,6 +869,13 @@ impl LLMCore {
             buffer.push_str(&String::from_utf8_lossy(&chunk));
         }
 
+        info!(
+            target: "eli_trace",
+            transport = ?transport,
+            raw_sse = ?buffer,
+            "llm.raw_sse_response"
+        );
+
         // Parse SSE events from the buffer.
         match transport {
             TransportKind::Messages => {
@@ -1106,6 +1113,16 @@ impl LLMCore {
                     }
                 };
 
+                info!(
+                    target: "eli_trace",
+                    provider = %provider_name,
+                    model = %model_id,
+                    transport = ?transport,
+                    stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
+                    request_body = %body,
+                    "llm.request"
+                );
+
                 let http_result = client.post(&url).json(&body).send().await;
 
                 match http_result {
@@ -1182,6 +1199,15 @@ impl LLMCore {
                                 }
                             }
                         };
+
+                        info!(
+                            target: "eli_trace",
+                            provider = %provider_name,
+                            model = %model_id,
+                            transport = ?transport,
+                            response_payload = %payload,
+                            "llm.response"
+                        );
 
                         let transport_response = TransportResponse { transport, payload };
 

@@ -136,6 +136,12 @@ impl BuiltinImpl {
     ) -> Vec<ChannelMessage> {
         let clean = crate::builtin::cli::strip_fake_tool_calls(model_output);
         if clean.trim().is_empty() {
+            tracing::info!(
+                target: "eli_trace",
+                session_id = %session_id,
+                raw_model_output = ?model_output,
+                "builtin.render_outbound.empty_after_cleanup"
+            );
             return Vec::new();
         }
 

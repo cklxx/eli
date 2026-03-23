@@ -13,6 +13,22 @@ use conduit::tape::{AsyncTapeStore, TapeStore};
 
 use crate::types::{Envelope, MessageHandler, PromptValue, State};
 
+fn preview_text(text: &str) -> String {
+    const LIMIT: usize = 1000;
+    let mut chars = text.chars();
+    let preview: String = chars.by_ref().take(LIMIT).collect();
+    let normalized = preview.replace('\n', "\\n");
+    if chars.next().is_some() {
+        format!("{normalized}...(truncated)")
+    } else {
+        normalized
+    }
+}
+
+fn preview_json(value: &Envelope) -> String {
+    preview_text(&value.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Channel trait (mirrors Python eli.channels.base.Channel)
 // ---------------------------------------------------------------------------
@@ -205,9 +221,33 @@ impl HookRuntime {
         state: &State,
     ) -> Option<PromptValue> {
         for plugin in self.reversed() {
+            tracing::info!(
+                target: "eli_trace",
+                plugin = %plugin.plugin_name(),
+                session_id = %session_id,
+                inbound = %preview_json(message),
+                "hook.build_prompt.call"
+            );
             match plugin.build_prompt(message, session_id, state).await {
-                Some(val) => return Some(val),
-                None => continue,
+                Some(val) => {
+                    tracing::info!(
+                        target: "eli_trace",
+                        plugin = %plugin.plugin_name(),
+                        session_id = %session_id,
+                        prompt = %preview_text(&val.as_text()),
+                        "hook.build_prompt.return"
+                    );
+                    return Some(val);
+                }
+                None => {
+                    tracing::info!(
+                        target: "eli_trace",
+                        plugin = %plugin.plugin_name(),
+                        session_id = %session_id,
+                        "hook.build_prompt.none"
+                    );
+                    continue;
+                }
             }
         }
         None
@@ -221,9 +261,34 @@ impl HookRuntime {
         state: &State,
     ) -> Option<String> {
         for plugin in self.reversed() {
+            tracing::info!(
+                target: "eli_trace",
+                plugin = %plugin.plugin_name(),
+                session_id = %session_id,
+                prompt = %preview_text(&prompt.as_text()),
+                "hook.run_model.call"
+            );
             match plugin.run_model(prompt, session_id, state).await {
-                Some(val) => return Some(val),
-                None => continue,
+                Some(val) => {
+                    tracing::info!(
+                        target: "eli_trace",
+                        plugin = %plugin.plugin_name(),
+                        session_id = %session_id,
+                        output = %preview_text(&val),
+                        output_len = val.len(),
+                        "hook.run_model.return"
+                    );
+                    return Some(val);
+                }
+                None => {
+                    tracing::info!(
+                        target: "eli_trace",
+                        plugin = %plugin.plugin_name(),
+                        session_id = %session_id,
+                        "hook.run_model.none"
+                    );
+                    continue;
+                }
             }
         }
         None
@@ -254,11 +319,37 @@ impl HookRuntime {
     ) -> Vec<Vec<Envelope>> {
         let mut results = Vec::new();
         for plugin in self.plugins.iter() {
+            tracing::info!(
+                target: "eli_trace",
+                plugin = %plugin.plugin_name(),
+                session_id = %session_id,
+                model_output = %preview_text(model_output),
+                "hook.render_outbound.call"
+            );
             if let Some(batch) = plugin
                 .render_outbound(message, session_id, state, model_output)
                 .await
             {
+                let preview = batch
+                    .first()
+                    .map(preview_json)
+                    .unwrap_or_else(|| String::from("(empty batch)"));
+                tracing::info!(
+                    target: "eli_trace",
+                    plugin = %plugin.plugin_name(),
+                    session_id = %session_id,
+                    batch_len = batch.len(),
+                    first_outbound = %preview,
+                    "hook.render_outbound.return"
+                );
                 results.push(batch);
+            } else {
+                tracing::info!(
+                    target: "eli_trace",
+                    plugin = %plugin.plugin_name(),
+                    session_id = %session_id,
+                    "hook.render_outbound.none"
+                );
             }
         }
         results

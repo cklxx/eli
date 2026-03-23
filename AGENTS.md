@@ -2,62 +2,65 @@
 
 ## Project Structure & Module Organization
 
-Core code lives under `src/`:
+Core Rust code lives under `crates/`:
 
-- `src/eli/__main__.py`: Typer CLI entrypoint.
-- `src/eli/framework.py`: turn orchestration and outbound routing.
-- `src/eli/hookspecs.py` / `src/eli/hook_runtime.py`: hook contracts and execution helpers.
-- `src/eli/builtin/`: builtin runtime, CLI wiring, settings, tools, and tape services.
-- `src/eli/channels/`: channel abstractions plus CLI and Telegram adapters.
-- `src/eli/skills.py` / `src/eli/tools.py`: skill discovery and tool registry.
-- `src/skills/`: bundled skills shipped with Eli.
+- `crates/eli/src/main.rs`: CLI entrypoint.
+- `crates/eli/src/framework.rs`: inbound turn orchestration and outbound dispatch.
+- `crates/eli/src/hooks.rs`: hook traits, runtime ordering, and hook reports.
+- `crates/eli/src/builtin/`: builtin agent runtime, CLI commands, channels, config, tape services, and tools.
+- `crates/eli/src/channels/`: CLI, Telegram, and webhook channel adapters.
+- `crates/eli/src/skills.rs` / `crates/eli/src/tools.rs`: skill discovery/rendering and tool registry.
+- `crates/conduit/src/`: provider-agnostic LLM clients, execution, auth, and tape storage.
 
-Tests live in `tests/`. Documentation lives in `docs/`.
+Supporting code lives in:
+
+- `sidecar/src/`: Node/TypeScript OpenClaw bridge used by webhook channels.
+- `docs/`: architecture, channel, deployment, and extension docs.
+- `.github/workflows/`: CI for `check`, `test`, `fmt`, and `clippy`.
 
 ## Build, Test, and Development Commands
 
-- `uv sync`: install or update dependencies.
-- `just install`: sync dependencies and install `prek` hooks.
-- `uv run eli chat`: run the interactive CLI.
-- `uv run eli gateway`: start channel listener mode.
-- `uv run eli run "hello"`: run one inbound message through the full framework pipeline.
-- `uv run eli hooks`: inspect discovered hook bindings.
-- `uv run ruff check .`: lint checks.
-- `uv run mypy src`: static type checks.
-- `uv run pytest -q`: run the main test suite.
-- `just test`: run pytest with doctests enabled.
-- `just check`: lock validation, lint, and typing.
-- `just docs` / `just docs-test`: serve or build docs.
+- `cargo build --workspace`: build all Rust crates.
+- `cargo run -p eli -- chat`: run the interactive CLI.
+- `cargo run -p eli -- run "hello"`: run one inbound message through the framework pipeline.
+- `cargo run -p eli -- gateway`: start the channel listener mode.
+- `cargo test --workspace`: run the Rust test suite.
+- `cargo fmt --all`: format all Rust code.
+- `cargo clippy --workspace -- -D warnings`: lint Rust code with warnings denied.
+- `just build` / `just install` / `just test`: convenience wrappers for common cargo workflows.
+- `cd sidecar && npm start`: run the sidecar locally.
+- `cd sidecar && bun test`: run sidecar tests when touching bridge code.
 
 ## Coding Style & Naming Conventions
 
-- Python 3.12+, 4-space indentation, and type hints for new or modified logic.
-- Use `snake_case` for modules/functions/variables, `PascalCase` for classes, and `UPPER_CASE` for constants.
-- Keep functions focused and composable; avoid hidden side effects.
-- Prefer the ideal end-state design over a minimal patch when the current architecture is the real source of the bug; large refactors are allowed when they simplify the runtime and remove behavioral mismatches.
-- Format and lint with Ruff. Keep line length within 120 unless an existing file clearly follows a different local convention.
+- Rust edition `2024`, 4-space indentation, and explicit types where they improve clarity.
+- Use `snake_case` for modules/functions/variables, `PascalCase` for types, and `UPPER_SNAKE_CASE` for constants.
+- Keep hook ordering, prompt assembly, and tool execution deterministic; avoid hidden side effects.
+- Prefer cohesive refactors when the current runtime shape is the source of the bug instead of layering narrow patches on top.
+- Format with `cargo fmt` and keep `cargo clippy -- -D warnings` clean.
+- In `sidecar/`, preserve the existing TypeScript ESM style and keep runtime contracts aligned with the Rust side.
 
 ## Testing Guidelines
-- Framework: `pytest`.
-- Name test files `tests/test_<feature>.py`.
-- Prefer behavior-oriented test names such as `test_gateway_uses_enabled_channels_only`.
-- Cover hook precedence, turn lifecycle, CLI/channel behavior, and tape persistence when changing runtime behavior.
-- Update or add tests in the same change when behavior moves.
+
+- Add or update Rust unit tests close to the changed code with `#[cfg(test)]`.
+- Prefer behavior-oriented test names such as `test_build_system_prompt_appends_workspace_agents_guidance`.
+- Use `tempfile` workspaces for tests that depend on filesystem state, tapes, prompts, or `AGENTS.md`.
+- Cover prompt composition, hook precedence, channel routing, tape persistence, and tool wiring when changing runtime behavior.
+- If sidecar behavior changes, add or update tests under `sidecar/test/`.
 
 ## Commit & Pull Request Guidelines
 
-- Follow the Conventional Commit style used in history, for example `feat:`, `fix:`, `docs:`, `chore:`.
-- Keep commits focused; avoid mixing unrelated refactors with behavior changes.
-- When committing implementation work, prefer multiple focused commits split by logical change area instead of one large commit.
+- Follow Conventional Commits such as `feat:`, `fix:`, `docs:`, and `chore:`.
+- Keep commits focused; separate runtime, sidecar, and docs changes when they can stand alone.
 - For PRs, include:
   - what changed and why
-  - impacted modules or commands
-  - verification performed (`ruff`, `mypy`, `pytest`, docs build if relevant)
-  - docs updates when CLI behavior, commands, or architecture changed
+  - impacted crates, commands, or channels
+  - verification performed (`cargo test`, `cargo fmt --check`, `cargo clippy`, sidecar tests if relevant)
+  - docs updates when CLI behavior, configuration, or architecture changed
 
 ## Security & Configuration Tips
 
 - Use `.env` for local secrets; never commit credentials.
-- Eli runtime settings are driven by `ELI_*` variables such as `ELI_MODEL`, `ELI_API_KEY`, and `ELI_API_BASE`.
-- Provider-specific keys such as `OPENROUTER_API_KEY` may still be consumed by downstream SDKs.
-- Telegram deployments usually require `ELI_TELEGRAM_TOKEN`, and allowlists are controlled with `ELI_TELEGRAM_ALLOW_USERS` and `ELI_TELEGRAM_ALLOW_CHATS`.
+- Eli runtime settings are driven by `ELI_*` variables such as `ELI_MODEL`, `ELI_API_KEY`, `ELI_API_BASE`, and `ELI_MAX_STEPS`.
+- Provider-specific credentials may also be resolved from local auth stores handled by `conduit`.
+- Webhook/sidecar deployments use `sidecar/sidecar.json`; Telegram deployments require `ELI_TELEGRAM_TOKEN`.
