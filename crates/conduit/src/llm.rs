@@ -651,6 +651,9 @@ impl LLM {
         let mut all_tool_calls: Vec<Value> = Vec::new();
         let mut all_tool_results: Vec<Value> = Vec::new();
 
+        // Track the latest usage from API responses.
+        let mut last_usage: Option<Value> = None;
+
         // For tape=None fallback, accumulate messages in memory
         let mut in_memory_msgs: Vec<Value> = if tape.is_none() {
             build_messages(prompt, system_prompt, messages.as_deref())
@@ -762,6 +765,11 @@ impl LLM {
                 )
                 .await?;
 
+            // Extract usage from this round's response.
+            if let Some(usage) = response.get("usage").cloned() {
+                last_usage = Some(usage);
+            }
+
             let raw_calls = extract_tool_calls(&response)?;
 
             if raw_calls.is_empty() {
@@ -792,6 +800,7 @@ impl LLM {
                     tool_calls: all_tool_calls,
                     tool_results: all_tool_results,
                     error: None,
+                    usage: last_usage,
                 });
             }
 
@@ -801,65 +810,14 @@ impl LLM {
                 .execute_async(ToolCallResponse::List(raw_calls), &tools.runnable, context)
                 .await?;
 
-            // On tool error, write to tape and return immediately
+            // Log tool errors but continue the loop so the LLM can see the
+            // error as a tool result and react (retry, try a different
+            // approach, or report failure gracefully).
             if let Some(ref err) = execution.error {
-                if let Some(tape_name) = tape {
-                    let meta = serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
-                    // Write the tool calls and results that led to the error
-                    if !execution.tool_calls.is_empty()
-                        && let Err(e) = self
-                            .async_tape
-                            .append_entry(
-                                tape_name,
-                                &TapeEntry::tool_call(execution.tool_calls.clone(), meta.clone()),
-                            )
-                            .await
-                    {
-                        tracing::error!(
-                            error = %e,
-                            tape = %tape_name,
-                            "failed to append tool calls"
-                        );
-                    }
-                    let paired: Vec<Value> = execution
-                        .tool_calls
-                        .iter()
-                        .zip(execution.tool_results.iter())
-                        .map(|(call, result)| {
-                            let call_id =
-                                call.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                            serde_json::json!({"call_id": call_id, "output": result})
-                        })
-                        .collect();
-                    if !paired.is_empty()
-                        && let Err(e) = self
-                            .async_tape
-                            .append_entry(tape_name, &TapeEntry::tool_result(paired, meta.clone()))
-                            .await
-                    {
-                        tracing::error!(
-                            error = %e,
-                            tape = %tape_name,
-                            "failed to append tool results"
-                        );
-                    }
-                    if let Err(e) = self
-                        .async_tape
-                        .append_entry(tape_name, &TapeEntry::error(err, meta))
-                        .await
-                    {
-                        tracing::error!(
-                            error = %e,
-                            tape = %tape_name,
-                            "failed to append tool execution error"
-                        );
-                    }
-                }
-                return Ok(ToolAutoResult::error_result(
-                    err.clone(),
-                    Some(execution.tool_calls),
-                    Some(execution.tool_results),
-                ));
+                tracing::warn!(
+                    error = %err,
+                    "tool execution error — feeding back to LLM for recovery"
+                );
             }
 
             // Accumulate for return value
