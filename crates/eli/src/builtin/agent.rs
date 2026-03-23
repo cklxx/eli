@@ -154,12 +154,8 @@ impl Agent {
             }
         }
 
-        // Skills prompt (filesystem + sidecar).
-        let mut skills = discover_skills(&workspace);
-        {
-            let sidecar_skills = crate::tools::SIDECAR_SKILLS.lock().unwrap();
-            skills.extend(sidecar_skills.iter().cloned());
-        }
+        // Skills prompt (filesystem — sidecar writes SKILL.md to .agents/skills/).
+        let skills = discover_skills(&workspace);
         let filtered_skills: Vec<_> = if let Some(allowed) = allowed_skills {
             skills
                 .into_iter()
@@ -537,12 +533,8 @@ fn build_system_prompt(
         }
     }
 
-    // Skills prompt (filesystem + sidecar).
-    let mut skills = discover_skills(workspace);
-    {
-        let sidecar_skills = crate::tools::SIDECAR_SKILLS.lock().unwrap();
-        skills.extend(sidecar_skills.iter().cloned());
-    }
+    // Skills prompt (filesystem — sidecar writes SKILL.md to .agents/skills/).
+    let skills = discover_skills(workspace);
     let filtered_skills: Vec<_> = if let Some(allowed) = allowed_skills {
         skills
             .into_iter()
@@ -629,6 +621,36 @@ async fn agent_loop(
                         "date": Utc::now().to_rfc3339(),
                     });
                     let _ = tapes.append_event(tape_name, "agent.run", event).await;
+
+                    // Auto-handoff when context approaches the budget limit.
+                    // MAX_TOTAL_CONTEXT_CHARS in conduit is 400k; trigger at 80%.
+                    const AUTO_HANDOFF_THRESHOLD: usize = 320_000;
+                    if let Ok(chars) = tapes.context_chars_since_anchor(tape_name).await
+                        && chars >= AUTO_HANDOFF_THRESHOLD
+                    {
+                        let summary = outcome
+                            .text
+                            .chars()
+                            .take(500)
+                            .collect::<String>();
+                        let state = serde_json::json!({
+                            "reason": "auto-handoff: context approaching limit",
+                            "context_chars": chars,
+                            "summary": summary,
+                        });
+                        if let Err(e) =
+                            tapes.handoff(tape_name, "auto-handoff", Some(state)).await
+                        {
+                            tracing::warn!(error = %e, "auto-handoff failed");
+                        } else {
+                            tracing::info!(
+                                tape = tape_name,
+                                chars = chars,
+                                "auto-handoff: context trimmed"
+                            );
+                        }
+                    }
+
                     Ok(outcome.text)
                 }
                 _ => {

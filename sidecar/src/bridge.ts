@@ -1,18 +1,22 @@
 import express from "express";
 import type { SidecarConfig } from "./config.js";
-import type { EliChannelMessage, InboundEnvelope } from "./types.js";
+import type { EliChannelMessage, InboundEnvelope, SessionContext } from "./types.js";
 import { envelopeToEliMessage, parseOutboundTarget } from "./envelope.js";
 import { registry } from "./registry.js";
-import { pendingTyping, lastSessionContext } from "./runtime.js";
+import { pendingTyping, sessionContexts } from "./runtime.js";
 
 // ---------------------------------------------------------------------------
 // Tool grouping — infer group from tool name prefix
 // ---------------------------------------------------------------------------
 
-/** e.g. feishu_calendar_event → feishu-calendar */
+/**
+ * Infer a tool group from the tool name.
+ * 3+ segments: first two (feishu_calendar_event → feishu-calendar)
+ * 1-2 segments: first only (feishu_oauth → feishu)
+ */
 function inferToolGroup(name: string): string {
   const parts = name.split("_");
-  if (parts.length >= 2) return `${parts[0]}-${parts[1]}`;
+  if (parts.length >= 3) return `${parts[0]}-${parts[1]}`;
   return parts[0];
 }
 
@@ -101,9 +105,13 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
         //   { channels: { feishu: { appId, appSecret, accounts: { default: {...} } } } }
         const cfg = { channels: sidecarConfig.channels };
 
-        // Route target: prefer the feishu_to value captured at inbound time
-        // (e.g. "user:ou_xxx" or "oc_xxx"), fall back to chatId.
-        const to = msg.context?.feishu_to || chatId;
+        // Route target: use lifecycle hook, or fall back to context fields / chatId.
+        let to: string;
+        if (channelPlugin.lifecycle?.resolveOutboundTarget) {
+          to = channelPlugin.lifecycle.resolveOutboundTarget(msg.context ?? {}, chatId);
+        } else {
+          to = msg.context?.channel_target || msg.context?.feishu_to || chatId;
+        }
 
         console.log(`[bridge] outbound: channel=${sourceChannel} to=${to} accountId=${accountId} textLen=${msg.content?.length}`);
 
@@ -112,14 +120,29 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
         const typing = pendingTyping.get(sessionId);
         if (typing) {
           pendingTyping.delete(sessionId);
-          try {
-            const { removeTypingIndicator } = require(
-              require("path").dirname(require.resolve("@larksuite/openclaw-lark"))
-                + "/src/messaging/outbound/typing.js"
-            );
-            await removeTypingIndicator({ cfg: typing.cfg, state: typing.typingState, accountId: typing.accountId });
-          } catch (e: any) {
-            console.log(`[bridge] typing indicator removal failed: ${e.message}`);
+
+          if (channelPlugin.lifecycle?.onOutboundReply) {
+            // Use lifecycle hook.
+            try {
+              await channelPlugin.lifecycle.onOutboundReply({
+                cfg: typing.cfg,
+                typingState: typing.typingState,
+                accountId: typing.accountId,
+              });
+            } catch (e: any) {
+              console.log(`[bridge] lifecycle typing removal failed: ${e.message}`);
+            }
+          } else {
+            // Legacy fallback: try openclaw-lark typing indicator removal.
+            try {
+              const { removeTypingIndicator } = require(
+                require("path").dirname(require.resolve("@larksuite/openclaw-lark"))
+                  + "/src/messaging/outbound/typing.js"
+              );
+              await removeTypingIndicator({ cfg: typing.cfg, state: typing.typingState, accountId: typing.accountId });
+            } catch (e: any) {
+              console.log(`[bridge] typing indicator removal failed: ${e.message}`);
+            }
           }
         }
 
@@ -144,14 +167,14 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
         name: t.name,
         description: t.description,
         parameters: t.parameters,
-        group: inferToolGroup(t.name),
+        group: t.group ?? inferToolGroup(t.name),
       }));
       res.json(tools);
     });
 
     // Tool execution — calls the registered tool by name.
-    // Accepts { params, context? } where context carries session info
-    // for constructing a LarkTicket (needed by auto-auth).
+    // Accepts { params, context?, session_id? } where context carries session info
+    // for constructing channel-specific auth context.
     app.post("/tools/:name", async (req, res) => {
       const tool = registry.tools.get(req.params.name);
       if (!tool) {
@@ -163,21 +186,42 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
         const params = req.body?.params ?? req.body ?? {};
         const id = req.body?.id ?? `call_${Date.now()}`;
 
-        // Wrap in LarkTicket context from last inbound message so tools
-        // can resolve user identity for OAuth auto-auth.
+        // Find session context: prefer explicit session_id, fall back to most recent.
+        let sessionCtx: SessionContext | null = null;
+        const requestedSession = req.body?.session_id ?? req.body?.context?.session_id;
+        if (requestedSession) {
+          sessionCtx = sessionContexts.get(requestedSession) ?? null;
+        }
+        if (!sessionCtx && sessionContexts.size > 0) {
+          // Fallback: last entry (preserves current single-user behavior).
+          sessionCtx = Array.from(sessionContexts.values()).pop() ?? null;
+        }
+
         let result;
-        if (lastSessionContext) {
-          const pluginDir = require("path").dirname(require.resolve("@larksuite/openclaw-lark"));
-          const { withTicket } = require(pluginDir + "/src/core/lark-ticket.js");
-          const ticket = {
-            messageId: lastSessionContext.messageId,
-            chatId: lastSessionContext.chatId,
-            accountId: lastSessionContext.accountId,
-            senderOpenId: lastSessionContext.senderOpenId,
-            chatType: lastSessionContext.chatType,
-            startTime: Date.now(),
-          };
-          result = await withTicket(ticket, () => tool.execute(id, params));
+        if (sessionCtx) {
+          // Try lifecycle hook first, then legacy fallback.
+          const channelPlugin = registry.channels.get(sessionCtx.channel);
+
+          if (channelPlugin?.lifecycle?.wrapToolExecution) {
+            result = await channelPlugin.lifecycle.wrapToolExecution(sessionCtx, () => tool.execute(id, params));
+          } else {
+            // Legacy fallback: try openclaw-lark LarkTicket wrapping.
+            try {
+              const pluginDir = require("path").dirname(require.resolve("@larksuite/openclaw-lark"));
+              const { withTicket } = require(pluginDir + "/src/core/lark-ticket.js");
+              const ticket = {
+                messageId: sessionCtx.messageId,
+                chatId: sessionCtx.chatId,
+                accountId: sessionCtx.accountId,
+                senderOpenId: sessionCtx.senderId,
+                chatType: sessionCtx.chatType,
+                startTime: Date.now(),
+              };
+              result = await withTicket(ticket, () => tool.execute(id, params));
+            } catch {
+              result = await tool.execute(id, params);
+            }
+          }
         } else {
           result = await tool.execute(id, params);
         }

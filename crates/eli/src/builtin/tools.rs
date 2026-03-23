@@ -568,19 +568,7 @@ fn tool_skill() -> Tool {
                             skill.location.display()
                         ))
                     }
-                    None => {
-                        // Fallback: check sidecar skills.
-                        let sidecar_skills = crate::tools::SIDECAR_SKILLS.lock().unwrap();
-                        if let Some(skill) = sidecar_skills
-                            .iter()
-                            .find(|s| s.name.to_lowercase() == name.to_lowercase())
-                        {
-                            let body = skill.body().unwrap_or_else(|| "(no content)".to_owned());
-                            ok_val(format!("Source: sidecar\n---\n{body}"))
-                        } else {
-                            ok_val("(no such skill)")
-                        }
-                    }
+                    None => ok_val("(no such skill)")
                 }
             })
         },
@@ -959,18 +947,6 @@ fn tool_sidecar() -> Tool {
                     return Err(ConduitError::new(
                         ErrorKind::Tool,
                         "missing required parameter: tool",
-                    ));
-                }
-
-                // Validate tool exists.
-                let exists = {
-                    let tools = crate::tools::SIDECAR_TOOLS.lock().unwrap();
-                    tools.contains_key(&tool_name)
-                };
-                if !exists {
-                    return Err(ConduitError::new(
-                        ErrorKind::Tool,
-                        format!("unknown sidecar tool: {tool_name}"),
                     ));
                 }
 

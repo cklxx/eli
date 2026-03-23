@@ -31,8 +31,8 @@ const mockChannel: ChannelPlugin = {
   capabilities: { chatTypes: ["direct"] },
   outbound: {
     deliveryMode: "direct",
-    sendText: async ({ text, target, accountId }) => {
-      sentMessages.push({ text, chatId: target.chatId, accountId });
+    sendText: async ({ text, to, accountId }: any) => {
+      sentMessages.push({ text, chatId: to, accountId });
       return { ok: true };
     },
   },

@@ -1250,10 +1250,18 @@ fn start_sidecar(wh: &crate::channels::webhook::WebhookSettings) -> Option<std::
     println!("Starting sidecar from {}...", sidecar_dir.display());
 
     let eli_url = format!("http://127.0.0.1:{}", wh.listen_port);
+    // Pass workspace path so sidecar writes SKILL.md files to the project root,
+    // where discover_skills() can find them.
+    let workspace = std::env::current_dir()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
     match std::process::Command::new("node")
         .arg("start.cjs")
         .current_dir(&sidecar_dir)
         .env("SIDECAR_ELI_URL", &eli_url)
+        .env("SIDECAR_SKILLS_DIR", &workspace)
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .spawn()
@@ -1269,23 +1277,18 @@ fn start_sidecar(wh: &crate::channels::webhook::WebhookSettings) -> Option<std::
     }
 }
 
-/// Fetch tool definitions from the sidecar and register them as HTTP proxy tools.
-/// Fetch tool definitions from the sidecar, group them into skills for
-/// progressive disclosure, and store them for the `sidecar` bridge tool.
-async fn register_sidecar_tools(sidecar_url: &str) -> anyhow::Result<()> {
-    use crate::skills::SkillMetadata;
-    use crate::tools::{SIDECAR_SKILLS, SIDECAR_TOOLS, SIDECAR_URL, SidecarToolDef};
-
+/// Wait for the sidecar to be ready and register its URL for the bridge tool.
+/// Skills are discovered from .agents/skills/ SKILL.md files (standard protocol)
+/// — the sidecar writes them to disk on startup.
+async fn wait_for_sidecar(sidecar_url: &str) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
-    let tools_url = format!("{sidecar_url}/tools");
 
-    // Retry a few times while sidecar starts up.
-    let mut tools_json: Vec<serde_json::Value> = Vec::new();
     for attempt in 0..15 {
-        match client.get(&tools_url).send().await {
+        match client.get(format!("{sidecar_url}/health")).send().await {
             Ok(resp) if resp.status().is_success() => {
-                tools_json = resp.json().await?;
-                break;
+                *crate::tools::SIDECAR_URL.lock().unwrap() = Some(sidecar_url.to_owned());
+                println!("Sidecar ready at {sidecar_url} (skills via .agents/skills/)");
+                return Ok(());
             }
             _ => {
                 if attempt < 14 {
@@ -1294,112 +1297,7 @@ async fn register_sidecar_tools(sidecar_url: &str) -> anyhow::Result<()> {
             }
         }
     }
-
-    if tools_json.is_empty() {
-        anyhow::bail!("no tools returned from sidecar");
-    }
-
-    // Store the sidecar URL for the bridge tool.
-    *SIDECAR_URL.lock().unwrap() = Some(sidecar_url.to_owned());
-
-    // Parse and group tools.
-    let mut groups: std::collections::HashMap<String, Vec<SidecarToolDef>> =
-        std::collections::HashMap::new();
-
-    for tool_def in &tools_json {
-        let name = tool_def
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_owned();
-        if name.is_empty() {
-            continue;
-        }
-        let description = tool_def
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_owned();
-        let parameters = tool_def
-            .get("parameters")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
-        let group = tool_def
-            .get("group")
-            .and_then(|v| v.as_str())
-            .unwrap_or("sidecar")
-            .to_owned();
-
-        let def = SidecarToolDef {
-            name: name.clone(),
-            description,
-            parameters,
-            group: group.clone(),
-        };
-
-        groups.entry(group).or_default().push(def);
-    }
-
-    // Store all tools for the bridge.
-    {
-        let mut store = SIDECAR_TOOLS.lock().unwrap();
-        for tools in groups.values() {
-            for t in tools {
-                store.insert(t.name.clone(), t.clone());
-            }
-        }
-    }
-
-    // Synthesize a skill per group.
-    let mut skills: Vec<SkillMetadata> = Vec::new();
-    for (group_name, tools) in &groups {
-        // Build group description from tool names.
-        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        let group_desc = format!("{} tools: {}", tools.len(), tool_names.join(", "));
-
-        // Build the skill body with tool details.
-        let mut body = String::from(
-            "Call tools in this group via: sidecar(tool=\"<name>\", params={...})\n\n",
-        );
-        for t in tools {
-            body.push_str(&format!("## {}\n", t.name));
-            if !t.description.is_empty() {
-                body.push_str(&t.description);
-                body.push('\n');
-            }
-            // Render parameter descriptions from JSON schema.
-            if let Some(props) = t.parameters.get("properties").and_then(|p| p.as_object())
-                && !props.is_empty()
-            {
-                body.push_str("Parameters:\n");
-                for (pname, pschema) in props {
-                    let ptype = pschema
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("any");
-                    let pdesc = pschema
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if pdesc.is_empty() {
-                        body.push_str(&format!("- {pname}: {ptype}\n"));
-                    } else {
-                        body.push_str(&format!("- {pname} ({ptype}): {pdesc}\n"));
-                    }
-                }
-            }
-            body.push('\n');
-        }
-
-        skills.push(SkillMetadata::synthesized(group_name, &group_desc, body));
-    }
-
-    let skill_count = skills.len();
-    let tool_count: usize = groups.values().map(|v| v.len()).sum();
-    *SIDECAR_SKILLS.lock().unwrap() = skills;
-
-    println!("Synthesized {skill_count} sidecar skills from {tool_count} tools");
-    Ok(())
+    anyhow::bail!("sidecar not reachable at {sidecar_url}");
 }
 
 /// Start channel listeners (Telegram, Webhook, etc.).
@@ -1469,12 +1367,12 @@ async fn gateway_command(enable_channels: Vec<String>) -> anyhow::Result<()> {
         );
     }
 
-    // -- Sidecar tools --
-    // Wait for sidecar to be ready, then fetch and register its tools.
+    // -- Sidecar --
+    // Wait for sidecar to be ready. Skills are on disk (.agents/skills/).
     if sidecar_child.is_some()
-        && let Err(e) = register_sidecar_tools("http://127.0.0.1:3101").await
+        && let Err(e) = wait_for_sidecar("http://127.0.0.1:3101").await
     {
-        eprintln!("Warning: failed to register sidecar tools: {e}");
+        eprintln!("Warning: sidecar not ready: {e}");
     }
 
     // Handle Ctrl-C.

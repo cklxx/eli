@@ -3,11 +3,21 @@
   "version": "0.2.0",
   "description": "OpenClaw plugin bridge for eli — load any OpenClaw channel plugin over HTTP",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "start.cjs"],
   "bin": {
     "eli-sidecar": "start.cjs"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build",
     "start": "node start.cjs",
     "dev": "node --watch start.cjs",
     "test": "bun test"

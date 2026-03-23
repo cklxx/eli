@@ -8,7 +8,7 @@ process.on("uncaughtException", (err) => {
 
 import { loadConfig, type SidecarConfig } from "./config.js";
 import { initBridge, startOutboundServer } from "./bridge.js";
-import { loadPlugins, startChannels, stopChannels } from "./runtime.js";
+import { loadPlugins, startChannels, stopChannels, cleanupInstalledSkills } from "./runtime.js";
 import { registry } from "./registry.js";
 
 // ---------------------------------------------------------------------------
@@ -22,6 +22,8 @@ export type {
   ToolDefinition,
   ToolResult,
   ChannelPlugin,
+  ChannelLifecycleHooks,
+  SessionContext,
   InboundEnvelope,
   EliChannelMessage,
 } from "./types.js";
@@ -29,6 +31,8 @@ export type {
 export interface Sidecar {
   config: SidecarConfig;
   server: import("node:http").Server;
+  /** Execute a tool by name. */
+  callTool(name: string, params?: Record<string, any>): Promise<any>;
   stop(): Promise<void>;
 }
 
@@ -81,8 +85,14 @@ export async function createSidecar(
   return {
     config,
     server,
+    async callTool(name: string, params: Record<string, any> = {}) {
+      const tool = registry.tools.get(name);
+      if (!tool) throw new Error(`unknown tool: ${name}`);
+      return tool.execute(`call_${Date.now()}`, params);
+    },
     async stop() {
       console.log("[sidecar] shutting down...");
+      cleanupInstalledSkills();
       server.close();
       await stopChannels(config);
     },

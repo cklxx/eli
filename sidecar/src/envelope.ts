@@ -23,7 +23,7 @@ export function envelopeToEliMessage(env: InboundEnvelope): EliChannelMessage {
       chat_type: env.chatType,
       group_label: env.groupLabel ?? "",
       reply_to_id: env.replyToId ?? "",
-      feishu_to: (env as any).feishu_to ?? "",
+      channel_target: env.channel_target ?? (env as any).feishu_to ?? "",
     },
     output_channel: "webhook",
   };

@@ -33,10 +33,13 @@ export interface ChannelOutbound {
 }
 
 export interface OutboundTextParams {
+  cfg: any;
+  to: string;
   text: string;
-  target: OutboundTarget;
-  config: any;
   accountId: string;
+  replyToId?: string;
+  threadId?: string;
+  [key: string]: any;
 }
 
 export interface OutboundMediaParams {
@@ -79,7 +82,9 @@ export interface GatewayStartParams {
 
 export interface GatewayStopParams {
   accountId: string;
-  config: any;
+  cfg?: any;
+  config?: any;
+  [key: string]: any;
 }
 
 /** The composable channel plugin object registered via api.registerChannel(). */
@@ -90,11 +95,45 @@ export interface ChannelPlugin {
   capabilities: ChannelCapabilities;
   outbound?: ChannelOutbound;
   gateway?: ChannelGateway;
+  lifecycle?: ChannelLifecycleHooks;
   security?: any;
   groups?: any;
   mentions?: any;
   threading?: any;
   actions?: any;
+}
+
+// ---------------------------------------------------------------------------
+// Channel lifecycle hooks — optional per-plugin capabilities.
+// ---------------------------------------------------------------------------
+
+/** Per-session context stored at inbound time, used for tool execution. */
+export interface SessionContext {
+  channel: string;
+  messageId: string;
+  chatId: string;
+  accountId: string;
+  senderId: string;
+  chatType: string;
+  cfg: any;
+}
+
+/**
+ * Optional hooks a channel plugin can provide to handle plugin-specific
+ * concerns (runtime injection, typing indicators, tool auth context)
+ * without hardcoding them in the sidecar core.
+ */
+export interface ChannelLifecycleHooks {
+  /** Called before plugin.register() to inject runtime (e.g. LarkClient.setRuntime). */
+  initRuntime?(pluginRuntime: any, pluginName: string): void;
+  /** Called on inbound message — return typing state for cleanup. */
+  onInboundMessage?(params: { cfg: any; messageId: string; accountId: string; sessionId: string }): Promise<any>;
+  /** Called on outbound reply — clean up typing indicators etc. */
+  onOutboundReply?(params: { cfg: any; typingState: any; accountId: string }): Promise<void>;
+  /** Wrap tool execution with channel context (e.g. LarkTicket for OAuth). */
+  wrapToolExecution?<T>(ctx: SessionContext, fn: () => Promise<T>): Promise<T>;
+  /** Resolve outbound target from message context. Default: chatId. */
+  resolveOutboundTarget?(context: Record<string, any>, chatId: string): string;
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +162,8 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, any>;
+  /** Plugin-declared group name. Falls back to heuristic if omitted. */
+  group?: string;
   execute(id: string, params: any): Promise<ToolResult>;
 }
 
@@ -161,6 +202,8 @@ export interface OpenClawPluginDefinition {
   name?: string;
   description?: string;
   configSchema?: Record<string, any>;
+  /** Pre-registration lifecycle hooks (e.g. runtime injection). */
+  lifecycle?: ChannelLifecycleHooks;
   register(api: OpenClawPluginApi): void;
 }
 
