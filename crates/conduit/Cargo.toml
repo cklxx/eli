@@ -1,0 +1,35 @@
+[package]
+name = "conduit"
+version = "0.6.0"
+edition = "2024"
+description = "Core library for the eli AI assistant"
+license = "MIT"
+repository = "https://github.com/cklxx/eli"
+homepage = "https://github.com/cklxx/eli"
+keywords = ["ai", "llm", "assistant", "library"]
+categories = ["api-bindings"]
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+schemars = "0.8"
+base64 = "0.22"
+futures = "0.3"
+tokio-stream = "0.1"
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+url = "2"
+dirs = "6"
+open = "5"
+
+[dev-dependencies]
+tempfile = "3"

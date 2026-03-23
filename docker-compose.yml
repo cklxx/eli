@@ -1,0 +1,15 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eli
+    env_file:
+      - .env
+    volumes:
+      - ${ELI_WORKSPACE_PATH:-.}:/workspace
+      - ${ELI_HOME:-${HOME}/.eli}:/data
+      - ${ELI_AGENT_HOME:-${HOME}/.agents}:/root/.agents
+    stdin_open: true
+    tty: true
+    restart: unless-stopped

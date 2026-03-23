@@ -1,0 +1,957 @@
+//! Tape store implementations: ForkTapeStore with context-var fork/merge and
+//! FileTapeStore with JSONL persistence.
+
+use std::collections::HashMap;
+use std::fs;
+use std::io::{BufRead, BufReader, Write as IoWrite};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use conduit::tape::store::fetch_all_in_memory;
+use conduit::tape::{AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore, TapeStore};
+use conduit::{ConduitError, TapeEntry, TapeQuery};
+use serde_json::Value;
+
+// ---------------------------------------------------------------------------
+// Context variables (task-local)
+// ---------------------------------------------------------------------------
+
+tokio::task_local! {
+    static CURRENT_STORE: InMemoryTapeStore;
+    static CURRENT_FORK_TAPE: String;
+    static CURRENT_TAPE_WAS_RESET: std::cell::Cell<bool>;
+}
+
+// ---------------------------------------------------------------------------
+// ForkTapeStore
+// ---------------------------------------------------------------------------
+
+/// A tape store that forks writes into an in-memory store and merges them back
+/// into the parent on scope exit. Mirrors the Python `ForkTapeStore`.
+#[derive(Clone)]
+pub struct ForkTapeStore {
+    parent: Arc<dyn AsyncTapeStore>,
+}
+
+impl ForkTapeStore {
+    /// Wrap a sync `TapeStore` (adapted to async) as the parent.
+    pub fn from_sync<S: TapeStore + 'static>(store: S) -> Self {
+        Self {
+            parent: Arc::new(AsyncTapeStoreAdapter::new(store)),
+        }
+    }
+
+    /// Wrap an existing `AsyncTapeStore` as the parent.
+    pub fn from_async(store: Arc<dyn AsyncTapeStore>) -> Self {
+        Self { parent: store }
+    }
+
+    /// List tapes from the parent store.
+    pub async fn list_tapes(&self) -> Result<Vec<String>, ConduitError> {
+        self.parent.list_tapes().await
+    }
+
+    /// Reset a tape. If inside a fork scope for the same tape, marks reset
+    /// instead of propagating immediately.
+    pub async fn reset(&self, tape: &str) -> Result<(), ConduitError> {
+        let is_fork_tape = CURRENT_FORK_TAPE.try_with(|t| t == tape).unwrap_or(false);
+        if is_fork_tape
+            && let Ok(()) = CURRENT_STORE.try_with(|store| {
+                let _ = store.reset(tape);
+            })
+        {
+            let _ = CURRENT_TAPE_WAS_RESET.try_with(|c| c.set(true));
+            return Ok(());
+        }
+        self.parent.reset(tape).await
+    }
+
+    /// Fetch entries, combining parent and forked stores.
+    pub async fn fetch_all(&self, query: &TapeQuery) -> Result<Vec<TapeEntry>, ConduitError> {
+        let fork_tape = CURRENT_FORK_TAPE.try_with(|t| t.clone()).ok();
+        let was_reset = CURRENT_TAPE_WAS_RESET
+            .try_with(|c| c.get())
+            .unwrap_or(false);
+
+        let mut parent_entries: Vec<TapeEntry> = Vec::new();
+        let is_fork_query = fork_tape.as_deref() == Some(&query.tape);
+        if !(is_fork_query && was_reset) {
+            match self.parent.fetch_all(query).await {
+                Ok(entries) => parent_entries = entries,
+                Err(e) => {
+                    tracing::error!(error = %e, tape = %query.tape, "failed to read parent tape");
+                }
+            }
+        }
+
+        let mut fork_entries: Vec<TapeEntry> = Vec::new();
+        let _ = CURRENT_STORE.try_with(|store| {
+            if let Some(entries) = store.read(&query.tape) {
+                for entry in entries {
+                    if !query.kinds.is_empty() && !query.kinds.contains(&entry.kind) {
+                        continue;
+                    }
+                    if entry.kind == "anchor" {
+                        let anchor_name = entry
+                            .payload
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if query.after_last || (query.after_anchor.as_deref() == Some(anchor_name))
+                        {
+                            fork_entries.clear();
+                            parent_entries.clear();
+                            continue;
+                        }
+                    }
+                    fork_entries.push(entry);
+                }
+            }
+        });
+
+        parent_entries.extend(fork_entries);
+        Ok(parent_entries)
+    }
+
+    /// Append an entry to the in-memory fork store (or parent if not in fork scope).
+    pub async fn append(&self, tape: &str, entry: &TapeEntry) -> Result<(), ConduitError> {
+        let appended = CURRENT_STORE
+            .try_with(|store| store.append(tape, entry))
+            .ok();
+        match appended {
+            Some(result) => result,
+            None => self.parent.append(tape, entry).await,
+        }
+    }
+
+    /// Fork writes for `tape` into an in-memory store. On scope end,
+    /// merge forked entries back into the parent if `merge_back` is true.
+    pub async fn fork<F, T>(&self, tape: &str, merge_back: bool, f: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let store = InMemoryTapeStore::new();
+        let store_clone = store.clone();
+        let tape_name = tape.to_owned();
+
+        let result = CURRENT_STORE
+            .scope(
+                store,
+                CURRENT_FORK_TAPE.scope(
+                    tape_name.clone(),
+                    CURRENT_TAPE_WAS_RESET.scope(std::cell::Cell::new(false), f),
+                ),
+            )
+            .await;
+
+        if merge_back && let Some(entries) = store_clone.read(&tape_name) {
+            for entry in &entries {
+                if let Err(e) = self.parent.append(&tape_name, entry).await {
+                    tracing::error!(error = %e, tape = %tape_name, "failed to merge tape entry");
+                }
+            }
+            if !entries.is_empty() {
+                tracing::info!(
+                    count = entries.len(),
+                    tape = %tape_name,
+                    "Merged entries into tape"
+                );
+            }
+        }
+
+        result
+    }
+}
+
+#[async_trait]
+impl AsyncTapeStore for ForkTapeStore {
+    async fn list_tapes(&self) -> Result<Vec<String>, ConduitError> {
+        ForkTapeStore::list_tapes(self).await
+    }
+
+    async fn reset(&self, tape: &str) -> Result<(), ConduitError> {
+        ForkTapeStore::reset(self, tape).await
+    }
+
+    async fn fetch_all(&self, query: &TapeQuery) -> Result<Vec<TapeEntry>, ConduitError> {
+        ForkTapeStore::fetch_all(self, query).await
+    }
+
+    async fn append(&self, tape: &str, entry: &TapeEntry) -> Result<(), ConduitError> {
+        ForkTapeStore::append(self, tape, entry).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FileTapeStore
+// ---------------------------------------------------------------------------
+
+/// A `TapeStore` that persists tapes as JSONL files under a directory.
+pub struct FileTapeStore {
+    directory: PathBuf,
+    tape_files: Mutex<HashMap<String, TapeFile>>,
+}
+
+impl FileTapeStore {
+    pub fn new(directory: PathBuf) -> Self {
+        fs::create_dir_all(&directory).ok();
+        Self {
+            directory,
+            tape_files: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn tape_file_path(&self, tape: &str) -> PathBuf {
+        self.directory.join(format!("{tape}.jsonl"))
+    }
+
+    fn with_tape_file<F, R>(&self, tape: &str, f: F) -> R
+    where
+        F: FnOnce(&mut TapeFile) -> R,
+    {
+        let mut files = self.tape_files.lock().unwrap();
+        let tf = files
+            .entry(tape.to_owned())
+            .or_insert_with(|| TapeFile::new(self.tape_file_path(tape)));
+        f(tf)
+    }
+}
+
+impl TapeStore for FileTapeStore {
+    fn list_tapes(&self) -> Result<Vec<String>, ConduitError> {
+        let mut result: Vec<String> = Vec::new();
+        if let Ok(entries) = fs::read_dir(&self.directory) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                    && stem.contains("__")
+                {
+                    result.push(stem.to_owned());
+                }
+            }
+        }
+        result.sort();
+        Ok(result)
+    }
+
+    fn reset(&self, tape: &str) -> Result<(), ConduitError> {
+        self.with_tape_file(tape, |tf| tf.reset());
+        Ok(())
+    }
+
+    fn fetch_all(&self, query: &TapeQuery) -> Result<Vec<TapeEntry>, ConduitError> {
+        let entries = self.with_tape_file(&query.tape, |tf| tf.read());
+        if let Some(ref q) = query.query_text {
+            let limit = query.limit.unwrap_or(20);
+            return Ok(filter_entries(&entries, q, limit));
+        }
+        fetch_all_in_memory(&entries, query)
+    }
+
+    fn append(&self, tape: &str, entry: &TapeEntry) -> Result<(), ConduitError> {
+        self.with_tape_file(tape, |tf| tf.append(entry));
+        Ok(())
+    }
+}
+
+/// Substring filter for search queries.
+fn filter_entries(entries: &[TapeEntry], query: &str, limit: usize) -> Vec<TapeEntry> {
+    let normalized = query.trim().to_lowercase();
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let mut results: Vec<TapeEntry> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for entry in entries.iter().rev() {
+        let payload_text = entry_text(entry).to_lowercase();
+        if seen.contains(&payload_text) {
+            continue;
+        }
+        seen.insert(payload_text.clone());
+        if payload_text.contains(&normalized) {
+            results.push(entry.clone());
+            if results.len() >= limit {
+                break;
+            }
+        }
+    }
+    results
+}
+
+/// Extract a text representation of a tape entry for search purposes.
+fn entry_text(entry: &TapeEntry) -> String {
+    if let Some(text) = entry.payload.get("content").and_then(|v| v.as_str()) {
+        return text.to_owned();
+    }
+    if let Some(text) = entry.payload.get("text").and_then(|v| v.as_str()) {
+        return text.to_owned();
+    }
+    serde_json::to_string(&entry.payload).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// TapeFile
+// ---------------------------------------------------------------------------
+
+/// Helper for a single JSONL tape file with caching.
+pub struct TapeFile {
+    path: PathBuf,
+    read_entries: Vec<TapeEntry>,
+    read_offset: u64,
+}
+
+impl TapeFile {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            read_entries: Vec::new(),
+            read_offset: 0,
+        }
+    }
+
+    fn next_id(&self) -> i64 {
+        self.read_entries.last().map(|e| e.id + 1).unwrap_or(1)
+    }
+
+    fn reset_cache(&mut self) {
+        self.read_entries.clear();
+        self.read_offset = 0;
+    }
+
+    pub fn reset(&mut self) {
+        if self.path.exists()
+            && let Err(e) = fs::remove_file(&self.path)
+        {
+            tracing::warn!(
+                error = %e,
+                path = %self.path.display(),
+                "failed to remove tape file"
+            );
+        }
+        self.reset_cache();
+    }
+
+    pub fn read(&mut self) -> Vec<TapeEntry> {
+        if !self.path.exists() {
+            self.reset_cache();
+            return Vec::new();
+        }
+
+        let file_size = fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        if file_size < self.read_offset {
+            self.reset_cache();
+        }
+
+        if let Ok(file) = fs::File::open(&self.path) {
+            let reader = BufReader::new(file);
+            let mut current_offset: u64 = 0;
+            for line_result in reader.lines() {
+                let Ok(raw_line) = line_result else {
+                    continue;
+                };
+                let line_len = raw_line.len() as u64 + 1;
+                current_offset += line_len;
+                if current_offset <= self.read_offset {
+                    continue;
+                }
+                let line = raw_line.trim().to_owned();
+                if line.is_empty() {
+                    continue;
+                }
+                let Ok(payload) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if let Some(entry) = entry_from_payload(&payload) {
+                    self.read_entries.push(entry);
+                }
+            }
+            self.read_offset = file_size;
+        }
+
+        self.read_entries.clone()
+    }
+
+    pub fn append(&mut self, entry: &TapeEntry) {
+        let _ = self.read();
+
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+
+        let next_id = self.next_id();
+        let stored = TapeEntry::new(
+            next_id,
+            entry.kind.clone(),
+            entry.payload.clone(),
+            entry.meta.clone(),
+            entry.date.clone(),
+        );
+
+        let mut file = match fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    path = %self.path.display(),
+                    "failed to open tape file for append"
+                );
+                return;
+            }
+        };
+
+        let json = match serde_json::to_string(&stored) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    path = %self.path.display(),
+                    "failed to serialize tape entry"
+                );
+                return;
+            }
+        };
+
+        let line = format!("{json}\n");
+        if let Err(e) = file.write_all(line.as_bytes()) {
+            tracing::error!(
+                error = %e,
+                path = %self.path.display(),
+                "failed to append tape entry"
+            );
+            return;
+        }
+
+        self.read_entries.push(stored);
+        self.read_offset += line.len() as u64;
+    }
+}
+
+/// Parse a single JSON object into a `TapeEntry`.
+fn entry_from_payload(payload: &Value) -> Option<TapeEntry> {
+    let obj = payload.as_object()?;
+    let id = obj.get("id")?.as_i64()?;
+    let kind = obj.get("kind")?.as_str()?.to_owned();
+    let entry_payload = obj.get("payload")?.clone();
+    let meta = obj
+        .get("meta")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
+
+    let date = if let Some(d) = obj.get("date").and_then(|v| v.as_str()) {
+        d.to_owned()
+    } else {
+        let ts = obj.get("timestamp").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        chrono::DateTime::from_timestamp(ts as i64, 0)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default()
+    };
+
+    Some(TapeEntry::new(id, kind, entry_payload, meta, date))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use conduit::tape::{InMemoryTapeStore, TapeStore};
+    use serde_json::json;
+
+    // -- FileTapeStore JSONL round-trip tests ----------------------------------
+
+    #[test]
+    fn test_file_tape_store_append_and_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileTapeStore::new(tmp.path().to_path_buf());
+
+        let entry = TapeEntry::new(
+            0,
+            "message".into(),
+            json!({"content": "hello"}),
+            json!({}),
+            "2024-01-01T00:00:00Z".into(),
+        );
+        store.append("test-tape", &entry).unwrap();
+
+        let query = TapeQuery::new("test-tape");
+        let entries = store.fetch_all(&query).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, 1);
+        assert_eq!(entries[0].payload["content"], "hello");
+    }
+
+    #[test]
+    fn test_file_tape_store_monotonic_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileTapeStore::new(tmp.path().to_path_buf());
+
+        for i in 0..3 {
+            let entry = TapeEntry::new(
+                0,
+                "event".into(),
+                json!({"name": "step", "data": {"n": i}}),
+                json!({}),
+                "2024-01-01T00:00:00Z".into(),
+            );
+            store.append("tape", &entry).unwrap();
+        }
+
+        let query = TapeQuery::new("tape");
+        let entries = store.fetch_all(&query).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].id, 1);
+        assert_eq!(entries[1].id, 2);
+        assert_eq!(entries[2].id, 3);
+    }
+
+    #[test]
+    fn test_file_tape_store_reset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileTapeStore::new(tmp.path().to_path_buf());
+
+        let entry = TapeEntry::new(
+            0,
+            "message".into(),
+            json!({"content": "hi"}),
+            json!({}),
+            "2024-01-01T00:00:00Z".into(),
+        );
+        store.append("tape", &entry).unwrap();
+        store.reset("tape").unwrap();
+
+        let query = TapeQuery::new("tape");
+        let entries = store.fetch_all(&query).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_file_tape_store_list_tapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileTapeStore::new(tmp.path().to_path_buf());
+
+        // list_tapes only returns tapes with __ in the name
+        let entry = TapeEntry::new(
+            0,
+            "message".into(),
+            json!({}),
+            json!({}),
+            "2024-01-01T00:00:00Z".into(),
+        );
+        store.append("ns__tape1", &entry).unwrap();
+        store.append("ns__tape2", &entry).unwrap();
+        store.append("simple", &entry).unwrap();
+
+        let tapes = store.list_tapes().unwrap();
+        assert!(tapes.contains(&"ns__tape1".to_owned()));
+        assert!(tapes.contains(&"ns__tape2".to_owned()));
+        assert!(!tapes.contains(&"simple".to_owned()));
+    }
+
+    #[test]
+    fn test_file_tape_store_jsonl_persistence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+
+        // Write with one store instance
+        {
+            let store = FileTapeStore::new(dir.clone());
+            let entry = TapeEntry::new(
+                0,
+                "message".into(),
+                json!({"content": "persisted"}),
+                json!({}),
+                "2024-01-01T00:00:00Z".into(),
+            );
+            store.append("tape", &entry).unwrap();
+        }
+
+        // Read with a new instance
+        {
+            let store = FileTapeStore::new(dir);
+            let query = TapeQuery::new("tape");
+            let entries = store.fetch_all(&query).unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].payload["content"], "persisted");
+        }
+    }
+
+    // -- ForkTapeStore tests --------------------------------------------------
+
+    #[tokio::test]
+    async fn test_fork_merge_back_true_merges_entries() {
+        let parent = InMemoryTapeStore::new();
+        let store = ForkTapeStore::from_sync(parent.clone());
+
+        store
+            .fork("test-tape", true, async {
+                store
+                    .append(
+                        "test-tape",
+                        &TapeEntry::new(
+                            0,
+                            "event".into(),
+                            json!({"name": "step"}),
+                            json!({}),
+                            "2024-01-01T00:00:00Z".into(),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                store
+                    .append(
+                        "test-tape",
+                        &TapeEntry::new(
+                            0,
+                            "event".into(),
+                            json!({"name": "step2"}),
+                            json!({}),
+                            "2024-01-01T00:00:00Z".into(),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            })
+            .await;
+
+        let entries = parent.read("test-tape");
+        assert!(entries.is_some());
+        assert_eq!(entries.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_fork_merge_back_false_discards_entries() {
+        let parent = InMemoryTapeStore::new();
+        let store = ForkTapeStore::from_sync(parent.clone());
+
+        store
+            .fork("test-tape", false, async {
+                store
+                    .append(
+                        "test-tape",
+                        &TapeEntry::new(
+                            0,
+                            "event".into(),
+                            json!({"name": "step"}),
+                            json!({}),
+                            "2024-01-01T00:00:00Z".into(),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            })
+            .await;
+
+        let entries = parent.read("test-tape");
+        assert!(entries.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_fork_reset_with_merge_back_false_preserves_parent() {
+        let parent = InMemoryTapeStore::new();
+        parent
+            .append(
+                "test-tape",
+                &TapeEntry::new(
+                    0,
+                    "event".into(),
+                    json!({"name": "before"}),
+                    json!({}),
+                    "2024-01-01T00:00:00Z".into(),
+                ),
+            )
+            .unwrap();
+
+        let store = ForkTapeStore::from_sync(parent.clone());
+
+        store
+            .fork("test-tape", false, async {
+                store.reset("test-tape").await.unwrap();
+                store
+                    .append(
+                        "test-tape",
+                        &TapeEntry::new(
+                            0,
+                            "event".into(),
+                            json!({"name": "inside"}),
+                            json!({}),
+                            "2024-01-01T00:00:00Z".into(),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            })
+            .await;
+
+        let entries = parent.read("test-tape").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].payload["name"], "before");
+    }
+
+    #[tokio::test]
+    async fn test_fork_reset_hides_parent_entries_during_fetch() {
+        let parent = InMemoryTapeStore::new();
+        parent
+            .append(
+                "test-tape",
+                &TapeEntry::new(
+                    0,
+                    "event".into(),
+                    json!({"name": "before"}),
+                    json!({}),
+                    "2024-01-01T00:00:00Z".into(),
+                ),
+            )
+            .unwrap();
+
+        let store = ForkTapeStore::from_sync(parent.clone());
+
+        store
+            .fork("test-tape", false, async {
+                store.reset("test-tape").await.unwrap();
+                store
+                    .append(
+                        "test-tape",
+                        &TapeEntry::new(
+                            0,
+                            "event".into(),
+                            json!({"name": "inside"}),
+                            json!({}),
+                            "2024-01-01T00:00:00Z".into(),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+
+                let query = TapeQuery::new("test-tape");
+                let entries = store.fetch_all(&query).await.unwrap();
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].payload["name"], "inside");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_reset_outside_fork_resets_parent() {
+        let parent = InMemoryTapeStore::new();
+        parent
+            .append(
+                "test-tape",
+                &TapeEntry::new(
+                    0,
+                    "event".into(),
+                    json!({"name": "before"}),
+                    json!({}),
+                    "2024-01-01T00:00:00Z".into(),
+                ),
+            )
+            .unwrap();
+
+        let store = ForkTapeStore::from_sync(parent.clone());
+        store.reset("test-tape").await.unwrap();
+
+        let entries = parent.read("test-tape");
+        assert!(entries.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_file_tape_store_monotonic_ids_across_forks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = FileTapeStore::new(tmp.path().to_path_buf());
+        let store = ForkTapeStore::from_sync(parent);
+
+        // Wrap parent reference for reading
+        let parent_read = FileTapeStore::new(tmp.path().to_path_buf());
+
+        store
+            .fork("tape", true, async {
+                store
+                    .append(
+                        "tape",
+                        &TapeEntry::new(
+                            0,
+                            "event".into(),
+                            json!({"name": "first"}),
+                            json!({}),
+                            "2024-01-01T00:00:00Z".into(),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            })
+            .await;
+
+        store
+            .fork("tape", true, async {
+                store
+                    .append(
+                        "tape",
+                        &TapeEntry::new(
+                            0,
+                            "event".into(),
+                            json!({"name": "second"}),
+                            json!({}),
+                            "2024-01-01T00:00:00Z".into(),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            })
+            .await;
+
+        let query = TapeQuery::new("tape");
+        let entries = parent_read.fetch_all(&query).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, 1);
+        assert_eq!(entries[1].id, 2);
+        assert_eq!(entries[0].payload["name"], "first");
+        assert_eq!(entries[1].payload["name"], "second");
+    }
+
+    // -- entry_from_payload tests ---------------------------------------------
+
+    #[test]
+    fn test_entry_from_payload_valid() {
+        let payload = json!({
+            "id": 1,
+            "kind": "message",
+            "payload": {"content": "hello"},
+            "meta": {},
+            "date": "2024-01-01T00:00:00Z"
+        });
+        let entry = entry_from_payload(&payload).unwrap();
+        assert_eq!(entry.id, 1);
+        assert_eq!(entry.kind, "message");
+    }
+
+    #[test]
+    fn test_entry_from_payload_missing_id_returns_none() {
+        let payload = json!({"kind": "message", "payload": {}});
+        assert!(entry_from_payload(&payload).is_none());
+    }
+
+    #[test]
+    fn test_entry_from_payload_not_object_returns_none() {
+        assert!(entry_from_payload(&json!("string")).is_none());
+        assert!(entry_from_payload(&json!(42)).is_none());
+    }
+
+    // -- TapeFile tests -------------------------------------------------------
+
+    #[test]
+    fn test_tape_file_append_and_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.jsonl");
+        let mut tf = TapeFile::new(path);
+
+        let entry = TapeEntry::new(
+            0,
+            "message".into(),
+            json!({"content": "hi"}),
+            json!({}),
+            "2024-01-01T00:00:00Z".into(),
+        );
+        tf.append(&entry);
+
+        let entries = tf.read();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, 1);
+    }
+
+    #[test]
+    fn test_tape_file_reset_clears_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.jsonl");
+        let mut tf = TapeFile::new(path);
+
+        let entry = TapeEntry::new(
+            0,
+            "message".into(),
+            json!({}),
+            json!({}),
+            "2024-01-01T00:00:00Z".into(),
+        );
+        tf.append(&entry);
+        tf.reset();
+
+        let entries = tf.read();
+        assert!(entries.is_empty());
+    }
+
+    // -- filter_entries tests -------------------------------------------------
+
+    #[test]
+    fn test_filter_entries_matches_substring() {
+        let entries = vec![
+            TapeEntry::new(
+                1,
+                "message".into(),
+                json!({"content": "hello world"}),
+                json!({}),
+                "2024-01-01T00:00:00Z".into(),
+            ),
+            TapeEntry::new(
+                2,
+                "message".into(),
+                json!({"content": "goodbye world"}),
+                json!({}),
+                "2024-01-01T00:00:00Z".into(),
+            ),
+            TapeEntry::new(
+                3,
+                "message".into(),
+                json!({"content": "unrelated"}),
+                json!({}),
+                "2024-01-01T00:00:00Z".into(),
+            ),
+        ];
+        let results = filter_entries(&entries, "world", 10);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_entries_empty_query_returns_empty() {
+        let entries = vec![TapeEntry::new(
+            1,
+            "message".into(),
+            json!({"content": "hello"}),
+            json!({}),
+            "2024-01-01T00:00:00Z".into(),
+        )];
+        let results = filter_entries(&entries, "  ", 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_filter_entries_respects_limit() {
+        let entries = vec![
+            TapeEntry::new(
+                1,
+                "message".into(),
+                json!({"content": "match"}),
+                json!({}),
+                "2024-01-01T00:00:00Z".into(),
+            ),
+            TapeEntry::new(
+                2,
+                "message".into(),
+                json!({"content": "match too"}),
+                json!({}),
+                "2024-01-01T00:00:00Z".into(),
+            ),
+            TapeEntry::new(
+                3,
+                "message".into(),
+                json!({"content": "match three"}),
+                json!({}),
+                "2024-01-01T00:00:00Z".into(),
+            ),
+        ];
+        let results = filter_entries(&entries, "match", 2);
+        assert_eq!(results.len(), 2);
+    }
+}

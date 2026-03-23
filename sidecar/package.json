@@ -1,0 +1,24 @@
+{
+  "name": "@eli/sidecar",
+  "version": "0.1.0",
+  "description": "OpenClaw-compatible plugin host bridging external channels to eli",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "node start.cjs",
+    "dev": "node --watch start.cjs",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@larksuite/openclaw-lark": "^2026.3.18",
+    "express": "^5.1.0",
+    "jiti": "^2.6.1",
+    "openclaw": "^2026.3.13"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

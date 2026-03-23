@@ -1,0 +1,17 @@
+{
+  "eli_url": "http://127.0.0.1:3100",
+  "port": 3101,
+  "plugins": [
+    "@larksuite/openclaw-lark"
+  ],
+  "channels": {
+    "lark": {
+      "accounts": {
+        "default": {
+          "appId": "cli_your_app_id",
+          "appSecret": "your_app_secret"
+        }
+      }
+    }
+  }
+}

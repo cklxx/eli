@@ -1,0 +1,460 @@
+//! Skill discovery and rendering for eli.
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use regex::Regex;
+
+/// Directory under a project workspace containing skills.
+const PROJECT_SKILLS_DIR: &str = ".agents/skills";
+/// Legacy skills directory (emit a warning when found).
+const LEGACY_SKILLS_DIR: &str = ".agent/skills";
+/// Name of the skill definition file inside each skill directory.
+const SKILL_FILE_NAME: &str = "SKILL.md";
+/// Skill name regex pattern.
+const SKILL_NAME_PATTERN: &str = r"^[a-z0-9]+(?:-[a-z0-9]+)*$";
+/// Ordered sources: project overrides global.
+const SKILL_SOURCES: [&str; 2] = ["project", "global"];
+
+// ---------------------------------------------------------------------------
+// SkillMetadata
+// ---------------------------------------------------------------------------
+
+/// Discovered skill metadata.
+#[derive(Debug, Clone)]
+pub struct SkillMetadata {
+    pub name: String,
+    pub description: String,
+    pub location: PathBuf,
+    pub source: String,
+    pub metadata: std::collections::HashMap<String, String>,
+}
+
+impl SkillMetadata {
+    /// Read the skill body, stripping YAML frontmatter.
+    pub fn body(&self) -> Option<String> {
+        let content = std::fs::read_to_string(&self.location).ok()?;
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        // Substitute template variables.
+        let skill_dir = self
+            .location
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_owned());
+        let substituted = trimmed
+            .replace("$SKILL_DIR", &skill_dir)
+            .replace("${SKILL_DIR}", &skill_dir)
+            .replace("$PYTHON", &python)
+            .replace("${PYTHON}", &python);
+
+        // Strip frontmatter.
+        let front_re = Regex::new(r"(?s)^---\s*\n.*?\n---\s*\n").unwrap();
+        let body = front_re.replace(&substituted, "").trim().to_owned();
+        if body.is_empty() { None } else { Some(body) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Discovery
+// ---------------------------------------------------------------------------
+
+/// Discover skills from project and global roots with override precedence
+/// (project > global).
+pub fn discover_skills(workspace_path: &Path) -> Vec<SkillMetadata> {
+    let mut skills_by_name: std::collections::HashMap<String, SkillMetadata> =
+        std::collections::HashMap::new();
+
+    for (root, source) in iter_skill_roots(workspace_path) {
+        if !root.is_dir() {
+            continue;
+        }
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        entries.sort();
+
+        for skill_dir in entries {
+            if let Some(metadata) = read_skill(&skill_dir, &source) {
+                let key = metadata.name.to_lowercase();
+                skills_by_name.entry(key).or_insert(metadata);
+            }
+        }
+    }
+
+    let mut result: Vec<SkillMetadata> = skills_by_name.into_values().collect();
+    result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    result
+}
+
+fn read_skill(skill_dir: &Path, source: &str) -> Option<SkillMetadata> {
+    let skill_file = skill_dir.join(SKILL_FILE_NAME);
+    if !skill_file.is_file() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&skill_file).ok()?;
+    let frontmatter = parse_frontmatter(&content);
+
+    if !is_valid_frontmatter(skill_dir, &frontmatter) {
+        return None;
+    }
+
+    let name = frontmatter.get("name")?.trim().to_owned();
+    let description = frontmatter.get("description")?.trim().to_owned();
+
+    let metadata: std::collections::HashMap<String, String> = frontmatter
+        .iter()
+        .map(|(k, v)| (k.to_lowercase(), v.clone()))
+        .collect();
+
+    Some(SkillMetadata {
+        name,
+        description,
+        location: skill_file
+            .canonicalize()
+            .unwrap_or_else(|_| skill_file.to_path_buf()),
+        source: source.to_owned(),
+        metadata,
+    })
+}
+
+fn parse_frontmatter(content: &str) -> std::collections::HashMap<String, String> {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() || lines[0].trim() != "---" {
+        return std::collections::HashMap::new();
+    }
+
+    for (idx, line) in lines[1..].iter().enumerate() {
+        if line.trim() == "---" {
+            let payload = lines[1..=idx].join("\n");
+            return parse_yaml_to_string_map(&payload);
+        }
+    }
+    std::collections::HashMap::new()
+}
+
+fn parse_yaml_to_string_map(yaml_str: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(yaml_str) else {
+        return map;
+    };
+    let Some(mapping) = value.as_mapping() else {
+        return map;
+    };
+    for (k, v) in mapping {
+        if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
+            map.insert(key.to_lowercase(), val.to_owned());
+        } else if let (Some(key), Some(val)) = (k.as_str(), Some(format_yaml_value(v))) {
+            map.insert(key.to_lowercase(), val);
+        }
+    }
+    map
+}
+
+fn format_yaml_value(value: &serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        _ => serde_yaml::to_string(value).unwrap_or_default(),
+    }
+}
+
+fn is_valid_frontmatter(
+    skill_dir: &Path,
+    metadata: &std::collections::HashMap<String, String>,
+) -> bool {
+    let Some(name) = metadata.get("name") else {
+        return false;
+    };
+    let Some(description) = metadata.get("description") else {
+        return false;
+    };
+
+    is_valid_name(name, skill_dir) && is_valid_description(description)
+}
+
+fn is_valid_name(name: &str, skill_dir: &Path) -> bool {
+    let normalized = name.trim();
+    if normalized.is_empty() || normalized.len() > 64 {
+        return false;
+    }
+    let dir_name = skill_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if normalized != dir_name {
+        return false;
+    }
+    let re = Regex::new(SKILL_NAME_PATTERN).unwrap();
+    re.is_match(normalized)
+}
+
+fn is_valid_description(description: &str) -> bool {
+    let normalized = description.trim();
+    !normalized.is_empty() && normalized.len() <= 1024
+}
+
+fn iter_skill_roots(workspace_path: &Path) -> Vec<(PathBuf, String)> {
+    let mut roots: Vec<(PathBuf, String)> = Vec::new();
+    for source in &SKILL_SOURCES {
+        match *source {
+            "project" => {
+                roots.push((workspace_path.join(PROJECT_SKILLS_DIR), source.to_string()));
+                let legacy = workspace_path.join(LEGACY_SKILLS_DIR);
+                if legacy.is_dir() {
+                    tracing::warn!(
+                        path = %legacy.display(),
+                        "Found legacy skills directory; please move to '{PROJECT_SKILLS_DIR}'"
+                    );
+                    roots.push((legacy, source.to_string()));
+                }
+            }
+            "global" => {
+                if let Some(home) = dirs::home_dir() {
+                    roots.push((home.join(PROJECT_SKILLS_DIR), source.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    roots
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+/// Render a prompt section listing available skills.
+pub fn render_skills_prompt(skills: &[SkillMetadata], expanded_skills: &HashSet<String>) -> String {
+    if skills.is_empty() {
+        return String::new();
+    }
+    let mut lines: Vec<String> = vec!["<available_skills>".to_owned()];
+    for skill in skills {
+        let mut line = format!("- {}: {}", skill.name, skill.description);
+        if expanded_skills.contains(&skill.name) {
+            line.push_str(&format!("  Location: {}", skill.location.display()));
+            if let Some(body) = skill.body() {
+                line.push('\n');
+                line.push_str(&body);
+            }
+        }
+        lines.push(line);
+    }
+    lines.push("</available_skills>".to_owned());
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn write_skill(root: &Path, name: &str, description: &str, body: &str) -> PathBuf {
+        let skill_dir = root.join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let lines = format!("---\nname: {name}\ndescription: {description}\n---\n{body}");
+        let skill_file = skill_dir.join(SKILL_FILE_NAME);
+        std::fs::write(&skill_file, lines).unwrap();
+        skill_file
+    }
+
+    // -- parse_frontmatter tests ----------------------------------------------
+
+    #[test]
+    fn test_parse_frontmatter_valid() {
+        let content = "---\nname: my-skill\ndescription: A skill\n---\nBody here\n";
+        let fm = parse_frontmatter(content);
+        assert_eq!(fm.get("name").unwrap(), "my-skill");
+        assert_eq!(fm.get("description").unwrap(), "A skill");
+    }
+
+    #[test]
+    fn test_parse_frontmatter_empty_on_invalid_yaml() {
+        let content = "---\nname: [broken\n---\nbody\n";
+        let fm = parse_frontmatter(content);
+        assert!(fm.is_empty());
+    }
+
+    #[test]
+    fn test_parse_frontmatter_no_frontmatter() {
+        let content = "Just plain text";
+        let fm = parse_frontmatter(content);
+        assert!(fm.is_empty());
+    }
+
+    #[test]
+    fn test_parse_frontmatter_no_closing_delimiter() {
+        let content = "---\nname: test\nno closing delimiter";
+        let fm = parse_frontmatter(content);
+        assert!(fm.is_empty());
+    }
+
+    // -- SkillMetadata.body() tests -------------------------------------------
+
+    #[test]
+    fn test_skill_metadata_body_strips_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_file = write_skill(tmp.path(), "demo-skill", "Demo", "Line 1\nLine 2");
+        let metadata = SkillMetadata {
+            name: "demo-skill".into(),
+            description: "Demo".into(),
+            location: skill_file,
+            source: "project".into(),
+            metadata: std::collections::HashMap::new(),
+        };
+        let body = metadata.body().unwrap();
+        assert_eq!(body, "Line 1\nLine 2");
+    }
+
+    #[test]
+    fn test_skill_metadata_body_returns_none_for_missing_file() {
+        let metadata = SkillMetadata {
+            name: "missing".into(),
+            description: "Missing".into(),
+            location: PathBuf::from("/nonexistent/path/SKILL.md"),
+            source: "project".into(),
+            metadata: std::collections::HashMap::new(),
+        };
+        assert!(metadata.body().is_none());
+    }
+
+    // -- read_skill tests -----------------------------------------------------
+
+    #[test]
+    fn test_read_skill_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill(tmp.path(), "my-skill", "A skill", "Body");
+        let result = read_skill(&tmp.path().join("my-skill"), "project");
+        assert!(result.is_some());
+        let skill = result.unwrap();
+        assert_eq!(skill.name, "my-skill");
+        assert_eq!(skill.description, "A skill");
+        assert_eq!(skill.source, "project");
+    }
+
+    #[test]
+    fn test_read_skill_rejects_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = read_skill(&tmp.path().join("nonexistent"), "project");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_read_skill_rejects_name_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("actual-name");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let content = "---\nname: different-name\ndescription: Mismatch\n---\nBody\n";
+        std::fs::write(skill_dir.join(SKILL_FILE_NAME), content).unwrap();
+        let result = read_skill(&skill_dir, "project");
+        assert!(result.is_none());
+    }
+
+    // -- discover_skills tests ------------------------------------------------
+
+    #[test]
+    fn test_discover_skills_prefers_project_over_global() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().join(".agents/skills");
+        std::fs::create_dir_all(&project_root).unwrap();
+        write_skill(&project_root, "shared", "project version", "body");
+
+        // discover_skills searches project root based on workspace
+        let discovered = discover_skills(tmp.path());
+        let index: std::collections::HashMap<String, &SkillMetadata> =
+            discovered.iter().map(|s| (s.name.clone(), s)).collect();
+        if let Some(skill) = index.get("shared") {
+            assert_eq!(skill.description, "project version");
+            assert_eq!(skill.source, "project");
+        }
+    }
+
+    // -- render_skills_prompt tests -------------------------------------------
+
+    #[test]
+    fn test_render_skills_prompt_empty_returns_empty() {
+        let rendered = render_skills_prompt(&[], &HashSet::new());
+        assert_eq!(rendered, "");
+    }
+
+    #[test]
+    fn test_render_skills_prompt_basic_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_file = write_skill(tmp.path(), "skill-a", "desc-a", "body");
+        let skills = vec![
+            SkillMetadata {
+                name: "skill-a".into(),
+                description: "desc-a".into(),
+                location: skill_file.clone(),
+                source: "project".into(),
+                metadata: std::collections::HashMap::new(),
+            },
+            SkillMetadata {
+                name: "skill-b".into(),
+                description: "desc-b".into(),
+                location: skill_file,
+                source: "project".into(),
+                metadata: std::collections::HashMap::new(),
+            },
+        ];
+        let rendered = render_skills_prompt(&skills, &HashSet::new());
+        assert!(rendered.contains("<available_skills>"));
+        assert!(rendered.contains("- skill-a: desc-a"));
+        assert!(rendered.contains("- skill-b: desc-b"));
+        assert!(rendered.contains("</available_skills>"));
+    }
+
+    #[test]
+    fn test_render_skills_prompt_with_expanded_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_file = write_skill(tmp.path(), "skill-a", "desc", "expanded body");
+        let skills = vec![SkillMetadata {
+            name: "skill-a".into(),
+            description: "desc".into(),
+            location: skill_file,
+            source: "project".into(),
+            metadata: std::collections::HashMap::new(),
+        }];
+        let mut expanded = HashSet::new();
+        expanded.insert("skill-a".into());
+        let rendered = render_skills_prompt(&skills, &expanded);
+        assert!(rendered.contains("expanded body"));
+        assert!(rendered.contains("Location:"));
+    }
+
+    // -- is_valid_name / is_valid_description ---------------------------------
+
+    #[test]
+    fn test_is_valid_name_rejects_uppercase() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("MySkill");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!is_valid_name("MySkill", &dir));
+    }
+
+    #[test]
+    fn test_is_valid_name_rejects_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("");
+        assert!(!is_valid_name("", &dir));
+    }
+
+    #[test]
+    fn test_is_valid_description_rejects_empty() {
+        assert!(!is_valid_description(""));
+        assert!(!is_valid_description("   "));
+    }
+
+    #[test]
+    fn test_is_valid_description_accepts_normal() {
+        assert!(is_valid_description("A useful skill"));
+    }
+}

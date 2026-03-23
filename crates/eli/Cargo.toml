@@ -1,0 +1,53 @@
+[package]
+name = "eli"
+version = "0.3.0"
+edition = "2024"
+description = "A terminal-based AI assistant and productivity tool"
+license = "MIT"
+repository = "https://github.com/cklxx/eli"
+homepage = "https://github.com/cklxx/eli"
+keywords = ["cli", "ai", "assistant", "terminal", "tui"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "eli"
+path = "src/main.rs"
+
+[dependencies]
+conduit = { path = "../conduit" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+futures = "0.3"
+tokio-util = { version = "0.7", features = ["rt"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+ratatui = "0.29"
+teloxide = { version = "0.13", features = ["macros"] }
+fuzzy-matcher = "0.3"
+md5 = "0.7"
+dirs = "6"
+dotenvy = "0.15"
+glob = "0.3"
+serde_yaml = "0.9"
+toml = "0.8"
+regex = "1"
+shell-words = "1"
+shellexpand = "3"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+open = "5"
+which = "8.0.2"
+axum = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

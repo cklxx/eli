@@ -1,0 +1,312 @@
+//! Builtin module — default hook implementations and runtime components.
+
+pub mod agent;
+pub mod cli;
+pub mod config;
+pub mod context;
+pub mod settings;
+pub mod shell_manager;
+pub mod store;
+pub mod tape;
+pub mod tape_viewer;
+pub mod tools;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chrono::Utc;
+use conduit::ConduitError;
+use serde_json::Value;
+use tokio::sync::Mutex;
+
+use crate::builtin::agent::{Agent, PromptInput};
+use crate::builtin::store::FileTapeStore;
+use crate::channels::message::{ChannelMessage, MessageKind};
+use crate::hooks::{EliHookSpec, TapeStoreKind};
+use crate::types::{Envelope, PromptValue, State};
+
+// ---------------------------------------------------------------------------
+// BuiltinImpl — default hook implementations
+// ---------------------------------------------------------------------------
+
+/// Default hook implementations for basic runtime operations.
+pub struct BuiltinImpl {
+    agent: Mutex<Agent>,
+    home: PathBuf,
+}
+
+#[allow(clippy::new_without_default)]
+impl BuiltinImpl {
+    /// Create a new `BuiltinImpl`, registering builtin tools.
+    pub fn new() -> Self {
+        tools::register_builtin_tools();
+        let agent = Agent::new();
+        let home = agent.settings.home.clone();
+        Self {
+            agent: Mutex::new(agent),
+            home,
+        }
+    }
+
+    /// Resolve a session ID from a channel message.
+    pub fn resolve_session(&self, message: &ChannelMessage) -> String {
+        if !message.session_id.trim().is_empty() {
+            return message.session_id.clone();
+        }
+        let channel = &message.channel;
+        let chat_id = &message.chat_id;
+        format!("{channel}:{chat_id}")
+    }
+
+    /// Load initial state for a session.
+    pub fn load_state(&self, session_id: &str) -> HashMap<String, Value> {
+        let mut state: HashMap<String, Value> = HashMap::new();
+        state.insert(
+            "session_id".to_owned(),
+            Value::String(session_id.to_owned()),
+        );
+        let workspace = std::env::current_dir()
+            .unwrap_or_default()
+            .display()
+            .to_string();
+        state.insert("_runtime_workspace".to_owned(), Value::String(workspace));
+        state
+    }
+
+    /// Build a prompt from an inbound message.
+    pub fn build_prompt(&self, message: &ChannelMessage) -> PromptInput {
+        let content = extract_message_text(&message.content);
+        if content.starts_with(',') {
+            return PromptInput::Text(content);
+        }
+        let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let context_str = message.context_str();
+        let text = if context_str.is_empty() {
+            content
+        } else {
+            format!("{context_str}\n---Date: {now}---\n{content}")
+        };
+        PromptInput::Text(text)
+    }
+
+    /// Run the model on a prompt within a session.
+    pub async fn run_model(
+        &self,
+        prompt: PromptInput,
+        session_id: &str,
+        state: &HashMap<String, Value>,
+    ) -> Result<String, ConduitError> {
+        self.agent
+            .lock()
+            .await
+            .run(session_id, prompt, state, None, None, None)
+            .await
+    }
+
+    /// Build the system prompt for a model call.
+    pub fn system_prompt(&self, prompt_text: &str, state: &HashMap<String, Value>) -> String {
+        Agent::new().system_prompt(prompt_text, state, None)
+    }
+
+    /// Provide the tape store (FileTapeStore backed by the agent's home directory).
+    pub fn provide_tape_store(&self) -> FileTapeStore {
+        FileTapeStore::new(self.home.join("tapes"))
+    }
+
+    /// Handle errors by logging them.
+    pub async fn on_error(&self, stage: &str, error: &str, message: Option<&ChannelMessage>) {
+        tracing::error!(stage = stage, error = error, "pipeline error");
+        if let Some(msg) = message {
+            tracing::error!(
+                session_id = %msg.session_id,
+                channel = %msg.channel,
+                "error occurred in session"
+            );
+        }
+    }
+
+    /// Render outbound messages from model output.
+    pub fn render_outbound(
+        &self,
+        message: &ChannelMessage,
+        session_id: &str,
+        model_output: &str,
+    ) -> Vec<ChannelMessage> {
+        let clean = crate::builtin::cli::strip_fake_tool_calls(model_output);
+        if clean.trim().is_empty() {
+            return Vec::new();
+        }
+
+        let output_channel = if message.output_channel.is_empty() {
+            message.channel.as_str()
+        } else {
+            message.output_channel.as_str()
+        };
+
+        let outbound = ChannelMessage::new(session_id, &message.channel, clean)
+            .with_chat_id(&message.chat_id)
+            .with_output_channel(output_channel)
+            .with_kind(message.kind)
+            .finalize();
+        vec![outbound]
+    }
+}
+
+fn extract_message_text(content: &str) -> String {
+    match serde_json::from_str::<Value>(content) {
+        Ok(val) => val
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or(content)
+            .to_owned(),
+        Err(_) => content.to_owned(),
+    }
+}
+
+fn envelope_to_channel_message(message: &Envelope) -> ChannelMessage {
+    let channel = message
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("cli")
+        .to_owned();
+
+    let kind = match message
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("normal")
+    {
+        "error" => MessageKind::Error,
+        "command" => MessageKind::Command,
+        _ => MessageKind::Normal,
+    };
+
+    ChannelMessage {
+        session_id: message
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        channel: channel.clone(),
+        content: match message.get("content") {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+            None => String::new(),
+        },
+        chat_id: message
+            .get("chat_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default")
+            .to_owned(),
+        is_active: message
+            .get("is_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        kind,
+        context: message
+            .get("context")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default(),
+        media: Vec::new(),
+        output_channel: message
+            .get("output_channel")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&channel)
+            .to_owned(),
+    }
+}
+
+fn prompt_value_to_input(prompt: &PromptValue) -> PromptInput {
+    match prompt {
+        PromptValue::Text(text) => PromptInput::Text(text.clone()),
+        PromptValue::Parts(parts) => PromptInput::Parts(parts.clone()),
+    }
+}
+
+#[async_trait]
+impl EliHookSpec for BuiltinImpl {
+    fn plugin_name(&self) -> &str {
+        "builtin"
+    }
+
+    async fn resolve_session(&self, message: &Envelope) -> Option<String> {
+        Some(self.resolve_session(&envelope_to_channel_message(message)))
+    }
+
+    async fn load_state(&self, message: &Envelope, session_id: &str) -> Option<State> {
+        let mut state = self.load_state(session_id);
+        for field in ["sender_id", "chat_id", "channel", "output_channel"] {
+            if let Some(value) = message.get(field).cloned() {
+                state.insert(field.to_owned(), value);
+            }
+        }
+        Some(state)
+    }
+
+    async fn build_prompt(
+        &self,
+        message: &Envelope,
+        _session_id: &str,
+        _state: &State,
+    ) -> Option<PromptValue> {
+        let prompt = self.build_prompt(&envelope_to_channel_message(message));
+        Some(match prompt {
+            PromptInput::Text(text) => PromptValue::Text(text),
+            PromptInput::Parts(parts) => PromptValue::Parts(parts),
+        })
+    }
+
+    async fn run_model(
+        &self,
+        prompt: &PromptValue,
+        session_id: &str,
+        state: &State,
+    ) -> Option<String> {
+        match self
+            .run_model(prompt_value_to_input(prompt), session_id, state)
+            .await
+        {
+            Ok(output) => Some(output),
+            Err(e) => {
+                tracing::error!(error = %e, session_id = %session_id, "run_model failed");
+                Some(format!("[Error: {e}]"))
+            }
+        }
+    }
+
+    async fn render_outbound(
+        &self,
+        message: &Envelope,
+        session_id: &str,
+        _state: &State,
+        model_output: &str,
+    ) -> Option<Vec<Envelope>> {
+        let outbounds = self.render_outbound(
+            &envelope_to_channel_message(message),
+            session_id,
+            model_output,
+        );
+        Some(
+            outbounds
+                .into_iter()
+                .filter_map(|message| serde_json::to_value(message).ok())
+                .collect(),
+        )
+    }
+
+    async fn on_error(&self, stage: &str, error: &anyhow::Error, message: Option<&Envelope>) {
+        let channel_message = message.map(envelope_to_channel_message);
+        self.on_error(stage, &error.to_string(), channel_message.as_ref())
+            .await;
+    }
+
+    fn system_prompt(&self, prompt: &PromptValue, state: &State) -> Option<String> {
+        Some(self.system_prompt(&prompt.as_text(), state))
+    }
+
+    fn provide_tape_store(&self) -> Option<TapeStoreKind> {
+        Some(TapeStoreKind::Sync(Arc::new(self.provide_tape_store())))
+    }
+}
