@@ -697,9 +697,18 @@ async fn agent_loop(
                                 "context_window": settings.context_window,
                                 "summary": summary,
                             });
-                            let _ = tapes
-                                .handoff(tape_name, "auto-handoff", Some(anchor_state))
-                                .await;
+                            // Use a unique anchor name so that successive
+                            // handoffs don't collide during grace periods.
+                            let anchor_name = format!(
+                                "auto-handoff/{}",
+                                Utc::now().format("%Y%m%dT%H%M%S")
+                            );
+                            if let Err(e) = tapes
+                                .handoff(tape_name, &anchor_name, Some(anchor_state))
+                                .await
+                            {
+                                tracing::warn!(error = %e, "auto-handoff: failed to write anchor");
+                            }
 
                             // 3. Write a system entry right after the anchor so
                             //    that when the context is later cut here the LLM
@@ -711,10 +720,12 @@ async fn agent_loop(
                                 ),
                                 Value::Object(Default::default()),
                             );
-                            let _ = tapes.store().append(tape_name, &sys_entry).await;
+                            if let Err(e) = tapes.store().append(tape_name, &sys_entry).await {
+                                tracing::warn!(error = %e, "auto-handoff: failed to write summary");
+                            }
 
                             // 4. Start grace period (2 more rounds with old context).
-                            let _ = tapes
+                            if let Err(e) = tapes
                                 .append_event(
                                     tape_name,
                                     "auto-handoff.grace",
@@ -723,7 +734,10 @@ async fn agent_loop(
                                         "prev_anchor": prev_anchor_name,
                                     }),
                                 )
-                                .await;
+                                .await
+                            {
+                                tracing::warn!(error = %e, "auto-handoff: failed to write grace event");
+                            }
 
                             tracing::info!(
                                 tape = tape_name,

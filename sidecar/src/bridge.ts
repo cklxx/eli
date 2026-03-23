@@ -192,10 +192,8 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
         if (requestedSession) {
           sessionCtx = sessionContexts.get(requestedSession) ?? null;
         }
-        if (!sessionCtx && sessionContexts.size > 0) {
-          // Fallback: last entry (preserves current single-user behavior).
-          sessionCtx = Array.from(sessionContexts.values()).pop() ?? null;
-        }
+        // No fallback — require explicit session_id to prevent cross-user
+        // auth leakage in multi-session scenarios.
 
         let result;
         if (sessionCtx) {

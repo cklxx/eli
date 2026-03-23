@@ -35,35 +35,61 @@ fn init_tracing() -> anyhow::Result<()> {
         .unwrap_or_else(|_| EnvFilter::new("info"))
         .add_directive("eli_trace=off".parse()?);
 
-    let trace_log_dir = eli_home().join("logs");
-    fs::create_dir_all(&trace_log_dir)?;
-    let trace_log_path = trace_log_dir.join("eli-trace.log");
-    let trace_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&trace_log_path)?;
+    let trace_enabled = std::env::var("ELI_TRACE")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
 
-    let console_layer = tracing_subscriber::fmt::layer()
-        .with_target(false)
-        .with_filter(console_filter);
+    if trace_enabled {
+        let trace_log_dir = eli_home().join("logs");
+        fs::create_dir_all(&trace_log_dir)?;
+        let trace_log_path = trace_log_dir.join("eli-trace.log");
+        let trace_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&trace_log_path)?;
 
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_ansi(false)
-        .with_target(false)
-        .with_writer(move || {
-            trace_file
-                .try_clone()
-                .expect("failed to clone eli trace log handle")
-        })
-        .with_filter(filter_fn(|metadata| metadata.target() == "eli_trace"));
+        let console_layer = tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_filter(console_filter);
 
-    tracing_subscriber::registry()
-        .with(console_layer)
-        .with(file_layer)
-        .init();
+        let trace_file_for_writer = std::sync::Arc::new(std::sync::Mutex::new(trace_file));
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(move || ArcMutexWriter(trace_file_for_writer.clone()))
+            .with_filter(filter_fn(|metadata| metadata.target() == "eli_trace"));
 
-    tracing::info!(trace_log = %trace_log_path.display(), "eli trace log enabled");
+        tracing_subscriber::registry()
+            .with(console_layer)
+            .with(file_layer)
+            .init();
+
+        tracing::info!(trace_log = %trace_log_path.display(), "eli trace log enabled");
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .with_target(false)
+            .init();
+    }
+
     Ok(())
+}
+
+/// Thread-safe writer that wraps an `Arc<Mutex<File>>`, avoiding
+/// `File::try_clone` (which can panic under fd pressure).
+struct ArcMutexWriter(std::sync::Arc<std::sync::Mutex<std::fs::File>>);
+
+impl std::io::Write for ArcMutexWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut f = self.0.lock().unwrap();
+        f.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut f = self.0.lock().unwrap();
+        f.flush()
+    }
 }
 
 #[tokio::main]

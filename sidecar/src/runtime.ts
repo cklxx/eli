@@ -17,6 +17,9 @@ export const sessionContexts = new Map<string, SessionContext>();
 /** TTL for session context entries (30 minutes). */
 const SESSION_CONTEXT_TTL_MS = 30 * 60 * 1000;
 
+/** Track TTL timers so we can cancel the old one when a session refreshes. */
+const sessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 // ---------------------------------------------------------------------------
 // Plugin loading
 // ---------------------------------------------------------------------------
@@ -75,8 +78,14 @@ function buildPluginRuntime(config: SidecarConfig) {
             cfg: params.cfg ?? {},
           };
           sessionContexts.set(sessionId, sessionCtx);
-          // Expire to prevent unbounded growth.
-          setTimeout(() => sessionContexts.delete(sessionId), SESSION_CONTEXT_TTL_MS);
+          // Cancel previous TTL timer to prevent it from deleting a refreshed entry.
+          const prevTimer = sessionTimers.get(sessionId);
+          if (prevTimer) clearTimeout(prevTimer);
+          const timer = setTimeout(() => {
+            sessionContexts.delete(sessionId);
+            sessionTimers.delete(sessionId);
+          }, SESSION_CONTEXT_TTL_MS);
+          sessionTimers.set(sessionId, timer);
 
           // Pass the "To" field as-is so the outbound bridge can use it
           // as the channel route target for sendText.
