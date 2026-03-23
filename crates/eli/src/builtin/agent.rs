@@ -139,22 +139,11 @@ impl Agent {
         // Default system prompt.
         blocks.push(default_system_prompt().to_owned());
 
-        // AGENTS.md from workspace.
         let workspace = state
             .get("_runtime_workspace")
             .and_then(|v| v.as_str())
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-        let agents_path = workspace.join("AGENTS.md");
-        if agents_path.is_file()
-            && let Ok(content) = std::fs::read_to_string(&agents_path)
-        {
-            let trimmed = content.trim();
-            if !trimmed.is_empty() {
-                blocks.push(trimmed.to_owned());
-            }
-        }
 
         // Tools prompt.
         {
@@ -539,17 +528,6 @@ fn build_system_prompt(
     // Base system prompt (from md files or built-in default).
     blocks.push(load_system_prompt_base(settings, workspace));
 
-    // AGENTS.md from workspace (always appended, not overridden).
-    let agents_path = workspace.join("AGENTS.md");
-    if agents_path.is_file()
-        && let Ok(content) = std::fs::read_to_string(&agents_path)
-    {
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            blocks.push(trimmed.to_owned());
-        }
-    }
-
     // Tools prompt.
     {
         let reg = REGISTRY.lock().unwrap();
@@ -869,6 +847,7 @@ mod tests {
     use super::*;
     use crate::builtin::store::{FileTapeStore, ForkTapeStore};
     use crate::builtin::tools::register_builtin_tools;
+    use conduit::llm::ApiFormat;
     use serde_json::json;
 
     fn test_tape_service() -> (
@@ -893,6 +872,21 @@ mod tests {
         );
 
         (tmp, service, tape_name, tool_state)
+    }
+
+    fn test_settings(home: &Path) -> AgentSettings {
+        AgentSettings {
+            home: home.to_path_buf(),
+            model: "test-model".into(),
+            fallback_models: None,
+            api_key: ApiKeyConfig::None,
+            api_base: ApiBaseConfig::None,
+            api_format: ApiFormat::Auto,
+            max_steps: 5,
+            max_tokens: 256,
+            model_timeout_seconds: None,
+            verbose: 0,
+        }
     }
 
     #[tokio::test]
@@ -923,5 +917,27 @@ mod tests {
 
         assert!(output.contains("name: workspace__session"));
         assert!(output.contains("anchors: 1"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_ignores_workspace_agents_guidance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(workspace.join(".agents")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(workspace.join(".agents").join("PROMPT.md"), "base prompt").unwrap();
+        std::fs::write(workspace.join("AGENTS.md"), "workspace agents guidance").unwrap();
+
+        let prompt = build_system_prompt(
+            &test_settings(&home),
+            "hello",
+            &HashMap::new(),
+            None,
+            &workspace,
+        );
+
+        assert!(prompt.contains("base prompt"));
+        assert!(!prompt.contains("workspace agents guidance"));
     }
 }
