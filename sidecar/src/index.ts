@@ -6,49 +6,110 @@ process.on("uncaughtException", (err) => {
   console.error("[UNCAUGHT EXCEPTION]", err);
 });
 
-import { loadConfig } from "./config.js";
+import { loadConfig, type SidecarConfig } from "./config.js";
 import { initBridge, startOutboundServer } from "./bridge.js";
 import { loadPlugins, startChannels, stopChannels } from "./runtime.js";
 import { registry } from "./registry.js";
 
-async function main() {
-  console.log("[sidecar] starting...");
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
-  // 1. Load configuration.
-  const config = loadConfig();
+export { loadConfig, type SidecarConfig } from "./config.js";
+export { registry } from "./registry.js";
+export type { ChannelAccountConfig } from "./config.js";
+export type {
+  ToolDefinition,
+  ToolResult,
+  ChannelPlugin,
+  InboundEnvelope,
+  EliChannelMessage,
+} from "./types.js";
+
+export interface Sidecar {
+  config: SidecarConfig;
+  server: import("node:http").Server;
+  stop(): Promise<void>;
+}
+
+/**
+ * Create and start a sidecar instance.
+ *
+ * ```ts
+ * import { createSidecar } from "eli-sidecar";
+ *
+ * const sidecar = await createSidecar();
+ * // or with explicit config:
+ * const sidecar = await createSidecar({
+ *   eli_url: "http://localhost:3100",
+ *   port: 3101,
+ *   plugins: ["@larksuite/openclaw-lark"],
+ *   channels: { feishu: { appId: "...", appSecret: "...", accounts: { default: { ... } } } },
+ * });
+ * ```
+ */
+export async function createSidecar(
+  configOrPath?: Partial<SidecarConfig> | string,
+): Promise<Sidecar> {
+  let config: SidecarConfig;
+
+  if (typeof configOrPath === "string" || configOrPath === undefined) {
+    config = loadConfig(configOrPath);
+  } else {
+    // Merge with defaults.
+    const base = loadConfig();
+    config = { ...base, ...configOrPath };
+  }
+
   console.log(`[sidecar] eli_url=${config.eli_url} port=${config.port}`);
-  console.log(`[sidecar] plugins: ${config.plugins.join(", ") || "(none)"}`);
+  console.log(
+    `[sidecar] plugins: ${config.plugins.join(", ") || "(auto-discover)"}`,
+  );
 
-  // 2. Initialize the bridge (sets the eli URL for inbound POSTs).
   initBridge(config);
-
-  // 3. Load all plugins — this populates the registry.
   await loadPlugins(config);
 
-  const channelCount = registry.channels.size;
-  const toolCount = registry.tools.size;
-  console.log(`[sidecar] registered: ${channelCount} channel(s), ${toolCount} tool(s)`);
+  console.log(
+    `[sidecar] registered: ${registry.channels.size} channel(s), ${registry.tools.size} tool(s)`,
+  );
 
-  // 4. Start the outbound HTTP server (eli calls back here with responses).
   const server = await startOutboundServer(config.port);
-
-  // 5. Start all channel gateways (begins receiving messages from platforms).
   await startChannels(config);
 
   console.log("[sidecar] ready");
 
-  // Graceful shutdown on SIGINT / SIGTERM.
-  const shutdown = async () => {
-    console.log("\n[sidecar] shutting down...");
-    server.close();
-    await stopChannels(config);
-    process.exit(0);
+  return {
+    config,
+    server,
+    async stop() {
+      console.log("[sidecar] shutting down...");
+      server.close();
+      await stopChannels(config);
+    },
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
 }
 
-main().catch((err) => {
-  console.error("[sidecar] fatal error:", err);
-  process.exit(1);
-});
+// ---------------------------------------------------------------------------
+// CLI entry point — runs when executed directly (via start.cjs)
+// ---------------------------------------------------------------------------
+
+const isMainModule =
+  typeof require !== "undefined" && require.main === module;
+const isCLI =
+  isMainModule || process.argv[1]?.endsWith("start.cjs") || false;
+
+if (isCLI) {
+  createSidecar()
+    .then((sidecar) => {
+      const shutdown = async () => {
+        await sidecar.stop();
+        process.exit(0);
+      };
+      process.on("SIGINT", shutdown);
+      process.on("SIGTERM", shutdown);
+    })
+    .catch((err) => {
+      console.error("[sidecar] fatal error:", err);
+      process.exit(1);
+    });
+}

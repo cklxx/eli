@@ -1,21 +1,34 @@
 {
-  "name": "@eli/sidecar",
+  "name": "eli-sidecar",
   "version": "0.1.0",
-  "description": "OpenClaw-compatible plugin host bridging external channels to eli",
+  "description": "OpenClaw plugin bridge for eli — load any OpenClaw channel plugin over HTTP",
   "type": "module",
   "main": "src/index.ts",
+  "bin": {
+    "eli-sidecar": "start.cjs"
+  },
   "scripts": {
     "start": "node start.cjs",
     "dev": "node --watch start.cjs",
     "test": "bun test"
   },
+  "keywords": ["eli", "openclaw", "feishu", "lark", "sidecar", "agent", "channel"],
+  "license": "Apache-2.0",
   "dependencies": {
-    "@larksuite/openclaw-lark": "^2026.3.18",
     "express": "^5.1.0",
     "jiti": "^2.6.1",
     "openclaw": "^2026.3.13"
   },
+  "peerDependencies": {
+    "@larksuite/openclaw-lark": ">=2026.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@larksuite/openclaw-lark": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@larksuite/openclaw-lark": "^2026.3.18",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
