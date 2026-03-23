@@ -1270,8 +1270,11 @@ fn start_sidecar(wh: &crate::channels::webhook::WebhookSettings) -> Option<std::
 }
 
 /// Fetch tool definitions from the sidecar and register them as HTTP proxy tools.
+/// Fetch tool definitions from the sidecar, group them into skills for
+/// progressive disclosure, and store them for the `sidecar` bridge tool.
 async fn register_sidecar_tools(sidecar_url: &str) -> anyhow::Result<()> {
-    use conduit::Tool;
+    use crate::skills::SkillMetadata;
+    use crate::tools::{SIDECAR_SKILLS, SIDECAR_TOOLS, SIDECAR_URL, SidecarToolDef};
 
     let client = reqwest::Client::new();
     let tools_url = format!("{sidecar_url}/tools");
@@ -1296,8 +1299,12 @@ async fn register_sidecar_tools(sidecar_url: &str) -> anyhow::Result<()> {
         anyhow::bail!("no tools returned from sidecar");
     }
 
-    let mut reg = crate::tools::REGISTRY.lock().unwrap();
-    let mut count = 0;
+    // Store the sidecar URL for the bridge tool.
+    *SIDECAR_URL.lock().unwrap() = Some(sidecar_url.to_owned());
+
+    // Parse and group tools.
+    let mut groups: std::collections::HashMap<String, Vec<SidecarToolDef>> =
+        std::collections::HashMap::new();
 
     for tool_def in &tools_json {
         let name = tool_def
@@ -1305,95 +1312,93 @@ async fn register_sidecar_tools(sidecar_url: &str) -> anyhow::Result<()> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
+        if name.is_empty() {
+            continue;
+        }
         let description = tool_def
             .get("description")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
-        let mut parameters = tool_def
+        let parameters = tool_def
             .get("parameters")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
-        // Anthropic requires input_schema.type = "object" at top level.
-        // Some OpenClaw tools use { anyOf: [...] } — flatten into a single
-        // object by merging all variant properties.
-        if let Some(obj) = parameters.as_object_mut()
-            && !obj.contains_key("type")
-        {
-            if let Some(variants) = obj.remove("anyOf") {
-                // Merge all anyOf variant properties into one object schema.
-                let mut merged_props = serde_json::Map::new();
-                if let Some(arr) = variants.as_array() {
-                    for variant in arr {
-                        if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
-                            for (k, v) in props {
-                                merged_props.entry(k.clone()).or_insert_with(|| v.clone());
-                            }
-                        }
-                    }
-                }
-                obj.insert("type".to_owned(), serde_json::json!("object"));
-                obj.insert(
-                    "properties".to_owned(),
-                    serde_json::Value::Object(merged_props),
-                );
-            } else {
-                obj.insert("type".to_owned(), serde_json::json!("object"));
-            }
-        }
+        let group = tool_def
+            .get("group")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sidecar")
+            .to_owned();
 
-        if name.is_empty() {
-            continue;
-        }
-
-        // Create an HTTP proxy tool that POSTs to sidecar.
-        let tool_url = format!("{sidecar_url}/tools/{name}");
-        let tool = Tool::new(
-            &name,
-            &description,
+        let def = SidecarToolDef {
+            name: name.clone(),
+            description,
             parameters,
-            move |args: serde_json::Value, _ctx| {
-                let url = tool_url.clone();
-                Box::pin(async move {
-                    let client = reqwest::Client::new();
-                    let resp = client
-                        .post(&url)
-                        .json(&serde_json::json!({ "params": args }))
-                        .send()
-                        .await
-                        .map_err(|e| conduit::ConduitError {
-                            kind: conduit::ErrorKind::Tool,
-                            message: format!("sidecar tool request failed: {e}"),
-                            cause: None,
-                        })?;
+            group: group.clone(),
+        };
 
-                    let body: serde_json::Value =
-                        resp.json().await.map_err(|e| conduit::ConduitError {
-                            kind: conduit::ErrorKind::Tool,
-                            message: format!("sidecar tool response parse failed: {e}"),
-                            cause: None,
-                        })?;
-
-                    // Tool result from sidecar is { content: [{ type, text }] } or error.
-                    if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
-                        return Err(conduit::ConduitError {
-                            kind: conduit::ErrorKind::Tool,
-                            message: err.to_owned(),
-                            cause: None,
-                        });
-                    }
-
-                    // Return the body as-is (the framework expects a Value).
-                    Ok(body)
-                })
-            },
-        );
-
-        reg.insert(name, tool);
-        count += 1;
+        groups.entry(group).or_default().push(def);
     }
 
-    println!("Registered {count} sidecar tools");
+    // Store all tools for the bridge.
+    {
+        let mut store = SIDECAR_TOOLS.lock().unwrap();
+        for tools in groups.values() {
+            for t in tools {
+                store.insert(t.name.clone(), t.clone());
+            }
+        }
+    }
+
+    // Synthesize a skill per group.
+    let mut skills: Vec<SkillMetadata> = Vec::new();
+    for (group_name, tools) in &groups {
+        // Build group description from tool names.
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        let group_desc = format!("{} tools: {}", tools.len(), tool_names.join(", "));
+
+        // Build the skill body with tool details.
+        let mut body = String::from(
+            "Call tools in this group via: sidecar(tool=\"<name>\", params={...})\n\n",
+        );
+        for t in tools {
+            body.push_str(&format!("## {}\n", t.name));
+            if !t.description.is_empty() {
+                body.push_str(&t.description);
+                body.push('\n');
+            }
+            // Render parameter descriptions from JSON schema.
+            if let Some(props) = t.parameters.get("properties").and_then(|p| p.as_object())
+                && !props.is_empty()
+            {
+                body.push_str("Parameters:\n");
+                for (pname, pschema) in props {
+                    let ptype = pschema
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("any");
+                    let pdesc = pschema
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if pdesc.is_empty() {
+                        body.push_str(&format!("- {pname}: {ptype}\n"));
+                    } else {
+                        body.push_str(&format!("- {pname} ({ptype}): {pdesc}\n"));
+                    }
+                }
+            }
+            body.push('\n');
+        }
+
+        skills.push(SkillMetadata::synthesized(group_name, &group_desc, body));
+    }
+
+    let skill_count = skills.len();
+    let tool_count: usize = groups.values().map(|v| v.len()).sum();
+    *SIDECAR_SKILLS.lock().unwrap() = skills;
+
+    println!("Synthesized {skill_count} sidecar skills from {tool_count} tools");
     Ok(())
 }
 

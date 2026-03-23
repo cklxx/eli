@@ -45,7 +45,7 @@ where
 
 /// Build the full list of builtin tools.
 fn builtin_tools() -> Vec<Tool> {
-    vec![
+    let mut tools = vec![
         tool_bash(),
         tool_bash_output(),
         tool_bash_kill(),
@@ -62,7 +62,12 @@ fn builtin_tools() -> Vec<Tool> {
         tool_subagent(),
         tool_help(),
         tool_quit(),
-    ]
+    ];
+    // Only register the sidecar bridge tool if a sidecar URL is configured.
+    if crate::tools::SIDECAR_URL.lock().unwrap().is_some() {
+        tools.push(tool_sidecar());
+    }
+    tools
 }
 
 // ---------------------------------------------------------------------------
@@ -551,7 +556,6 @@ fn tool_skill() -> Tool {
                     .collect();
 
                 match skill_index.get(&name.to_lowercase()) {
-                    None => ok_val("(no such skill)"),
                     Some(skill) => {
                         let body = skill.body().unwrap_or_default();
                         let body_str = if body.is_empty() {
@@ -563,6 +567,19 @@ fn tool_skill() -> Tool {
                             "Location: {}\n---\n{body_str}",
                             skill.location.display()
                         ))
+                    }
+                    None => {
+                        // Fallback: check sidecar skills.
+                        let sidecar_skills = crate::tools::SIDECAR_SKILLS.lock().unwrap();
+                        if let Some(skill) = sidecar_skills
+                            .iter()
+                            .find(|s| s.name.to_lowercase() == name.to_lowercase())
+                        {
+                            let body = skill.body().unwrap_or_else(|| "(no content)".to_owned());
+                            ok_val(format!("Source: sidecar\n---\n{body}"))
+                        } else {
+                            ok_val("(no such skill)")
+                        }
                     }
                 }
             })
@@ -907,6 +924,88 @@ fn tool_quit() -> Tool {
         }),
         |_args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move { ok_val("Session tasks stopped.") })
+        },
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Sidecar bridge tool — proxies calls to the sidecar's /tools/:name endpoint.
+// ---------------------------------------------------------------------------
+
+fn tool_sidecar() -> Tool {
+    Tool::new(
+        "sidecar",
+        "Execute a sidecar plugin tool by name. Use the `skill` tool first to discover available tool names and their parameters.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tool": {
+                    "type": "string",
+                    "description": "The sidecar tool name to execute (e.g. feishu_calendar_event)."
+                },
+                "params": {
+                    "type": "object",
+                    "description": "Parameters for the tool."
+                }
+            },
+            "required": ["tool"]
+        }),
+        |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move {
+                let tool_name = get_str(&args, "tool").unwrap_or("").to_owned();
+                let params = args.get("params").cloned().unwrap_or(serde_json::json!({}));
+
+                if tool_name.is_empty() {
+                    return Err(ConduitError::new(
+                        ErrorKind::Tool,
+                        "missing required parameter: tool",
+                    ));
+                }
+
+                // Validate tool exists.
+                let exists = {
+                    let tools = crate::tools::SIDECAR_TOOLS.lock().unwrap();
+                    tools.contains_key(&tool_name)
+                };
+                if !exists {
+                    return Err(ConduitError::new(
+                        ErrorKind::Tool,
+                        format!("unknown sidecar tool: {tool_name}"),
+                    ));
+                }
+
+                let url = {
+                    let u = crate::tools::SIDECAR_URL.lock().unwrap();
+                    u.clone().unwrap_or_default()
+                };
+                if url.is_empty() {
+                    return Err(ConduitError::new(ErrorKind::Tool, "sidecar not running"));
+                }
+
+                let tool_url = format!("{url}/tools/{tool_name}");
+                let client = reqwest::Client::new();
+                let resp = client
+                    .post(&tool_url)
+                    .json(&serde_json::json!({ "params": params }))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        ConduitError::new(ErrorKind::Tool, format!("sidecar request failed: {e}"))
+                    })?;
+
+                let body: serde_json::Value = resp.json().await.map_err(|e| {
+                    ConduitError::new(
+                        ErrorKind::Tool,
+                        format!("sidecar response parse failed: {e}"),
+                    )
+                })?;
+
+                if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
+                    return Err(ConduitError::new(ErrorKind::Tool, err.to_owned()));
+                }
+
+                Ok(body)
+            })
         },
     )
 }

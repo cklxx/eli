@@ -28,11 +28,35 @@ pub struct SkillMetadata {
     pub location: PathBuf,
     pub source: String,
     pub metadata: std::collections::HashMap<String, String>,
+    /// In-memory body for synthesized skills (e.g. sidecar tool groups).
+    /// When set, `body()` returns this instead of reading from disk.
+    pub content: Option<String>,
 }
 
 impl SkillMetadata {
+    /// Create an in-memory skill (not backed by a file on disk).
+    pub fn synthesized(name: &str, description: &str, body: String) -> Self {
+        Self {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            location: PathBuf::new(),
+            source: "sidecar".to_owned(),
+            metadata: std::collections::HashMap::new(),
+            content: Some(body),
+        }
+    }
+
     /// Read the skill body, stripping YAML frontmatter.
     pub fn body(&self) -> Option<String> {
+        // In-memory content takes precedence.
+        if let Some(ref content) = self.content {
+            return if content.is_empty() {
+                None
+            } else {
+                Some(content.clone())
+            };
+        }
+
         let content = std::fs::read_to_string(&self.location).ok()?;
         let trimmed = content.trim();
         if trimmed.is_empty() {
@@ -124,6 +148,7 @@ fn read_skill(skill_dir: &Path, source: &str) -> Option<SkillMetadata> {
             .unwrap_or_else(|_| skill_file.to_path_buf()),
         source: source.to_owned(),
         metadata,
+        content: None,
     })
 }
 
@@ -308,6 +333,7 @@ mod tests {
             description: "Demo".into(),
             location: skill_file,
             source: "project".into(),
+            content: None,
             metadata: std::collections::HashMap::new(),
         };
         let body = metadata.body().unwrap();
@@ -321,6 +347,7 @@ mod tests {
             description: "Missing".into(),
             location: PathBuf::from("/nonexistent/path/SKILL.md"),
             source: "project".into(),
+            content: None,
             metadata: std::collections::HashMap::new(),
         };
         assert!(metadata.body().is_none());
@@ -395,6 +422,7 @@ mod tests {
                 description: "desc-a".into(),
                 location: skill_file.clone(),
                 source: "project".into(),
+                content: None,
                 metadata: std::collections::HashMap::new(),
             },
             SkillMetadata {
@@ -402,6 +430,7 @@ mod tests {
                 description: "desc-b".into(),
                 location: skill_file,
                 source: "project".into(),
+                content: None,
                 metadata: std::collections::HashMap::new(),
             },
         ];
@@ -421,6 +450,7 @@ mod tests {
             description: "desc".into(),
             location: skill_file,
             source: "project".into(),
+            content: None,
             metadata: std::collections::HashMap::new(),
         }];
         let mut expanded = HashSet::new();

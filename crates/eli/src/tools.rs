@@ -4,10 +4,38 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use conduit::Tool;
+use serde_json::Value;
+
+use crate::skills::SkillMetadata;
 
 /// Central tool registry. Tools are registered here by the builtin module on startup.
 pub static REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, Tool>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+// ---------------------------------------------------------------------------
+// Sidecar state — populated by gateway_command when webhook channel starts
+// ---------------------------------------------------------------------------
+
+/// Sidecar tool definition fetched from /tools endpoint.
+#[derive(Debug, Clone)]
+pub struct SidecarToolDef {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+    pub group: String,
+}
+
+/// URL of the running sidecar (e.g. "http://127.0.0.1:3101").
+pub static SIDECAR_URL: std::sync::LazyLock<Mutex<Option<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// All sidecar tools keyed by name.
+pub static SIDECAR_TOOLS: std::sync::LazyLock<Mutex<HashMap<String, SidecarToolDef>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Auto-synthesized skills from sidecar tool groups.
+pub static SIDECAR_SKILLS: std::sync::LazyLock<Mutex<Vec<SkillMetadata>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
 
 /// Convert a tool name with dots to underscore-separated form for model APIs.
 fn to_model_name(name: &str) -> String {

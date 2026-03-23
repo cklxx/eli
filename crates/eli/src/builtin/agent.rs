@@ -165,8 +165,12 @@ impl Agent {
             }
         }
 
-        // Skills prompt.
-        let skills = discover_skills(&workspace);
+        // Skills prompt (filesystem + sidecar).
+        let mut skills = discover_skills(&workspace);
+        {
+            let sidecar_skills = crate::tools::SIDECAR_SKILLS.lock().unwrap();
+            skills.extend(sidecar_skills.iter().cloned());
+        }
         let filtered_skills: Vec<_> = if let Some(allowed) = allowed_skills {
             skills
                 .into_iter()
@@ -555,8 +559,12 @@ fn build_system_prompt(
         }
     }
 
-    // Skills prompt.
-    let skills = discover_skills(workspace);
+    // Skills prompt (filesystem + sidecar).
+    let mut skills = discover_skills(workspace);
+    {
+        let sidecar_skills = crate::tools::SIDECAR_SKILLS.lock().unwrap();
+        skills.extend(sidecar_skills.iter().cloned());
+    }
     let filtered_skills: Vec<_> = if let Some(allowed) = allowed_skills {
         skills
             .into_iter()

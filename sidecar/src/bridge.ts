@@ -6,6 +6,17 @@ import { registry } from "./registry.js";
 import { pendingTyping, lastSessionContext } from "./runtime.js";
 
 // ---------------------------------------------------------------------------
+// Tool grouping — infer group from tool name prefix
+// ---------------------------------------------------------------------------
+
+/** e.g. feishu_calendar_event → feishu-calendar */
+function inferToolGroup(name: string): string {
+  const parts = name.split("_");
+  if (parts.length >= 2) return `${parts[0]}-${parts[1]}`;
+  return parts[0];
+}
+
+// ---------------------------------------------------------------------------
 // Inbound: channel plugin message → POST to eli
 // ---------------------------------------------------------------------------
 
@@ -127,12 +138,13 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
       }
     });
 
-    // Tool listing — returns tool names, descriptions, and parameter schemas.
+    // Tool listing — returns tool names, descriptions, parameter schemas, and group.
     app.get("/tools", (_req, res) => {
       const tools = Array.from(registry.tools.values()).map((t) => ({
         name: t.name,
         description: t.description,
         parameters: t.parameters,
+        group: inferToolGroup(t.name),
       }));
       res.json(tools);
     });
