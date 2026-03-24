@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Eli — Ease Lives Instantly</title>
+  <meta name="description" content="Hook-first AI agent framework in Rust. One pipeline for CLI, Telegram, and any channel." />
+  <meta property="og:title" content="Eli — Ease Lives Instantly" />
+  <meta property="og:description" content="Hook-first AI agent framework in Rust. One pipeline for CLI, Telegram, and any channel." />
+  <meta property="og:type" content="website" />
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    [data-anim] {
+      opacity: 0;
+      will-change: opacity, transform;
+      transition: opacity 0.8s cubic-bezier(0.28, 0.11, 0.32, 1),
+                  transform 0.8s cubic-bezier(0.28, 0.11, 0.32, 1);
+    }
+    [data-anim="fade-up"] { transform: translateY(24px); }
+    [data-anim="scale-in"] { transform: scale(0.95); }
+    [data-anim="fade-in"] { transform: none; }
+    [data-anim="stagger"] > * {
+      opacity: 0;
+      transform: translateY(16px);
+      transition: opacity 0.6s cubic-bezier(0.28, 0.11, 0.32, 1),
+                  transform 0.6s cubic-bezier(0.28, 0.11, 0.32, 1);
+    }
+    [data-anim].is-visible { opacity: 1; transform: translateY(0) scale(1); }
+    [data-anim="stagger"].is-visible > * { opacity: 1; transform: translateY(0); }
+    [data-anim="stagger"].is-visible > *:nth-child(1) { transition-delay: 0s; }
+    [data-anim="stagger"].is-visible > *:nth-child(2) { transition-delay: 0.08s; }
+    [data-anim="stagger"].is-visible > *:nth-child(3) { transition-delay: 0.16s; }
+    [data-anim="stagger"].is-visible > *:nth-child(4) { transition-delay: 0.24s; }
+    [data-anim="stagger"].is-visible > *:nth-child(5) { transition-delay: 0.32s; }
+    [data-anim="stagger"].is-visible > *:nth-child(6) { transition-delay: 0.40s; }
+    [data-anim="stagger"].is-visible > *:nth-child(7) { transition-delay: 0.48s; }
+    [data-anim="stagger"].is-visible > *:nth-child(8) { transition-delay: 0.56s; }
+  </style>
+</head>
+<body class="font-sans antialiased" style="background: #fafbfc;">
+
+  <!-- Gradient blobs -->
+  <div class="pointer-events-none fixed inset-0 overflow-hidden">
+    <div class="absolute -left-40 -top-40 h-[600px] w-[600px] rounded-full opacity-[0.12] blur-[100px]" style="background: #818cf8;"></div>
+    <div class="absolute -right-32 top-[40%] h-[500px] w-[500px] rounded-full opacity-[0.10] blur-[100px]" style="background: #34d399;"></div>
+    <div class="absolute -bottom-32 left-[30%] h-[400px] w-[400px] rounded-full opacity-[0.08] blur-[100px]" style="background: #93c5fd;"></div>
+  </div>
+
+  <!-- Nav -->
+  <header class="sticky top-0 z-50 border-b backdrop-blur-md" style="border-color: rgba(226,232,240,0.6); background: rgba(250,251,252,0.85);">
+    <div class="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+      <div class="flex items-center gap-3">
+        <span class="text-lg font-bold font-mono" style="color: #0f172a;">eli</span>
+        <span class="rounded-full border px-2 py-0.5 text-[10px] font-medium" style="color: #6366f1; border-color: #c7d2fe; background: #eef2ff;">v0.3.0</span>
+      </div>
+      <div class="flex items-center gap-5">
+        <a href="https://github.com/cklxx/eli" target="_blank" rel="noopener noreferrer" class="text-sm font-medium transition-colors hover:opacity-70" style="color: #64748b;">GitHub</a>
+        <a href="#quickstart" class="rounded-full px-5 py-2 text-sm font-semibold text-white transition-all hover:scale-105" style="background: linear-gradient(135deg, #6366f1, #8b5cf6); box-shadow: 0 4px 14px rgba(99,102,241,0.25);">
+          Get Started
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <section class="relative z-10 mx-auto flex max-w-3xl flex-col items-center px-6 pb-28 pt-20 text-center sm:pt-28">
+    <h1 data-anim="fade-up" class="whitespace-pre-line font-extrabold leading-[1.05] tracking-tight" style="font-size: clamp(2.5rem, 7vw, 4.5rem); color: #0f172a;">
+      Ease Lives Instantly
+    </h1>
+    <p data-anim="fade-up" class="mt-6 max-w-xl leading-relaxed" style="font-size: clamp(1.0625rem, 1.5vw, 1.25rem); color: #64748b;">
+      Hook-first AI agent framework in Rust. One pipeline for CLI, Telegram, and any channel you add.
+    </p>
+    <div data-anim="fade-up" class="mt-10 flex items-center gap-4">
+      <a href="#quickstart" class="rounded-full px-8 py-3 text-sm font-semibold text-white transition-all hover:scale-105" style="background: linear-gradient(135deg, #6366f1, #8b5cf6); box-shadow: 0 4px 14px rgba(99,102,241,0.25);">
+        Get Started
+      </a>
+      <a href="https://github.com/cklxx/eli" target="_blank" rel="noopener noreferrer" class="text-sm font-medium transition-colors hover:underline" style="color: #6366f1;">
+        View on GitHub &rarr;
+      </a>
+    </div>
+
+    <!-- Terminal mockup -->
+    <div data-anim="scale-in" class="mt-16 w-full max-w-lg overflow-hidden rounded-xl border text-left shadow-lg" style="border-color: #e2e8f0; background: #1e293b;">
+      <div class="flex items-center gap-1.5 border-b px-4 py-2.5" style="border-color: #334155;">
+        <span class="h-3 w-3 rounded-full" style="background: #f87171;"></span>
+        <span class="h-3 w-3 rounded-full" style="background: #fbbf24;"></span>
+        <span class="h-3 w-3 rounded-full" style="background: #34d399;"></span>
+        <span class="ml-2 text-xs font-mono" style="color: #64748b;">terminal</span>
+      </div>
+      <div class="px-5 py-4 font-mono text-sm leading-relaxed" style="color: #e2e8f0;">
+        <div><span style="color: #34d399;">$</span> eli chat</div>
+        <div class="mt-2" style="color: #94a3b8;">&gt; summarize this repo</div>
+        <div class="mt-2" style="color: #a5b4fc;">Eli is a hook-first agent framework with a 7-stage turn pipeline...</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Stats -->
+  <section class="relative z-10 border-y" style="border-color: #e2e8f0;">
+    <div data-anim="stagger" class="mx-auto grid max-w-4xl grid-cols-2 gap-px sm:grid-cols-4">
+      <div class="flex flex-col items-center py-8">
+        <span class="text-3xl font-extrabold tracking-tight sm:text-4xl" style="color: #4f46e5;">12</span>
+        <span class="mt-1 text-xs font-medium uppercase tracking-wider" style="color: #94a3b8;">Hook Points</span>
+      </div>
+      <div class="flex flex-col items-center py-8">
+        <span class="text-3xl font-extrabold tracking-tight sm:text-4xl" style="color: #4f46e5;">21+</span>
+        <span class="mt-1 text-xs font-medium uppercase tracking-wider" style="color: #94a3b8;">Builtin Tools</span>
+      </div>
+      <div class="flex flex-col items-center py-8">
+        <span class="text-3xl font-extrabold tracking-tight sm:text-4xl" style="color: #4f46e5;">3</span>
+        <span class="mt-1 text-xs font-medium uppercase tracking-wider" style="color: #94a3b8;">Channels</span>
+      </div>
+      <div class="flex flex-col items-center py-8">
+        <span class="text-3xl font-extrabold tracking-tight sm:text-4xl" style="color: #4f46e5;">5+</span>
+        <span class="mt-1 text-xs font-medium uppercase tracking-wider" style="color: #94a3b8;">LLM Providers</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- How it works -->
+  <section id="how" class="relative z-10 mx-auto max-w-4xl px-6 py-24 sm:py-32">
+    <div data-anim="fade-up" class="text-center">
+      <span class="text-xs font-semibold uppercase tracking-widest" style="color: #6366f1;">How it works</span>
+      <h2 class="mt-3 font-bold leading-tight tracking-tight" style="font-size: clamp(1.75rem, 4vw, 2.75rem); color: #0f172a;">
+        One pipeline. Every channel.
+      </h2>
+    </div>
+
+    <div data-anim="stagger" class="mt-16 grid gap-8 sm:grid-cols-3">
+      <div class="text-center sm:text-left">
+        <span class="text-4xl font-extrabold" style="color: #e0e7ff;">01</span>
+        <h3 class="mt-3 text-lg font-bold" style="color: #0f172a;">Inbound</h3>
+        <p class="mt-2 text-sm leading-relaxed" style="color: #64748b;">
+          Messages arrive from any channel. Sessions are resolved, state is loaded from tape, and prompts are built from context.
+        </p>
+      </div>
+      <div class="text-center sm:text-left">
+        <span class="text-4xl font-extrabold" style="color: #e0e7ff;">02</span>
+        <h3 class="mt-3 text-lg font-bold" style="color: #0f172a;">Execute</h3>
+        <p class="mt-2 text-sm leading-relaxed" style="color: #64748b;">
+          The model runs with full tool access. Decisions are made, tools are called, and results accumulate in the agent loop.
+        </p>
+      </div>
+      <div class="text-center sm:text-left">
+        <span class="text-4xl font-extrabold" style="color: #e0e7ff;">03</span>
+        <h3 class="mt-3 text-lg font-bold" style="color: #0f172a;">Outbound</h3>
+        <p class="mt-2 text-sm leading-relaxed" style="color: #64748b;">
+          State is persisted to tape. Responses are rendered and dispatched back to the originating channel.
+        </p>
+      </div>
+    </div>
+
+    <!-- Pipeline diagram -->
+    <div data-anim="scale-in" class="mt-12 overflow-x-auto rounded-xl border px-5 py-4" style="border-color: #e2e8f0; background: #f8fafc;">
+      <div class="flex items-center gap-2 whitespace-nowrap font-mono text-xs font-medium" style="color: #475569;">
+        <span class="rounded-md border px-2 py-1" style="border-color: #c7d2fe; background: #eef2ff; color: #4f46e5;">resolve_session</span>
+        <span style="color: #cbd5e1;">&rarr;</span>
+        <span class="rounded-md border px-2 py-1" style="border-color: #c7d2fe; background: #eef2ff; color: #4f46e5;">load_state</span>
+        <span style="color: #cbd5e1;">&rarr;</span>
+        <span class="rounded-md border px-2 py-1" style="border-color: #c7d2fe; background: #eef2ff; color: #4f46e5;">build_prompt</span>
+        <span style="color: #cbd5e1;">&rarr;</span>
+        <span class="rounded-md border px-2 py-1" style="border-color: #fde68a; background: #fffbeb; color: #92400e;">run_model</span>
+        <span style="color: #cbd5e1;">&rarr;</span>
+        <span class="rounded-md border px-2 py-1" style="border-color: #a7f3d0; background: #ecfdf5; color: #065f46;">save_state</span>
+        <span style="color: #cbd5e1;">&rarr;</span>
+        <span class="rounded-md border px-2 py-1" style="border-color: #a7f3d0; background: #ecfdf5; color: #065f46;">render_outbound</span>
+        <span style="color: #cbd5e1;">&rarr;</span>
+        <span class="rounded-md border px-2 py-1" style="border-color: #a7f3d0; background: #ecfdf5; color: #065f46;">dispatch_outbound</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section class="relative z-10 py-24 sm:py-32" style="background: #f1f5f9;">
+    <div class="mx-auto max-w-5xl px-6">
+      <div data-anim="fade-up" class="text-center">
+        <span class="text-xs font-semibold uppercase tracking-widest" style="color: #6366f1;">Features</span>
+        <h2 class="mt-3 font-bold leading-tight tracking-tight" style="font-size: clamp(1.75rem, 4vw, 2.75rem); color: #0f172a;">
+          Built to extend. Hard to break.
+        </h2>
+      </div>
+
+      <div data-anim="stagger" class="mt-14 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        <div class="rounded-2xl border bg-white/70 px-6 py-5 backdrop-blur-sm" style="border-color: #e2e8f0;">
+          <div class="text-2xl">&#x1f3a3;</div>
+          <h3 class="mt-3 text-sm font-bold" style="color: #0f172a;">Hook-First Architecture</h3>
+          <p class="mt-1.5 text-sm leading-relaxed" style="color: #64748b;">
+            12 hook points with last-registered-wins semantics. Builtins are just default plugins you can replace.
+          </p>
+        </div>
+        <div class="rounded-2xl border bg-white/70 px-6 py-5 backdrop-blur-sm" style="border-color: #e2e8f0;">
+          <div class="text-2xl">&#x1f4e1;</div>
+          <h3 class="mt-3 text-sm font-bold" style="color: #0f172a;">Multi-Channel</h3>
+          <p class="mt-1.5 text-sm leading-relaxed" style="color: #64748b;">
+            CLI REPL, Telegram bot, Feishu/Slack/Discord via sidecar. Same pipeline everywhere.
+          </p>
+        </div>
+        <div class="rounded-2xl border bg-white/70 px-6 py-5 backdrop-blur-sm" style="border-color: #e2e8f0;">
+          <div class="text-2xl">&#x1f4fc;</div>
+          <h3 class="mt-3 text-sm font-bold" style="color: #0f172a;">Tape System</h3>
+          <p class="mt-1.5 text-sm leading-relaxed" style="color: #64748b;">
+            Append-only conversation history with anchors, search, and forking. Context from tape, not session accumulation.
+          </p>
+        </div>
+        <div class="rounded-2xl border bg-white/70 px-6 py-5 backdrop-blur-sm" style="border-color: #e2e8f0;">
+          <div class="text-2xl">&#x2728;</div>
+          <h3 class="mt-3 text-sm font-bold" style="color: #0f172a;">Skills</h3>
+          <p class="mt-1.5 text-sm leading-relaxed" style="color: #64748b;">
+            Markdown-defined capabilities with YAML frontmatter. Project, global, and builtin precedence layers.
+          </p>
+        </div>
+        <div class="rounded-2xl border bg-white/70 px-6 py-5 backdrop-blur-sm" style="border-color: #e2e8f0;">
+          <div class="text-2xl">&#x1f6e0;&#xfe0f;</div>
+          <h3 class="mt-3 text-sm font-bold" style="color: #0f172a;">21+ Builtin Tools</h3>
+          <p class="mt-1.5 text-sm leading-relaxed" style="color: #64748b;">
+            Shell, filesystem, web fetch, subagent, tape operations, decisions. Extend with your own.
+          </p>
+        </div>
+        <div class="rounded-2xl border bg-white/70 px-6 py-5 backdrop-blur-sm" style="border-color: #e2e8f0;">
+          <div class="text-2xl">&#x1f9e0;</div>
+          <h3 class="mt-3 text-sm font-bold" style="color: #0f172a;">Provider-Agnostic LLM</h3>
+          <p class="mt-1.5 text-sm leading-relaxed" style="color: #64748b;">
+            OpenAI, Claude, GitHub Copilot, custom endpoints. Switch with one env var. No vendor lock-in.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Architecture -->
+  <section class="relative z-10 mx-auto max-w-4xl px-6 py-24 sm:py-32">
+    <div data-anim="fade-up" class="text-center">
+      <span class="text-xs font-semibold uppercase tracking-widest" style="color: #6366f1;">Architecture</span>
+      <h2 class="mt-3 font-bold leading-tight tracking-tight" style="font-size: clamp(1.75rem, 4vw, 2.75rem); color: #0f172a;">
+        Two crates. Clean layers.
+      </h2>
+      <p class="mx-auto mt-4 max-w-2xl text-sm leading-relaxed" style="color: #64748b;">
+        A Cargo workspace with a provider-agnostic LLM toolkit and a hook-first agent framework. Every component is testable, swappable, and observable.
+      </p>
+    </div>
+
+    <div data-anim="stagger" class="mt-12 space-y-3">
+      <div class="flex flex-col gap-3 rounded-xl border px-5 py-4 sm:flex-row sm:items-center" style="border-color: #e2e8f0; background: #eef2ff;">
+        <span class="w-28 shrink-0 text-xs font-bold uppercase tracking-wider" style="color: #4f46e5;">Channels</span>
+        <div class="flex flex-wrap gap-2">
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">CLI</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Telegram</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Feishu</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Slack</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Discord</span>
+        </div>
+      </div>
+      <div class="flex flex-col gap-3 rounded-xl border px-5 py-4 sm:flex-row sm:items-center" style="border-color: #e2e8f0; background: #fff;">
+        <span class="w-28 shrink-0 text-xs font-bold uppercase tracking-wider" style="color: #64748b;">eli</span>
+        <div class="flex flex-wrap gap-2">
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Turn Pipeline</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Hook System</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Skills</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Tools</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Tape</span>
+        </div>
+      </div>
+      <div class="flex flex-col gap-3 rounded-xl border px-5 py-4 sm:flex-row sm:items-center" style="border-color: #e2e8f0; background: #fff;">
+        <span class="w-28 shrink-0 text-xs font-bold uppercase tracking-wider" style="color: #64748b;">conduit</span>
+        <div class="flex flex-wrap gap-2">
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Transport</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Streaming</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Tool Schema</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">OAuth</span>
+        </div>
+      </div>
+      <div class="flex flex-col gap-3 rounded-xl border px-5 py-4 sm:flex-row sm:items-center" style="border-color: #e2e8f0; background: #faf5ff;">
+        <span class="w-28 shrink-0 text-xs font-bold uppercase tracking-wider" style="color: #7c3aed;">Providers</span>
+        <div class="flex flex-wrap gap-2">
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">OpenAI</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Claude</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">GitHub Copilot</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">DeepSeek</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Ollama</span>
+          <span class="rounded-md border px-2.5 py-1 text-xs font-medium" style="color: #475569; border-color: #cbd5e1; background: rgba(255,255,255,0.6);">Custom</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Quick Start -->
+  <section id="quickstart" class="relative z-10 py-24 sm:py-32" style="background: #f1f5f9;">
+    <div class="mx-auto max-w-3xl px-6">
+      <div data-anim="fade-up" class="text-center">
+        <span class="text-xs font-semibold uppercase tracking-widest" style="color: #6366f1;">Quick start</span>
+        <h2 class="mt-3 font-bold leading-tight tracking-tight" style="font-size: clamp(1.75rem, 4vw, 2.75rem); color: #0f172a;">
+          Up and running in minutes.
+        </h2>
+      </div>
+
+      <div data-anim="scale-in" class="mt-10 overflow-hidden rounded-xl border shadow-lg" style="border-color: #e2e8f0; background: #1e293b;">
+        <div class="flex items-center gap-1.5 border-b px-4 py-2.5" style="border-color: #334155;">
+          <span class="h-3 w-3 rounded-full" style="background: #f87171;"></span>
+          <span class="h-3 w-3 rounded-full" style="background: #fbbf24;"></span>
+          <span class="h-3 w-3 rounded-full" style="background: #34d399;"></span>
+          <span class="ml-2 text-xs font-mono" style="color: #64748b;">terminal</span>
+        </div>
+        <div class="px-5 py-5 font-mono text-sm leading-loose" style="color: #e2e8f0;">
+          <div><span style="color: #94a3b8;"># Install from source</span></div>
+          <div><span style="color: #34d399;">$</span> git clone https://github.com/cklxx/eli.git</div>
+          <div><span style="color: #34d399;">$</span> cd eli && cargo build --release</div>
+          <div><span style="color: #34d399;">$</span> cp env.example .env</div>
+          <div class="mt-3"><span style="color: #94a3b8;"># Run</span></div>
+          <div><span style="color: #34d399;">$</span> eli chat <span style="color: #94a3b8;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# interactive REPL</span></div>
+          <div><span style="color: #34d399;">$</span> eli run "summarize this" <span style="color: #94a3b8;">&nbsp;# one-shot execution</span></div>
+          <div><span style="color: #34d399;">$</span> eli gateway <span style="color: #94a3b8;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# multi-channel listener</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Final CTA -->
+  <section class="relative z-10 mx-auto max-w-2xl px-6 py-28 text-center sm:py-36">
+    <div data-anim="fade-up">
+      <h2 class="font-bold leading-tight tracking-tight" style="font-size: clamp(1.75rem, 4vw, 2.75rem); color: #0f172a;">
+        Ready to build your agent?
+      </h2>
+      <p class="mx-auto mt-4 max-w-md text-base leading-relaxed" style="color: #64748b;">
+        Clone the repo, write a hook, and ship. Eli handles the rest.
+      </p>
+      <a href="https://github.com/cklxx/eli" target="_blank" rel="noopener noreferrer" class="mt-8 inline-block rounded-full px-10 py-3.5 text-sm font-semibold text-white transition-all hover:scale-105" style="background: linear-gradient(135deg, #6366f1, #8b5cf6); box-shadow: 0 4px 14px rgba(99,102,241,0.25);">
+        View on GitHub
+      </a>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="relative z-10 border-t px-6 py-8" style="border-color: #e2e8f0;">
+    <div class="mx-auto flex max-w-5xl flex-col items-center gap-3 sm:flex-row sm:justify-between">
+      <p class="text-xs" style="color: #94a3b8;">
+        Eli &mdash; Ease Lives Instantly &middot; Apache-2.0
+      </p>
+      <div class="flex items-center gap-4">
+        <a href="https://github.com/cklxx/eli" target="_blank" rel="noopener noreferrer" class="text-xs transition-colors hover:opacity-80" style="color: #94a3b8;">GitHub</a>
+        <a href="https://github.com/cklxx/eli/issues" target="_blank" rel="noopener noreferrer" class="text-xs transition-colors hover:opacity-80" style="color: #94a3b8;">Issues</a>
+        <a href="https://github.com/cklxx/eli/blob/main/README.md" target="_blank" rel="noopener noreferrer" class="text-xs transition-colors hover:opacity-80" style="color: #94a3b8;">Docs</a>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Scroll reveal -->
+  <script>
+    (function () {
+      const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const els = document.querySelectorAll('[data-anim]');
+      if (prefersReduced) {
+        els.forEach(function (el) { el.classList.add('is-visible'); });
+        return;
+      }
+      var observer = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('is-visible');
+            observer.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.12, rootMargin: '0px 0px -60px 0px' });
+      els.forEach(function (el) { observer.observe(el); });
+    })();
+  </script>
+</body>
+</html>
