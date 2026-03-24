@@ -202,15 +202,125 @@ fn aggressive_trim(messages: &mut Vec<Value>) {
         keep_from = 0;
     }
 
-    let recent: Vec<Value> = conversation[keep_from..].to_vec();
+    let mut recent: Vec<Value> = conversation[keep_from..].to_vec();
 
     messages.clear();
     messages.extend(system_msgs);
     if keep_from > 0 {
-        messages.push(serde_json::json!({
-            "role": "assistant",
-            "content": "[Earlier tool interactions trimmed to fit context window. Use tape.search to review full history.]"
-        }));
+        const TRIM_NOTICE: &str = "[Earlier tool interactions trimmed to fit context window. Use tape.search to review full history.]";
+        // If the kept conversation starts with an assistant message, prepend
+        // the trim notice to its content instead of injecting a separate
+        // assistant message (which would violate alternating-roles constraints).
+        if recent
+            .first()
+            .and_then(|m| m.get("role"))
+            .and_then(|r| r.as_str())
+            == Some("assistant")
+        {
+            let first = &mut recent[0];
+            let existing = first
+                .get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            first["content"] =
+                Value::String(format!("{TRIM_NOTICE}\n\n{existing}"));
+        } else {
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": TRIM_NOTICE
+            }));
+        }
     }
     messages.extend(recent);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Verify that aggressive_trim does not produce consecutive assistant messages
+    /// when the kept conversation starts with an assistant message.
+    #[test]
+    fn aggressive_trim_no_consecutive_assistant_when_recent_starts_with_assistant() {
+        // Build a conversation with many rounds so trimming kicks in.
+        // After the old user messages, the kept portion will start with
+        // an assistant message (the tool_calls response).
+        let mut messages = vec![
+            json!({"role": "system", "content": "You are helpful."}),
+        ];
+
+        // Add enough rounds so the first ones get trimmed.
+        // AGGRESSIVE_TRIM_KEEP_ROUNDS is 2, so we need >2 user messages.
+        for i in 0..4 {
+            messages.push(json!({"role": "user", "content": format!("question {i}")}));
+            messages.push(json!({"role": "assistant", "content": format!("answer {i}")}));
+        }
+
+        // Now make the kept portion start with assistant by adding a tool round:
+        // user -> assistant (tool_call) -> tool -> assistant
+        // We want 2 user rounds at the end where the boundary falls on an assistant msg.
+        let mut messages2 = vec![
+            json!({"role": "system", "content": "You are helpful."}),
+        ];
+        // Old rounds that will be trimmed
+        for i in 0..3 {
+            messages2.push(json!({"role": "user", "content": format!("old q{i}")}));
+            messages2.push(json!({"role": "assistant", "content": format!("old a{i}")}));
+        }
+        // This assistant msg will be the start of `recent` if keep_from lands here
+        messages2.push(json!({"role": "assistant", "content": "continued thought"}));
+        messages2.push(json!({"role": "user", "content": "recent q1"}));
+        messages2.push(json!({"role": "assistant", "content": "recent a1"}));
+        messages2.push(json!({"role": "user", "content": "recent q2"}));
+        messages2.push(json!({"role": "assistant", "content": "recent a2"}));
+
+        aggressive_trim(&mut messages2);
+
+        // Check no two consecutive messages share the same role
+        for window in messages2.windows(2) {
+            let role_a = window[0].get("role").and_then(|r| r.as_str()).unwrap_or("");
+            let role_b = window[1].get("role").and_then(|r| r.as_str()).unwrap_or("");
+            assert!(
+                role_a != role_b || role_a == "system",
+                "consecutive messages with role '{role_a}' found: {:?} and {:?}",
+                window[0],
+                window[1],
+            );
+        }
+    }
+
+    /// When kept conversation starts with a user message, the trim notice
+    /// should be injected as a separate assistant message (original behavior).
+    #[test]
+    fn aggressive_trim_injects_notice_before_user() {
+        let mut messages = vec![
+            json!({"role": "system", "content": "system"}),
+        ];
+        for i in 0..4 {
+            messages.push(json!({"role": "user", "content": format!("q{i}")}));
+            messages.push(json!({"role": "assistant", "content": format!("a{i}")}));
+        }
+
+        aggressive_trim(&mut messages);
+
+        // Should have system, then assistant trim notice, then user/assistant pairs
+        assert_eq!(
+            messages[0].get("role").and_then(|r| r.as_str()),
+            Some("system")
+        );
+        assert_eq!(
+            messages[1].get("role").and_then(|r| r.as_str()),
+            Some("assistant")
+        );
+        assert!(messages[1]
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap()
+            .contains("trimmed"));
+        assert_eq!(
+            messages[2].get("role").and_then(|r| r.as_str()),
+            Some("user")
+        );
+    }
 }
