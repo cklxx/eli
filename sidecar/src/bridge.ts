@@ -1,5 +1,8 @@
 import express from "express";
 import type { SidecarConfig } from "./config.js";
+import { logger } from "./log.js";
+
+const log = logger("bridge");
 import type {
   ChannelPlugin,
   EliChannelMessage,
@@ -68,16 +71,16 @@ function postToEli(url: string, msg: EliChannelMessage): Promise<Response> {
 async function handleInboundResponse(url: string, resp: Response): Promise<boolean> {
   if (resp.ok) return true;
   const body = await resp.text();
-  console.error(`[bridge] POST ${url} failed: ${resp.status} ${body}`);
+  log.error("POST failed", { url, status: resp.status, body });
   return true;
 }
 
 function handleInboundError(url: string, err: unknown, retry: number): boolean {
   if (isRetryableInboundError(err) && retry < INBOUND_RETRY_LIMIT) {
-    console.warn(`[bridge] POST ${url} ECONNREFUSED, retry ${retry + 1}/${INBOUND_RETRY_LIMIT}`);
+    log.warn("POST ECONNREFUSED, retrying", { url, retry: retry + 1, max: INBOUND_RETRY_LIMIT });
     return false;
   }
-  console.error(`[bridge] POST ${url} error:`, err);
+  log.error("POST error", { url, err: String(err) });
   return true;
 }
 
@@ -164,10 +167,7 @@ async function sendSessionNotice(
       accountId: sessionCtx.accountId,
     });
   } catch (err: any) {
-    console.error(
-      `[bridge] ${noticeKind} send failed:`,
-      err?.message ?? err,
-    );
+    log.error("send failed", { kind: noticeKind, err: err?.message ?? String(err) });
   }
 }
 
@@ -227,20 +227,20 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
       }
 
       if (!sourceChannel) {
-        console.error("[bridge] outbound: cannot determine source_channel from context or session_id");
+        log.error("outbound: cannot determine source_channel from context or session_id");
         res.status(400).json({ error: "missing source_channel" });
         return;
       }
 
       const channelPlugin = registry.channels.get(sourceChannel);
       if (!channelPlugin) {
-        console.error(`[bridge] outbound: unknown channel "${sourceChannel}"`);
+        log.error("outbound: unknown channel", { channel: sourceChannel });
         res.status(404).json({ error: `channel "${sourceChannel}" not found` });
         return;
       }
 
       if (!cleanupOnly && !channelPlugin.outbound?.sendText) {
-        console.error(`[bridge] outbound: channel "${sourceChannel}" has no sendText`);
+        log.error("outbound: channel has no sendText", { channel: sourceChannel });
         res.status(501).json({ error: `channel "${sourceChannel}" cannot send text` });
         return;
       }
@@ -261,7 +261,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
           }
         }
 
-        console.log(`[bridge] outbound: channel=${sourceChannel} to=${to} accountId=${accountId} textLen=${msg.content?.length} cleanupOnly=${cleanupOnly}`);
+        log.info("outbound", { channel: sourceChannel, to, account_id: accountId, text_len: msg.content?.length, cleanup_only: cleanupOnly });
 
         // Remove typing indicator if one was set for this session.
         const sessionId = msg.session_id || `${sourceChannel}:${accountId}:${chatId}`;
@@ -289,7 +289,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
 
         res.json(result);
       } catch (err: any) {
-        console.error(`[bridge] outbound sendText error:`, err);
+        log.error("outbound sendText error", { err: String(err) });
         res.status(500).json({ error: err.message ?? "sendText failed" });
       }
     });
@@ -410,7 +410,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
           durationMs: Date.now() - startedAt,
           error: errorMessage,
         });
-        console.error(`[bridge] tool "${req.params.name}" error:`, err);
+        log.error("tool error", { tool: req.params.name, err: String(err) });
         res.status(500).json({
           content: [{ type: "text", text: `Error: ${errorMessage}` }],
         });
@@ -522,7 +522,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
         const result = await channelPlugin.outbound.sendText({ cfg, to, text, accountId });
         res.json(result);
       } catch (err: any) {
-        console.error(`[bridge] send error:`, err);
+        log.error("send error", { err: String(err) });
         res.status(500).json({ error: err?.message ?? "send failed" });
       }
     });
@@ -535,7 +535,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
     });
 
     const server = app.listen(port, () => {
-      console.log(`[bridge] outbound server listening on :${port}`);
+      log.info("outbound server listening", { port });
       resolve(server);
     });
   });

@@ -1,5 +1,8 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, join } from "node:path";
+import { logger } from "./log.js";
+
+const log = logger("config");
 
 export interface SidecarConfig {
   /** URL of eli's webhook channel (default: http://127.0.0.1:3100). */
@@ -82,9 +85,9 @@ export function loadConfig(path?: string): SidecarConfig {
   if (existsSync(configPath)) {
     const raw = readFileSync(configPath, "utf-8");
     fileConfig = JSON.parse(raw);
-    console.log(`[config] loaded ${configPath}`);
+    log.info("loaded", { path: configPath });
   } else {
-    console.log(`[config] no config file at ${configPath}, using auto-discovery`);
+    log.info("no config file, using auto-discovery", { path: configPath });
   }
 
   // Env overrides.
@@ -99,7 +102,7 @@ export function loadConfig(path?: string): SidecarConfig {
   if (plugins.length === 0) {
     plugins = discoverPlugins();
     if (plugins.length > 0) {
-      console.log(`[config] auto-discovered plugins: ${plugins.join(", ")}`);
+      log.info("auto-discovered plugins", { plugins: plugins.join(", ") });
     }
   }
 

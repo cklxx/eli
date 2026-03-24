@@ -8,6 +8,11 @@ import type {
   OpenClawPluginDefinition,
   SessionContext,
 } from "./types.js";
+import { logger, pluginLogger } from "./log.js";
+
+const log = logger("runtime");
+const typingLog = logger("typing");
+const skillsLog = logger("skills");
 
 // ---------------------------------------------------------------------------
 // Typing indicator state — keyed by session so outbound can clean up
@@ -87,9 +92,7 @@ async function addTypingState(params: {
     );
     const state = await addTypingIndicator({ cfg, messageId, accountId });
     if (state?.messageId && !state?.reactionId) {
-      console.log(
-        `[runtime] typing indicator added without reactionId for message ${state.messageId}; cleanup will require fallback lookup`,
-      );
+      typingLog.info("indicator added without reactionId, cleanup will require fallback lookup", { messageId: state.messageId });
     }
     return state;
   } catch {
@@ -109,7 +112,7 @@ async function removeTypingState(
         accountId: typing.accountId,
       });
     } catch (e: any) {
-      console.log(`[runtime] lifecycle typing removal failed: ${e.message}`);
+      typingLog.warn("lifecycle typing removal failed", { err: e.message });
     }
     return;
   }
@@ -152,9 +155,7 @@ async function removeTypingState(
     );
 
     if (appTypingReactions.length === 0) {
-      console.log(
-        `[runtime] typing cleanup skipped for message ${messageId}: no reactionId in state and no app-owned Typing reactions found`,
-      );
+      typingLog.info("cleanup skipped, no app-owned Typing reactions found", { messageId });
       return;
     }
 
@@ -166,11 +167,9 @@ async function removeTypingState(
         accountId: typing.accountId,
       });
     }
-    console.log(
-      `[runtime] typing cleanup fallback removed ${appTypingReactions.length} app-owned Typing reaction(s) for message ${messageId}`,
-    );
+    typingLog.info("cleanup fallback removed reactions", { messageId, count: appTypingReactions.length });
   } catch (e: any) {
-    console.log(`[runtime] typing indicator removal failed: ${e.message}`);
+    typingLog.warn("indicator removal failed", { err: e.message });
   }
 }
 
@@ -181,21 +180,17 @@ export function beginPendingTyping(params: {
   accountId: string;
   sessionId: string;
 }): Promise<void> {
-  console.log(
-    `[typing] BEGIN sessionId=${params.sessionId} messageId=${params.messageId}`,
-  );
+  typingLog.debug("BEGIN", { session_id: params.sessionId, message_id: params.messageId });
   return queueTypingTask(params.sessionId, async () => {
     // Queue the add operation so a later cleanup for the same session cannot
     // overtake it and get dropped before the reaction state is recorded.
     const typingState = await addTypingState(params);
     if (!typingState) {
-      console.log(`[typing] BEGIN ${params.sessionId} → null state, skipping`);
+      typingLog.debug("BEGIN null state, skipping", { session_id: params.sessionId });
       pendingTyping.delete(params.sessionId);
       return;
     }
-    console.log(
-      `[typing] BEGIN ${params.sessionId} → stored msgId=${typingState?.messageId} rxnId=${typingState?.reactionId}`,
-    );
+    typingLog.debug("BEGIN stored", { session_id: params.sessionId, msg_id: typingState?.messageId, rxn_id: typingState?.reactionId });
     pendingTyping.set(params.sessionId, {
       typingState,
       cfg: params.cfg,
@@ -208,27 +203,23 @@ export function endPendingTyping(params: {
   sessionId: string;
   channelPlugin?: ChannelPlugin;
 }): Promise<void> {
-  console.log(
-    `[typing] END sessionId=${params.sessionId} plugin=${params.channelPlugin?.meta?.id ?? "none"} keys=[${[...pendingTyping.keys()]}]`,
-  );
+  typingLog.debug("END", { session_id: params.sessionId, plugin: params.channelPlugin?.meta?.id ?? "none" });
   return queueTypingTask(params.sessionId, async () => {
     // Cleanup shares the same queue as beginPendingTyping(). If outbound
     // arrives before typing setup finishes, this waits behind the add step
     // and still removes the reaction once the state is available.
     const typing = pendingTyping.get(params.sessionId);
     if (!typing) {
-      console.log(`[typing] END ${params.sessionId} → NOT FOUND in map`);
+      typingLog.debug("END not found in map", { session_id: params.sessionId });
       return;
     }
-    console.log(
-      `[typing] END ${params.sessionId} → found msgId=${typing.typingState?.messageId} rxnId=${typing.typingState?.reactionId}`,
-    );
+    typingLog.debug("END found", { session_id: params.sessionId, msg_id: typing.typingState?.messageId, rxn_id: typing.typingState?.reactionId });
     pendingTyping.delete(params.sessionId);
     try {
       await removeTypingState(params.channelPlugin, typing);
-      console.log(`[typing] END ${params.sessionId} → removal OK`);
+      typingLog.debug("END removal ok", { session_id: params.sessionId });
     } catch (e: any) {
-      console.log(`[typing] END ${params.sessionId} → removal THREW: ${e.message}`);
+      typingLog.warn("END removal threw", { session_id: params.sessionId, err: e.message });
     }
   });
 }
@@ -251,8 +242,8 @@ function buildPluginRuntime(config: SidecarConfig) {
         channels: config.channels,
       }),
     },
-    log: (...args: any[]) => console.log("[runtime]", ...args),
-    error: (...args: any[]) => console.error("[runtime]", ...args),
+    log: (...args: any[]) => log.info(args.map(String).join(" ")),
+    error: (...args: any[]) => log.error(args.map(String).join(" ")),
     channel: {
       reply: {
         /**
@@ -277,7 +268,7 @@ function buildPluginRuntime(config: SidecarConfig) {
           // Extract chatId from the "To" field (format: "channel:accountId:chatId" or just chatId)
           const chatId = to.includes(":") ? to.split(":").pop()! : to;
 
-          console.log(`[runtime] intercepted dispatchReplyFromConfig: session=${sessionKey} to=${to} sender=${senderName} body=${String(textBody).substring(0, 100)}`);
+          log.info("intercepted dispatchReplyFromConfig", { session: sessionKey, to, sender: senderName, body: String(textBody).substring(0, 100) });
 
           // Save session context for tool execution.
           const messageId = ctx.MessageSid ?? ctx.MessageId ?? ctx.messageId ?? "";
@@ -382,7 +373,7 @@ function buildPluginRuntime(config: SidecarConfig) {
           const channel = ctx.Channel ?? ctx.channel ?? "unknown";
           const accountId = ctx.AccountId ?? ctx.accountId ?? "default";
 
-          console.log(`[runtime] intercepted system command: ${body}`);
+          log.info("intercepted system command", { body });
 
           const envelope: InboundEnvelope = {
             channel,
@@ -457,13 +448,13 @@ export async function loadPlugins(config: SidecarConfig): Promise<void> {
   const pluginRuntime = buildPluginRuntime(config);
 
   for (const pluginName of config.plugins) {
-    console.log(`[runtime] loading plugin: ${pluginName}`);
+    log.info("loading plugin", { plugin: pluginName });
     try {
       const mod = require(pluginName);
       const plugin: OpenClawPluginDefinition = mod.default ?? mod;
 
       if (typeof plugin.register !== "function") {
-        console.error(`[runtime] plugin "${pluginName}" has no register() — skipping`);
+        log.error("plugin has no register(), skipping", { plugin: pluginName });
         continue;
       }
 
@@ -471,9 +462,9 @@ export async function loadPlugins(config: SidecarConfig): Promise<void> {
       if (plugin.lifecycle?.initRuntime) {
         try {
           plugin.lifecycle.initRuntime(pluginRuntime, pluginName);
-          console.log(`[runtime] lifecycle.initRuntime called for ${pluginName}`);
+          log.info("lifecycle.initRuntime called", { plugin: pluginName });
         } catch (e: any) {
-          console.log(`[runtime] lifecycle.initRuntime failed for ${pluginName}: ${e.message}`);
+          log.warn("lifecycle.initRuntime failed", { plugin: pluginName, err: e.message });
         }
       } else {
         // Legacy fallback: try Lark-specific runtime injection.
@@ -481,7 +472,7 @@ export async function loadPlugins(config: SidecarConfig): Promise<void> {
           const pluginDir = require("path").dirname(require.resolve(pluginName));
           const { LarkClient } = require(pluginDir + "/src/core/lark-client.js");
           LarkClient.setRuntime(pluginRuntime);
-          console.log(`[runtime] injected runtime for ${pluginName}`);
+          log.info("injected runtime", { plugin: pluginName });
 
           // Override the static getter permanently so even if a new class copy
           // appears, calls to LarkClient.runtime still work.
@@ -503,18 +494,18 @@ export async function loadPlugins(config: SidecarConfig): Promise<void> {
             });
           }
         } catch (e: any) {
-          console.log(`[runtime] setRuntime skipped for ${pluginName}: ${e.message}`);
+          log.debug("setRuntime skipped", { plugin: pluginName, err: e.message });
         }
       }
 
       const api = new SidecarPluginApi(plugin.id ?? pluginName, config, pluginRuntime);
       plugin.register(api);
-      console.log(`[runtime] plugin loaded: ${plugin.id ?? pluginName}`);
+      log.info("plugin loaded", { plugin: plugin.id ?? pluginName });
 
       // Discover SKILL.md files from the plugin's skills/ directory.
       installPluginSkills(pluginName);
     } catch (err) {
-      console.error(`[runtime] failed to load plugin "${pluginName}":`, err);
+      log.error("failed to load plugin", { plugin: pluginName, err: String(err) });
     }
   }
 }
@@ -559,7 +550,7 @@ function installPluginSkills(pluginName: string): void {
 
     // Don't overwrite user's own SKILL.md files.
     if (fs.existsSync(destFile)) {
-      console.log(`[skills] ${entry.name}: skipped (already exists)`);
+      skillsLog.info("skipped (already exists)", { skill: entry.name });
       continue;
     }
 
@@ -579,9 +570,9 @@ function installPluginSkills(pluginName: string): void {
       fs.writeFileSync(destFile, content);
 
       writtenSkillDirs.push(destDir);
-      console.log(`[skills] installed: ${entry.name}`);
+      skillsLog.info("installed", { skill: entry.name });
     } catch (e: any) {
-      console.log(`[skills] failed to install ${entry.name}: ${e.message}`);
+      skillsLog.warn("failed to install", { skill: entry.name, err: e.message });
     }
   }
 
@@ -632,7 +623,7 @@ function generateMissingSkills(destSkillsDir: string, srcSkillsDir: string): voi
       fs.mkdirSync(destDir, { recursive: true });
       fs.writeFileSync(destFile, body);
       writtenSkillDirs.push(destDir);
-      console.log(`[skills] generated: ${groupName}`);
+      skillsLog.info("generated", { group: groupName });
     } catch {}
   }
 }
@@ -691,15 +682,12 @@ function buildGatewayContext(
 
     // Logger scoped to this channel account.
     log: {
-      info: (...args: any[]) => console.log(`[${channelId}:${accountId}]`, ...args),
-      warn: (...args: any[]) => console.warn(`[${channelId}:${accountId}]`, ...args),
-      error: (...args: any[]) => console.error(`[${channelId}:${accountId}]`, ...args),
-      debug: (...args: any[]) => console.debug(`[${channelId}:${accountId}]`, ...args),
+      ...pluginLogger(`${channelId}.${accountId}`),
     },
 
     // Status callback — log and ignore.
     setStatus: (status: any) => {
-      console.log(`[${channelId}:${accountId}] status:`, JSON.stringify(status));
+      logger(`${channelId}.${accountId}`).info("status", { status: JSON.stringify(status) });
     },
 
     // Abort signal for graceful shutdown.
@@ -720,7 +708,7 @@ function buildGatewayContext(
 export async function startChannels(config: SidecarConfig): Promise<void> {
   for (const [channelId, plugin] of registry.channels) {
     if (!plugin.gateway) {
-      console.log(`[runtime] channel "${channelId}" has no gateway adapter — outbound only`);
+      log.info("channel has no gateway adapter, outbound only", { channel: channelId });
       continue;
     }
 
@@ -743,31 +731,31 @@ export async function startChannels(config: SidecarConfig): Promise<void> {
       accountIds.length > 0 &&
       !(accountIds.length === 1 && accountIds[0] === "default");
     if (!hasRealAccounts && plugin.gateway?.loginWithQrStart) {
-      console.log(`[runtime] ${channelId}: no accounts configured, starting QR login...`);
+      log.info("no accounts configured, starting QR login", { channel: channelId });
       try {
         const startResult = await (plugin.gateway as any).loginWithQrStart({});
         const qrUrl = (startResult as any).qrDataUrl;
         const sessionKey = (startResult as any).sessionKey;
         if (qrUrl) {
-          console.log(`\n使用微信扫描以下二维码，以完成连接：\n`);
+          console.log(`\n使用微信扫描以下二维码，以完成连接：\n`);  // UX output
           try {
             const qrterm = require("qrcode-terminal");
             qrterm.generate(qrUrl, { small: true }, (qr: string) => {
-              console.log(qr);
-              console.log(`如果二维码未能成功展示，请用浏览器打开以下链接扫码：`);
-              console.log(qrUrl);
+              console.log(qr);  // UX output
+              console.log(`如果二维码未能成功展示，请用浏览器打开以下链接扫码：`);  // UX output
+              console.log(qrUrl);  // UX output
             });
           } catch {
-            console.log(`请用浏览器打开以下链接扫码：`);
-            console.log(qrUrl);
+            console.log(`请用浏览器打开以下链接扫码：`);  // UX output
+            console.log(qrUrl);  // UX output
           }
-          console.log(`\n等待扫码...\n`);
+          console.log(`\n等待扫码...\n`);  // UX output
           const waitResult = await (plugin.gateway as any).loginWithQrWait({
             sessionKey,
             timeoutMs: 300_000,
           });
           if (waitResult.connected) {
-            console.log(`[runtime] ${channelId}: ✅ 登录成功`);
+            log.info("QR login succeeded", { channel: channelId });
             // Re-list accounts after login.
             try {
               accountIds = await plugin.config.listAccountIds({
@@ -777,18 +765,18 @@ export async function startChannels(config: SidecarConfig): Promise<void> {
               accountIds = [];
             }
           } else {
-            console.error(`[runtime] ${channelId}: 登录失败 — ${waitResult.message}`);
+            log.error("QR login failed", { channel: channelId, message: waitResult.message });
           }
         } else {
-          console.error(`[runtime] ${channelId}: ${startResult.message}`);
+          log.error("QR login start failed", { channel: channelId, message: startResult.message });
         }
       } catch (err) {
-        console.error(`[runtime] ${channelId} QR login failed:`, err);
+        log.error("QR login error", { channel: channelId, err: String(err) });
       }
     }
 
     for (const accountId of accountIds) {
-      console.log(`[runtime] starting channel "${channelId}" account "${accountId}"`);
+      log.info("starting channel", { channel: channelId, account: accountId });
 
       const onMessage = async (envelope: InboundEnvelope) => {
         envelope.channel = envelope.channel || channelId;
@@ -811,13 +799,13 @@ export async function startChannels(config: SidecarConfig): Promise<void> {
 
       const startFn = plugin.gateway.startAccount ?? plugin.gateway.start;
       if (!startFn) {
-        console.error(`[runtime] channel "${channelId}" gateway has no start/startAccount`);
+        log.error("channel gateway has no start/startAccount", { channel: channelId });
         continue;
       }
       // Fire-and-forget: gateways run in the background (some block forever).
       void startFn.call(plugin.gateway, ctx)
-        .then(() => console.log(`[runtime] channel "${channelId}" account "${accountId}" gateway returned`))
-        .catch((err: any) => console.error(`[runtime] failed to start channel "${channelId}" account "${accountId}":`, err));
+        .then(() => log.info("channel gateway returned", { channel: channelId, account: accountId }))
+        .catch((err: any) => log.error("failed to start channel", { channel: channelId, account: accountId, err: String(err) }));
     }
   }
 }
@@ -852,19 +840,11 @@ export async function stopChannels(config: SidecarConfig): Promise<void> {
         await stopFn.call(plugin.gateway, {
           accountId,
           cfg: { channels: { [channelId]: channelConfig } },
-          log: {
-            info: (...args: any[]) => console.log(`[${channelId}:${accountId}]`, ...args),
-            warn: (...args: any[]) => console.warn(`[${channelId}:${accountId}]`, ...args),
-            error: (...args: any[]) => console.error(`[${channelId}:${accountId}]`, ...args),
-            debug: (...args: any[]) => console.debug(`[${channelId}:${accountId}]`, ...args),
-          },
+          log: pluginLogger(`${channelId}.${accountId}`),
         });
-        console.log(`[runtime] channel "${channelId}" account "${accountId}" stopped`);
+        log.info("channel stopped", { channel: channelId, account: accountId });
       } catch (err) {
-        console.error(
-          `[runtime] failed to stop channel "${channelId}" account "${accountId}":`,
-          err,
-        );
+        log.error("failed to stop channel", { channel: channelId, account: accountId, err: String(err) });
       }
     }
   }

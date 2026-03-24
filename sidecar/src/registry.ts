@@ -1,4 +1,7 @@
 import type { ChannelPlugin, ToolDefinition, HookHandler, HookOptions } from "./types.js";
+import { logger } from "./log.js";
+
+const log = logger("registry");
 
 export interface RegisteredHook {
   handler: HookHandler;
@@ -13,23 +16,23 @@ class Registry {
   registerChannel(plugin: ChannelPlugin): void {
     const id = plugin.meta.id;
     if (this.channels.has(id)) {
-      console.warn(`[registry] channel "${id}" already registered, overwriting`);
+      log.warn("channel already registered, overwriting", { id });
     }
     this.channels.set(id, plugin);
-    console.log(`[registry] channel registered: ${id}`);
+    log.info("channel registered", { id });
   }
 
   registerTool(tool: ToolDefinition): void {
     if (this.tools.has(tool.name)) {
-      console.warn(`[registry] tool "${tool.name}" already registered, overwriting`);
+      log.warn("tool already registered, overwriting", { name: tool.name });
     }
     this.tools.set(tool.name, tool);
-    console.log(`[registry] tool registered: ${tool.name}`);
+    log.info("tool registered", { name: tool.name });
   }
 
   registerHook(handler: HookHandler, options: HookOptions = {}): void {
     this.hooks.push({ handler, options });
-    console.log(`[registry] hook registered: ${options.eventType ?? "any"}`);
+    log.info("hook registered", { event: options.eventType ?? "any" });
   }
 }
 

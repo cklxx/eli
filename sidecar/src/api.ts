@@ -8,6 +8,7 @@ import type {
 } from "./types.js";
 import { registry } from "./registry.js";
 import type { SidecarConfig } from "./config.js";
+import { pluginLogger } from "./log.js";
 
 const pluginEventListeners = new Map<string, Array<(...args: any[]) => any>>();
 
@@ -27,7 +28,7 @@ export async function emitPluginEvent(event: string, ...args: any[]): Promise<vo
     try {
       await Promise.resolve(handler(...args));
     } catch (err) {
-      console.error(`[sidecar] event handler error for "${event}":`, err);
+      pluginLogger("sidecar").error(`event handler error for "${event}": ${err}`);
     }
   }
 }
@@ -49,13 +50,7 @@ export class SidecarPluginApi implements OpenClawPluginApi {
     pluginRuntime?: any,
   ) {
     this.runtime = pluginRuntime ?? null;
-    const prefix = `[${pluginId}]`;
-    this.logger = {
-      info: (...args: any[]) => console.log(prefix, ...args),
-      warn: (...args: any[]) => console.warn(prefix, ...args),
-      error: (...args: any[]) => console.error(prefix, ...args),
-      debug: (...args: any[]) => console.debug(prefix, ...args),
-    };
+    this.logger = pluginLogger(pluginId);
 
     // Expose config in the shape OpenClaw plugins expect:
     //   api.config.channels.<channelId>.accounts.<accountId>

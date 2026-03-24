@@ -1,9 +1,12 @@
 // Catch silently swallowed errors
+import { logger } from "./log.js";
+const log = logger("sidecar");
+
 process.on("unhandledRejection", (reason) => {
-  console.error("[UNHANDLED REJECTION]", reason);
+  log.error("unhandled rejection", { reason: String(reason) });
 });
 process.on("uncaughtException", (err) => {
-  console.error("[UNCAUGHT EXCEPTION]", err);
+  log.error("uncaught exception", { err: String(err) });
 });
 
 import { loadConfig, type SidecarConfig } from "./config.js";
@@ -60,25 +63,14 @@ export async function createMcpSidecar(
     config = { ...base, ...configOrPath };
   }
 
-  // Redirect all console output to stderr so stdout stays clean for MCP JSON-RPC.
-  const origLog = console.log;
-  const origInfo = console.info;
-  console.log = (...args: any[]) => console.error(...args);
-  console.info = (...args: any[]) => console.error(...args);
-
   initBridge(config);
   await loadPlugins(config);
 
-  console.error(
-    `[mcp] loaded: ${registry.channels.size} channel(s), ${registry.tools.size} tool(s)`,
-  );
+  const mcpLog = logger("mcp");
+  mcpLog.info("loaded", { channels: registry.channels.size, tools: registry.tools.size });
 
   const { startMcpServer: startMcp } = await import("./mcp.js");
   await startMcp({ transport: "stdio", config });
-
-  // Restore (though in MCP mode we stay in stdio forever).
-  console.log = origLog;
-  console.info = origInfo;
 }
 
 /**
@@ -110,22 +102,18 @@ export async function createSidecar(
     config = { ...base, ...configOrPath };
   }
 
-  console.log(`[sidecar] eli_url=${config.eli_url} port=${config.port}`);
-  console.log(
-    `[sidecar] plugins: ${config.plugins.join(", ") || "(auto-discover)"}`,
-  );
+  log.info("start", { eli_url: config.eli_url, port: config.port });
+  log.info("plugins", { list: config.plugins.join(", ") || "(auto-discover)" });
 
   initBridge(config);
   await loadPlugins(config);
 
-  console.log(
-    `[sidecar] registered: ${registry.channels.size} channel(s), ${registry.tools.size} tool(s)`,
-  );
+  log.info("registered", { channels: registry.channels.size, tools: registry.tools.size });
 
   const server = await startOutboundServer(config.port);
   await startChannels(config);
 
-  console.log("[sidecar] ready");
+  log.info("ready");
 
   return {
     config,
@@ -136,7 +124,7 @@ export async function createSidecar(
       return tool.execute(`call_${Date.now()}`, params);
     },
     async stop() {
-      console.log("[sidecar] shutting down...");
+      log.info("shutting down");
       cleanupInstalledSkills();
       server.close();
       await stopChannels(config);
@@ -159,7 +147,7 @@ if (isCLI) {
   if (mcpFlag) {
     // MCP mode: stdio transport, no HTTP server.
     createMcpSidecar().catch((err) => {
-      console.error("[mcp] fatal error:", err);
+      logger("mcp").error("fatal", { err: String(err) });
       process.exit(1);
     });
   } else {
@@ -177,12 +165,12 @@ if (isCLI) {
         // process dies (killed, crashed), the pipe closes and we get 'end'.
         process.stdin.resume();
         process.stdin.on("end", () => {
-          console.log("[sidecar] parent stdin closed, shutting down...");
+          log.info("parent stdin closed, shutting down");
           shutdown();
         });
       })
       .catch((err) => {
-        console.error("[sidecar] fatal error:", err);
+        log.error("fatal", { err: String(err) });
         process.exit(1);
       });
   }
