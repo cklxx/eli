@@ -173,10 +173,15 @@ def _find_ref(snapshot_text: str, pattern: str) -> str | None:
 def smart_post(session: McpSession, url: str, text_to_type: str, textbox_pattern: str, button_pattern: str) -> dict:
     """Navigate to a page, wait for it to load, type text, and click a button.
 
-    All in one MCP session — no window stealing.
+    All in one MCP session — no window stealing, no duplicate tabs.
     """
-    # 1. Navigate
-    nav = session.call("browser_navigate", {"url": url})
+    # 1. Navigate in current tab (not a new one) via run_code
+    nav = session.call("browser_run_code", {
+        "code": f"async (page) => {{ await page.goto('{url}'); return page.url(); }}"
+    })
+    if not nav.get("success"):
+        # Fallback to browser_navigate
+        nav = session.call("browser_navigate", {"url": url})
     if not nav.get("success"):
         return nav
 
