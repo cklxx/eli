@@ -9,8 +9,141 @@ pub use conduit::llm::ApiFormat;
 
 /// Default model identifier.
 pub const DEFAULT_MODEL: &str = "openrouter:qwen/qwen3-coder-next";
-/// Default maximum tokens per model response.
-pub const DEFAULT_MAX_TOKENS: usize = 1024;
+/// Fallback maximum output tokens when we cannot infer from the model name.
+pub const DEFAULT_MAX_OUTPUT_TOKENS: usize = 65_536;
+/// Fallback context window when we cannot infer from the model name.
+pub const DEFAULT_CONTEXT_WINDOW: usize = 128_000;
+
+// ---------------------------------------------------------------------------
+// Model spec table
+// ---------------------------------------------------------------------------
+
+/// Match strategy for a model pattern.
+#[derive(Clone, Copy)]
+enum Match {
+    /// Pattern is a substring of the model ID (default, most entries).
+    Contains,
+    /// Pattern must appear at the start of the model ID (avoids false positives
+    /// for short patterns like "o3").
+    Prefix,
+}
+
+/// Known model family spec: (pattern, match strategy, context_window, max_output_tokens).
+///
+/// Order matters — first match wins. More specific patterns must come before
+/// generic catch-alls. Matching is case-insensitive against the model_id part
+/// (provider prefix stripped).
+const MODEL_SPECS: &[(&str, Match, usize, usize)] = &[
+    // --- Anthropic Claude ---------------------------------------------------
+    ("claude-opus-4-6", Match::Contains, 200_000, 128_000),
+    ("claude-sonnet-4-6", Match::Contains, 200_000, 64_000),
+    ("claude-sonnet-4-5", Match::Contains, 200_000, 64_000),
+    ("claude-haiku-4-5", Match::Contains, 200_000, 16_384),
+    ("claude-opus-4", Match::Contains, 200_000, 32_000),
+    ("claude-sonnet-4", Match::Contains, 200_000, 64_000),
+    ("claude-3-5-sonnet", Match::Contains, 200_000, 8_192),
+    ("claude-3-5-haiku", Match::Contains, 200_000, 8_192),
+    ("claude-3-opus", Match::Contains, 200_000, 4_096),
+    ("claude-3-sonnet", Match::Contains, 200_000, 4_096),
+    ("claude-3-haiku", Match::Contains, 200_000, 4_096),
+    ("claude", Match::Contains, 200_000, 64_000),
+    // --- OpenAI -------------------------------------------------------------
+    ("o3", Match::Prefix, 200_000, 100_000),
+    ("o4-mini", Match::Prefix, 200_000, 100_000),
+    ("o1", Match::Prefix, 200_000, 100_000),
+    ("gpt-4.1", Match::Contains, 1_048_576, 32_768),
+    ("gpt-4o", Match::Contains, 128_000, 16_384),
+    ("gpt-4-turbo", Match::Contains, 128_000, 4_096),
+    ("gpt-4", Match::Contains, 8_192, 4_096),
+    ("gpt-3.5", Match::Contains, 16_384, 4_096),
+    // --- Google Gemini ------------------------------------------------------
+    ("gemini-2.5", Match::Contains, 1_048_576, 65_536),
+    ("gemini-2.0", Match::Contains, 1_048_576, 8_192),
+    ("gemini-1.5", Match::Contains, 1_048_576, 8_192),
+    ("gemini", Match::Contains, 128_000, 8_192),
+    // --- DeepSeek -----------------------------------------------------------
+    ("deepseek-reasoner", Match::Contains, 164_000, 65_536),
+    ("deepseek-r1", Match::Contains, 164_000, 65_536),
+    ("deepseek", Match::Contains, 128_000, 8_192),
+    // --- Qwen (Alibaba) ----------------------------------------------------
+    ("qwen3.5", Match::Contains, 1_000_000, 65_536),
+    ("qwen3-coder", Match::Contains, 1_000_000, 65_536),
+    ("qwen3", Match::Contains, 1_000_000, 65_536),
+    ("qwen", Match::Contains, 128_000, 32_768),
+    // --- Kimi (Moonshot AI) -------------------------------------------------
+    ("kimi-k2", Match::Contains, 262_144, 65_536),
+    ("moonshot", Match::Contains, 128_000, 16_384),
+    // --- GLM (Zhipu AI) -----------------------------------------------------
+    ("glm-5", Match::Contains, 200_000, 128_000),
+    ("glm-4", Match::Contains, 128_000, 4_096),
+    ("glm", Match::Contains, 128_000, 4_096),
+    // --- MiniMax ------------------------------------------------------------
+    ("minimax-m2", Match::Contains, 204_800, 131_072),
+    ("minimax-text-01", Match::Contains, 4_000_000, 204_800),
+    ("minimax", Match::Contains, 204_800, 65_536),
+    // --- Llama (Meta) -------------------------------------------------------
+    ("llama-4-scout", Match::Contains, 10_000_000, 16_384),
+    ("llama-4", Match::Contains, 1_048_576, 16_384),
+    ("llama-3", Match::Contains, 128_000, 8_192),
+    ("llama", Match::Contains, 128_000, 8_192),
+    // --- Mistral / Codestral ------------------------------------------------
+    ("mistral-large", Match::Contains, 128_000, 32_768),
+    ("codestral", Match::Contains, 256_000, 32_768),
+    ("mistral", Match::Contains, 32_000, 8_192),
+];
+
+// ---------------------------------------------------------------------------
+// Inference helpers
+// ---------------------------------------------------------------------------
+
+/// Strip the `"provider:"` prefix from a model string, returning just the
+/// model ID portion. If no colon is present, returns the full string.
+///
+/// Examples:
+/// - `"anthropic:claude-sonnet-4-6"` → `"claude-sonnet-4-6"`
+/// - `"openrouter:qwen/qwen3-coder-next"` → `"qwen/qwen3-coder-next"`
+/// - `"claude-sonnet-4-6"` → `"claude-sonnet-4-6"`
+fn strip_provider(model: &str) -> &str {
+    model.split_once(':').map_or(model, |(_, id)| id)
+}
+
+/// Look up model specs from `MODEL_SPECS` table. Returns
+/// `(context_window, max_output_tokens)` or `None` if no match.
+fn lookup_model_spec(model: &str) -> Option<(usize, usize)> {
+    let id = strip_provider(model).to_lowercase();
+    // For OpenRouter paths like "qwen/qwen3-coder-next", also try the part
+    // after the last slash.
+    let slug = id.rsplit('/').next().unwrap_or(&id);
+
+    for &(pattern, strategy, ctx, out) in MODEL_SPECS {
+        let matched = match strategy {
+            Match::Contains => id.contains(pattern) || slug.contains(pattern),
+            Match::Prefix => id.starts_with(pattern) || slug.starts_with(pattern),
+        };
+        if matched {
+            return Some((ctx, out));
+        }
+    }
+    None
+}
+
+/// Infer context window size (in tokens) from a model name string.
+fn infer_context_window(model: &str) -> usize {
+    lookup_model_spec(model)
+        .map(|(ctx, _)| ctx)
+        .unwrap_or(DEFAULT_CONTEXT_WINDOW)
+}
+
+/// Infer the maximum output tokens for a model from its name.
+///
+/// Returns the largest output-token limit the model supports so that tool
+/// calls with large payloads (e.g. document creation) are not silently
+/// truncated.
+fn infer_max_output_tokens(model: &str) -> usize {
+    lookup_model_spec(model)
+        .map(|(_, out)| out)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
+}
 
 /// Return the default home directory (`~/.eli`).
 fn default_home() -> PathBuf {
@@ -18,6 +151,85 @@ fn default_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".eli")
 }
+
+fn api_format_from_str_lossy(s: &str) -> ApiFormat {
+    match s.trim().to_lowercase().as_str() {
+        "auto" => ApiFormat::Auto,
+        "responses" => ApiFormat::Responses,
+        "messages" => ApiFormat::Messages,
+        "completion" => ApiFormat::Completion,
+        _ => ApiFormat::Auto,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// API credential resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve API key and base URL from environment variables.
+///
+/// Supports both single-value (`ELI_API_KEY` / `ELI_API_BASE`) and per-provider
+/// (`ELI_<PROVIDER>_API_KEY` / `ELI_<PROVIDER>_API_BASE`) patterns.
+fn resolve_api_credentials() -> (ApiKeyConfig, ApiBaseConfig) {
+    let single_key = env::var("ELI_API_KEY").ok();
+    let single_base = env::var("ELI_API_BASE").ok();
+
+    if let (Some(key), Some(base)) = (single_key.clone(), single_base.clone()) {
+        return (ApiKeyConfig::Single(key), ApiBaseConfig::Single(base));
+    }
+
+    let mut key_map: HashMap<String, String> = HashMap::new();
+    let mut base_map: HashMap<String, String> = HashMap::new();
+
+    if let Some(k) = single_key {
+        key_map.insert("default".to_owned(), k);
+    }
+    if let Some(b) = single_base {
+        base_map.insert("default".to_owned(), b);
+    }
+
+    for (key, value) in env::vars() {
+        if let Some(provider) = key
+            .strip_prefix("ELI_")
+            .and_then(|rest| rest.strip_suffix("_API_KEY"))
+            && provider != "API"
+        {
+            key_map.insert(provider.to_lowercase(), value.clone());
+        }
+        if let Some(provider) = key
+            .strip_prefix("ELI_")
+            .and_then(|rest| rest.strip_suffix("_API_BASE"))
+            && provider != "API"
+        {
+            base_map.insert(provider.to_lowercase(), value);
+        }
+    }
+
+    let api_key = collapse_config_map(key_map, ApiKeyConfig::None, ApiKeyConfig::Single, ApiKeyConfig::PerProvider);
+    let api_base = collapse_config_map(base_map, ApiBaseConfig::None, ApiBaseConfig::Single, ApiBaseConfig::PerProvider);
+    (api_key, api_base)
+}
+
+/// Collapse a `HashMap` into a config enum: empty → `none`, single "default"
+/// entry → `single(value)`, otherwise → `per_provider(map)`.
+fn collapse_config_map<T>(
+    mut map: HashMap<String, String>,
+    none: T,
+    single: fn(String) -> T,
+    per_provider: fn(HashMap<String, String>) -> T,
+) -> T {
+    if map.is_empty() {
+        none
+    } else if map.len() == 1 && map.contains_key("default") {
+        single(map.remove("default").unwrap())
+    } else {
+        per_provider(map)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AgentSettings
+// ---------------------------------------------------------------------------
 
 /// Agent configuration, loaded from environment variables with the `ELI_` prefix
 /// and optionally from a `.env` file via `dotenvy`.
@@ -36,111 +248,6 @@ pub struct AgentSettings {
     /// Context window size in tokens. Auto-detected from model name if not set
     /// via `ELI_CONTEXT_WINDOW`.
     pub context_window: usize,
-}
-
-/// Infer context window size (in tokens) from a model name string.
-///
-/// Covers mainstream providers. Falls back to 128k when the model is unknown.
-fn infer_context_window(model: &str) -> usize {
-    let m = model.to_lowercase();
-
-    // --- Anthropic Claude ---------------------------------------------------
-    // Claude 4 / 4.5 / 4.6 family — all 200k
-    if m.contains("claude-opus-4") || m.contains("claude-sonnet-4") {
-        return 200_000;
-    }
-    if m.contains("claude-4") {
-        return 200_000;
-    }
-    // Claude 3.5 / 3.6 family
-    if m.contains("claude-3") && (m.contains("sonnet") || m.contains("haiku") || m.contains("opus"))
-    {
-        return 200_000;
-    }
-    // Generic claude catch-all
-    if m.contains("claude") {
-        return 200_000;
-    }
-
-    // --- OpenAI -------------------------------------------------------------
-    // GPT-4.1 family (1M)
-    if m.contains("gpt-4.1") {
-        return 1_048_576;
-    }
-    // o3 / o4-mini (200k)
-    if m.starts_with("o3") || m.starts_with("o4") {
-        return 200_000;
-    }
-    // o1 family (200k)
-    if m.starts_with("o1") {
-        return 200_000;
-    }
-    // GPT-4o family (128k)
-    if m.contains("gpt-4o") {
-        return 128_000;
-    }
-    // GPT-4 turbo (128k)
-    if m.contains("gpt-4-turbo") || m.contains("gpt-4-1106") || m.contains("gpt-4-0125") {
-        return 128_000;
-    }
-    // GPT-4 base (8k)
-    if m.contains("gpt-4") {
-        return 8_192;
-    }
-    // GPT-3.5 turbo (16k)
-    if m.contains("gpt-3.5") {
-        return 16_384;
-    }
-
-    // --- Google Gemini ------------------------------------------------------
-    if m.contains("gemini-2") || m.contains("gemini-1.5-pro") {
-        return 1_048_576;
-    }
-    if m.contains("gemini-1.5-flash") {
-        return 1_048_576;
-    }
-    if m.contains("gemini") {
-        return 128_000;
-    }
-
-    // --- DeepSeek -----------------------------------------------------------
-    if m.contains("deepseek") {
-        return 128_000;
-    }
-
-    // --- Mistral / Codestral ------------------------------------------------
-    if m.contains("mistral-large") || m.contains("codestral") {
-        return 128_000;
-    }
-    if m.contains("mistral") {
-        return 32_000;
-    }
-
-    // --- Llama (Meta) -------------------------------------------------------
-    if m.contains("llama-4") {
-        return 1_048_576;
-    }
-    if m.contains("llama-3") {
-        return 128_000;
-    }
-
-    // --- Qwen ---------------------------------------------------------------
-    if m.contains("qwen") {
-        return 128_000;
-    }
-
-    // --- Fallback -----------------------------------------------------------
-    128_000
-}
-
-fn api_format_from_str_lossy(s: &str) -> ApiFormat {
-    match s.trim().to_lowercase().as_str() {
-        "auto" => ApiFormat::Auto,
-        "responses" => ApiFormat::Responses,
-        "messages" => ApiFormat::Messages,
-        "completion" => ApiFormat::Completion,
-        _ => ApiFormat::Auto,
-    }
 }
 
 impl AgentSettings {
@@ -182,7 +289,7 @@ impl AgentSettings {
         let max_tokens: usize = env::var("ELI_MAX_TOKENS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_MAX_TOKENS);
+            .unwrap_or_else(|| infer_max_output_tokens(&model));
 
         let model_timeout_seconds: Option<u64> = env::var("ELI_MODEL_TIMEOUT_SECONDS")
             .ok()
@@ -200,58 +307,7 @@ impl AgentSettings {
             .unwrap_or_else(|| infer_context_window(&model));
 
         // Resolve API key / base — single value or per-provider map.
-        let single_key = env::var("ELI_API_KEY").ok();
-        let single_base = env::var("ELI_API_BASE").ok();
-
-        let (api_key, api_base) =
-            if let (Some(key), Some(base)) = (single_key.clone(), single_base.clone()) {
-                (ApiKeyConfig::Single(key), ApiBaseConfig::Single(base))
-            } else {
-                let mut key_map: HashMap<String, String> = HashMap::new();
-                let mut base_map: HashMap<String, String> = HashMap::new();
-
-                if let Some(k) = &single_key {
-                    key_map.insert("default".to_owned(), k.clone());
-                }
-                if let Some(b) = &single_base {
-                    base_map.insert("default".to_owned(), b.clone());
-                }
-
-                for (key, value) in env::vars() {
-                    if let Some(provider) = key
-                        .strip_prefix("ELI_")
-                        .and_then(|rest| rest.strip_suffix("_API_KEY"))
-                        && provider != "API"
-                    {
-                        key_map.insert(provider.to_lowercase(), value.clone());
-                    }
-                    if let Some(provider) = key
-                        .strip_prefix("ELI_")
-                        .and_then(|rest| rest.strip_suffix("_API_BASE"))
-                        && provider != "API"
-                    {
-                        base_map.insert(provider.to_lowercase(), value);
-                    }
-                }
-
-                let api_key = if key_map.is_empty() {
-                    ApiKeyConfig::None
-                } else if key_map.len() == 1 && key_map.contains_key("default") {
-                    ApiKeyConfig::Single(key_map.remove("default").unwrap())
-                } else {
-                    ApiKeyConfig::PerProvider(key_map)
-                };
-
-                let api_base = if base_map.is_empty() {
-                    ApiBaseConfig::None
-                } else if base_map.len() == 1 && base_map.contains_key("default") {
-                    ApiBaseConfig::Single(base_map.remove("default").unwrap())
-                } else {
-                    ApiBaseConfig::PerProvider(base_map)
-                };
-
-                (api_key, api_base)
-            };
+        let (api_key, api_base) = resolve_api_credentials();
 
         Self {
             home,
@@ -319,10 +375,7 @@ mod tests {
         }
     }
 
-    // -- AgentSettings defaults (from_env with defaults) ----------------------
-
-    // Note: from_env reads actual env vars, so we test the default logic paths
-    // by checking struct field types and default values.
+    // -- AgentSettings defaults -----------------------------------------------
 
     #[test]
     fn test_default_model_constant() {
@@ -330,14 +383,13 @@ mod tests {
     }
 
     #[test]
-    fn test_default_max_tokens_constant() {
-        assert!(DEFAULT_MAX_TOKENS > 0);
+    fn test_default_max_output_tokens_constant() {
+        assert!(DEFAULT_MAX_OUTPUT_TOKENS > 0);
     }
 
     #[test]
     fn test_default_home_returns_path() {
         let home = default_home();
-        // Should end with .eli
         assert!(home.ends_with(".eli"));
     }
 
@@ -363,42 +415,196 @@ mod tests {
         assert_eq!(cloned.verbose, 1);
     }
 
+    // -- strip_provider -------------------------------------------------------
+
+    #[test]
+    fn test_strip_provider() {
+        assert_eq!(
+            strip_provider("anthropic:claude-sonnet-4-6"),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(
+            strip_provider("openrouter:qwen/qwen3-coder-next"),
+            "qwen/qwen3-coder-next"
+        );
+        assert_eq!(strip_provider("claude-sonnet-4-6"), "claude-sonnet-4-6");
+    }
+
     // -- infer_context_window ------------------------------------------------
 
     #[test]
-    fn test_infer_context_window_claude() {
-        assert_eq!(infer_context_window("claude-sonnet-4-20250514"), 200_000);
-        assert_eq!(infer_context_window("claude-opus-4-20250514"), 200_000);
-        assert_eq!(infer_context_window("claude-3-5-sonnet-20241022"), 200_000);
-        assert_eq!(infer_context_window("claude-3-haiku-20240307"), 200_000);
+    fn test_context_window_anthropic() {
+        assert_eq!(infer_context_window("anthropic:claude-opus-4-6"), 200_000);
+        assert_eq!(infer_context_window("anthropic:claude-sonnet-4-6"), 200_000);
+        assert_eq!(
+            infer_context_window("anthropic:claude-sonnet-4-20250514"),
+            200_000
+        );
+        assert_eq!(
+            infer_context_window("anthropic:claude-3-5-sonnet-20241022"),
+            200_000
+        );
+        assert_eq!(
+            infer_context_window("anthropic:claude-3-haiku-20240307"),
+            200_000
+        );
     }
 
     #[test]
-    fn test_infer_context_window_openai() {
-        assert_eq!(infer_context_window("gpt-4o-2024-08-06"), 128_000);
-        assert_eq!(infer_context_window("gpt-4-turbo-2024-04-09"), 128_000);
-        assert_eq!(infer_context_window("gpt-4.1-2025-04-14"), 1_048_576);
-        assert_eq!(infer_context_window("o3-2025-04-16"), 200_000);
-        assert_eq!(infer_context_window("o1-2024-12-17"), 200_000);
-        assert_eq!(infer_context_window("gpt-3.5-turbo"), 16_384);
+    fn test_context_window_openai() {
+        assert_eq!(infer_context_window("openai:gpt-4o-2024-08-06"), 128_000);
+        assert_eq!(infer_context_window("openai:gpt-4.1-2025-04-14"), 1_048_576);
+        assert_eq!(infer_context_window("openai:o3-2025-04-16"), 200_000);
+        assert_eq!(infer_context_window("openai:o4-mini"), 200_000);
+        assert_eq!(infer_context_window("openai:o1-2024-12-17"), 200_000);
+        assert_eq!(infer_context_window("openai:gpt-3.5-turbo"), 16_384);
     }
 
     #[test]
-    fn test_infer_context_window_gemini() {
-        assert_eq!(infer_context_window("gemini-2.5-pro"), 1_048_576);
-        assert_eq!(infer_context_window("gemini-1.5-flash"), 1_048_576);
+    fn test_context_window_gemini() {
+        assert_eq!(infer_context_window("google:gemini-2.5-pro"), 1_048_576);
+        assert_eq!(infer_context_window("google:gemini-2.5-flash"), 1_048_576);
+        assert_eq!(infer_context_window("google:gemini-1.5-flash"), 1_048_576);
     }
 
     #[test]
-    fn test_infer_context_window_others() {
-        assert_eq!(infer_context_window("deepseek-v3"), 128_000);
-        assert_eq!(infer_context_window("qwen-2.5-72b"), 128_000);
-        assert_eq!(infer_context_window("llama-4-maverick"), 1_048_576);
-        assert_eq!(infer_context_window("llama-3.1-70b"), 128_000);
+    fn test_context_window_chinese_models() {
+        assert_eq!(infer_context_window("dashscope:qwen3.5-plus"), 1_000_000);
+        assert_eq!(
+            infer_context_window("openrouter:qwen/qwen3-coder-next"),
+            1_000_000
+        );
+        assert_eq!(infer_context_window("moonshot:kimi-k2.5"), 262_144);
+        assert_eq!(infer_context_window("zhipu:glm-5"), 200_000);
+        assert_eq!(infer_context_window("minimax:minimax-text-01"), 4_000_000);
+        assert_eq!(infer_context_window("minimax:minimax-m2.7"), 204_800);
     }
 
     #[test]
-    fn test_infer_context_window_unknown_fallback() {
-        assert_eq!(infer_context_window("some-unknown-model"), 128_000);
+    fn test_context_window_others() {
+        assert_eq!(infer_context_window("deepseek:deepseek-chat"), 128_000);
+        assert_eq!(infer_context_window("deepseek:deepseek-reasoner"), 164_000);
+        assert_eq!(infer_context_window("meta:llama-4-maverick"), 1_048_576);
+        assert_eq!(infer_context_window("meta:llama-4-scout"), 10_000_000);
+        assert_eq!(infer_context_window("meta:llama-3.1-70b"), 128_000);
+        assert_eq!(
+            infer_context_window("mistral:mistral-large-latest"),
+            128_000
+        );
+        assert_eq!(infer_context_window("mistral:codestral-latest"), 256_000);
+    }
+
+    #[test]
+    fn test_context_window_unknown_fallback() {
+        assert_eq!(
+            infer_context_window("unknown:some-model"),
+            DEFAULT_CONTEXT_WINDOW
+        );
+    }
+
+    // -- infer_max_output_tokens ---------------------------------------------
+
+    #[test]
+    fn test_max_output_anthropic() {
+        assert_eq!(
+            infer_max_output_tokens("anthropic:claude-opus-4-6"),
+            128_000
+        );
+        assert_eq!(
+            infer_max_output_tokens("anthropic:claude-sonnet-4-6"),
+            64_000
+        );
+        assert_eq!(
+            infer_max_output_tokens("anthropic:claude-opus-4-20250514"),
+            32_000
+        );
+        assert_eq!(
+            infer_max_output_tokens("anthropic:claude-sonnet-4-20250514"),
+            64_000
+        );
+        assert_eq!(
+            infer_max_output_tokens("anthropic:claude-3-5-sonnet-20241022"),
+            8_192
+        );
+        assert_eq!(
+            infer_max_output_tokens("anthropic:claude-3-haiku-20240307"),
+            4_096
+        );
+    }
+
+    #[test]
+    fn test_max_output_openai() {
+        assert_eq!(infer_max_output_tokens("openai:gpt-4o"), 16_384);
+        assert_eq!(infer_max_output_tokens("openai:gpt-4.1"), 32_768);
+        assert_eq!(infer_max_output_tokens("openai:o3"), 100_000);
+        assert_eq!(infer_max_output_tokens("openai:o4-mini"), 100_000);
+        assert_eq!(infer_max_output_tokens("openai:o1"), 100_000);
+    }
+
+    #[test]
+    fn test_max_output_gemini() {
+        assert_eq!(infer_max_output_tokens("google:gemini-2.5-pro"), 65_536);
+        assert_eq!(infer_max_output_tokens("google:gemini-2.0-flash"), 8_192);
+    }
+
+    #[test]
+    fn test_max_output_chinese_models() {
+        assert_eq!(infer_max_output_tokens("dashscope:qwen3.5-plus"), 65_536);
+        assert_eq!(
+            infer_max_output_tokens("openrouter:qwen/qwen3-coder-next"),
+            65_536
+        );
+        assert_eq!(infer_max_output_tokens("moonshot:kimi-k2.5"), 65_536);
+        assert_eq!(infer_max_output_tokens("zhipu:glm-5"), 128_000);
+        assert_eq!(infer_max_output_tokens("minimax:minimax-m2.7"), 131_072);
+    }
+
+    #[test]
+    fn test_max_output_others() {
+        assert_eq!(infer_max_output_tokens("deepseek:deepseek-chat"), 8_192);
+        assert_eq!(
+            infer_max_output_tokens("deepseek:deepseek-reasoner"),
+            65_536
+        );
+        assert_eq!(infer_max_output_tokens("meta:llama-4-maverick"), 16_384);
+        assert_eq!(
+            infer_max_output_tokens("mistral:mistral-large-latest"),
+            32_768
+        );
+    }
+
+    #[test]
+    fn test_max_output_unknown_fallback() {
+        assert_eq!(
+            infer_max_output_tokens("unknown:some-model"),
+            DEFAULT_MAX_OUTPUT_TOKENS
+        );
+    }
+
+    // -- OpenRouter-style paths ----------------------------------------------
+
+    #[test]
+    fn test_openrouter_model_paths() {
+        // OpenRouter uses "provider/model" as model_id
+        assert_eq!(
+            infer_context_window("openrouter:anthropic/claude-sonnet-4-6"),
+            200_000
+        );
+        assert_eq!(
+            infer_max_output_tokens("openrouter:anthropic/claude-sonnet-4-6"),
+            64_000
+        );
+        assert_eq!(
+            infer_context_window("openrouter:google/gemini-2.5-pro"),
+            1_048_576
+        );
+        assert_eq!(
+            infer_max_output_tokens("openrouter:google/gemini-2.5-pro"),
+            65_536
+        );
+        assert_eq!(
+            infer_context_window("openrouter:deepseek/deepseek-r1"),
+            164_000
+        );
     }
 }
