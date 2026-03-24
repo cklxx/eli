@@ -1,127 +1,139 @@
-# Structure Review — Challenges & Counter-Proposals
+# Structure Review — Challenges
 
 **Date**: 2026-03-24
-**Challenging**: `structure-review.md` + `structure-review-critique.md`
-**Method**: Read both reports, then verified claims against the actual codebase
+**Challenging**: `structure-review.md` (original) and `structure-review-critique.md` (rewrite)
+**Method**: Read the actual source files, counted lines, traced dependencies, assessed cohesion
 
 ---
 
-## Challenge 1: Test lines inflate "god file" severity
+## Challenge 1: "God file" splits are over-engineered for this codebase
 
-Both reports count raw `wc -l` but never subtract inline tests. This changes the picture significantly:
+**Both reports agree**: split the 5-7 files over 1000 lines. This is the wrong framing.
 
-| File | Total lines | Test lines | Actual code | Report verdict |
-|------|------------|------------|-------------|----------------|
-| `llm.rs` | 2782 | 1054 (38%) | **1728** | GOD FILE (overstated) |
-| `store.rs` | 1014 | 528 (52%) | **486** | GOD FILE (wrong) |
-| `hooks.rs` | 1078 | ~50 (5%) | **~1028** | GOD FILE (correct) |
-| `agent.rs` | 1059 | ~20 (2%) | **~1039** | GOD FILE (correct) |
-| `tools.rs` | 1358 | ~40 (3%) | **~1318** | GOD FILE (correct) |
+**Reality check — test lines inflate the counts**:
 
-**Counter-proposal**: `store.rs` is NOT a god file. The critique (GAP-1) says it "belongs in Phase 1 splits alongside C1-C3." Wrong — 486 lines of code implementing two related store types (`ForkTapeStore` + `FileTapeStore`) with shared test infrastructure is cohesive and well-scoped. Splitting it would separate two stores that share the same `AsyncTapeStore` trait for no benefit.
+| File | Total | Code | Tests | Code % |
+|------|-------|------|-------|--------|
+| `llm.rs` | 2782 | 1728 | 1054 | 62% |
+| `hooks.rs` | 1078 | 746 | 332 | 69% |
+| `store.rs` | 1014 | 485 | 529 | 48% |
 
----
+`store.rs` is **48% tests**. It crossed the 1000-line threshold because it has good test coverage, not because it has too many responsibilities. The critique correctly flagged it as a missed "god file" — but it's not one. Splitting a 485-line implementation with co-located tests into 3 files (`fork.rs`, `file.rs`, `context.rs`) would scatter the tests and add module boilerplate for no clarity gain.
 
-## Challenge 2: Splitting `llm.rs` into 6 files is over-engineered
+`hooks.rs` at 746 lines of code is large but structurally simple: one trait (`EliHookSpec` with 12 hook points) + one runtime (`HookRuntime` with matching `call_*` dispatch methods). The `call_*` methods are repetitive but intentionally so — each has distinct error handling, logging, and return semantics. A macro would obscure these differences. Splitting into `hooks/spec.rs` + `hooks/runtime.rs` would separate a trait from its only consumer, making comprehension harder.
 
-The review recommends: `llm/mod.rs`, `llm/builder.rs`, `llm/chat.rs`, `llm/streaming.rs`, `llm/embedding.rs`, `llm/decisions.rs`.
-
-Problems:
-1. **Builder and struct are cohesive.** `LLMBuilder` exists solely to construct `LLM`. Separating them means cross-file `pub(crate)` fields or constructor gymnastics.
-2. **`chat.rs` vs `streaming.rs` is a false split.** `stream()` and `chat_async()` share message-building, tape-recording, and provider-dispatch. Splitting forces duplication or a third "shared internals" file.
-3. **Thin files.** `LLMBuilder` is ~180 lines, `EmbedInput` + embed methods ~80 lines. These become comically thin files that exist for line-count reasons.
-
-**Counter-proposal (simpler)**: Extract only the **8 standalone functions** (lines 1374-1727): `build_messages`, `collect_active_decisions`, `inject_decisions_into_system_prompt`, `extract_content`, `extract_tool_calls`, `build_assistant_tool_call_message`, `slice_entries_by_anchor`, `build_full_context_from_entries`. These are pure transforms with no `&self` — they genuinely don't belong on `LLM`. Move them to `llm_helpers.rs` or `core/message_helpers.rs`. The remaining ~1350 lines (struct + builder + impl methods) are cohesive.
-
-**Net result**: 1 new file instead of 5. Same benefit, 80% less churn.
+**Counter-proposal**: The only file that genuinely benefits from structural attention is `llm.rs` (1728 lines of code, 6+ distinct concerns). For the rest, leave them alone. A 28K-line, 2-crate workspace with 82 files doesn't have a "god file" problem — it has 1 large file and several medium ones that are fine.
 
 ---
 
-## Challenge 3: `hooks.rs` split + macro suggestion would hurt readability
+## Challenge 2: `builtin/tools.rs` split would add churn, not clarity
 
-The review says the 12 `call_*` methods are "structurally identical" and suggests a macro.
+The original report recommends splitting into `tools/fs.rs`, `tools/shell.rs`, `tools/web.rs`, `tools/git.rs`. The critique agrees.
 
-- Each `call_*` has different signatures, return types, and error-handling. A macro handling `Option<String>`, `Vec<Envelope>`, `PromptValue`, and `Result<(), HookError>` would be complex, hard to debug, and invisible to `goto definition`.
-- `hooks.rs` is the **framework contract** — the one file every plugin author reads. Macro-generated dispatch methods are hostile to that use case.
+**Why this is wrong**: `tools.rs` is a flat registration file — 20+ `fn tool_*() -> Tool` functions that each define a tool's schema and async handler. These functions share:
+- Common helpers (`resolve_path`, `get_str`, `require_str`, `ok_val`, etc. — 13 helper functions)
+- The `CURRENT_TAPE_SERVICE` task-local
+- The same import set
 
-**Counter-proposal**: Leave `hooks.rs` as-is. 1028 lines of code for a 12-point hook system is proportionate. The repetition is a feature, not a bug — it makes the contract scannable.
+Splitting by "domain" (fs/shell/web/git) would:
+1. Force 13 helper functions to become `pub(super)` or get duplicated across files
+2. Create 5 files averaging 270 lines each — not meaningfully easier to navigate than 1 file with clear section headers
+3. Every new tool would require deciding which file it belongs in (is `tool_sidecar` web? shell? its own file?)
 
----
-
-## Challenge 4: The reports miss the biggest structural question
-
-Neither report asks: **should `conduit` be one crate?**
-
-`conduit` currently bundles 4 distinct concerns:
-- **LLM client** (`llm.rs`, `core/`, `clients/`, `providers/`) — the actual "conduit"
-- **Tape storage** (`tape/`) — append-only history, persistence, querying
-- **Tool system** (`tools/`) — schema, execution, context
-- **Auth/OAuth** (`auth/`) — 1669 lines of GitHub Copilot + OpenAI Codex OAuth flows
-
-The tape system is used independently by `eli` (via `ForkTapeStore`, `FileTapeStore`). Auth has 1669 lines that nobody touches unless adding a new provider. Changes to OAuth flows trigger recompilation of the LLM client.
-
-This matters more than splitting `hooks.rs` into two files. But — the project is 28K lines with one developer. Crate splitting has real costs (workspace complexity, cross-crate visibility, longer cold builds). At this scale, the monolith works.
-
-**Counter-proposal**: Don't split conduit now. But if the project doubles in size or gains contributors, split `tape` and `auth` into their own crates first — they have the cleanest boundaries. This is the structural insight both reports should have surfaced instead of counting lines.
+**Counter-proposal**: If readability is the concern, add `// ---- Filesystem tools ----` section headers. If the file keeps growing past ~2000 lines, then split. Today it doesn't warrant it.
 
 ---
 
-## Challenge 5: Dissolving `types.rs` and `utils.rs` is pure churn
+## Challenge 3: The "duplicate type" issues are overstated
 
-Both reports flag these as "ambiguous names" and recommend dissolving.
+**E4 (duplicate `Envelope`)**: Both `types.rs:12` and `channels/manager.rs:104` define `pub type Envelope = serde_json::Value`. This is a type alias, not a struct. The "fix" (remove one, import from the other) is correct but trivially low-impact — it saves zero runtime cost and zero confusion, since both resolve to `Value`. The original report rated this HIGH. The critique downgraded to MEDIUM. It's **LOW** — a 30-second fix that doesn't meaningfully improve the codebase.
 
-- **`types.rs`** (155 lines): 6 type definitions (`Envelope`, `State`, `MessageHandler`, `OutboundDispatcher`, `OutboundChannelRouter`, `TurnResult`, `PromptValue`). These are the framework's vocabulary, deliberately co-located. Moving `Envelope` to `envelope.rs` conflates the type alias with the envelope helper functions. Moving `State` to `hooks.rs` couples the type to one consumer. This file is a prelude, not a grab-bag.
+**E5 (MessageHandler)**: The critique correctly identified this as NOT a duplicate — different parameter types (`Envelope` vs `ChannelMessage`), different future boxing. The original report got this wrong. But the critique's recommendation to rename to `ChannelMessageHandler` is also questionable: the two types live in different modules (`types.rs` vs `channels/handler.rs`), so they don't actually collide in practice. The rename helps only if you import both in the same scope, which nothing in the codebase does.
 
-- **`utils.rs`** (178 lines): 4 functions, well-tested. `exclude_none` is used by both `envelope.rs` and `builtin/` modules — no single "natural home." The "dissolve into relevant modules" recommendation touches 4 files to move 4 functions, creating git churn for naming-purity points.
-
-**Counter-proposal**: Keep both. Rename `types.rs` → `primitives.rs` if the name truly bothers you (1-line change). Don't dissolve.
+**Counter-proposal**: Fix E4 if convenient (trivial). Skip the E5 rename — it's solving a naming collision that doesn't occur.
 
 ---
 
-## Challenge 6: Library-quality standards applied to an application
+## Challenge 4: Missing the bigger structural question
 
-The review benchmarks against a "10-star open source project" and recommends narrowing re-exports, adding `#![warn(missing_docs)]`, and tiered API surfaces.
+Both reports focus on file-level reorganization (split this file, rename that module, dissolve `utils.rs`). Neither asks the more important question:
 
-But Eli is a **personal AI agent framework** with one developer and one consumer (`eli` consuming `conduit`).
+**Is the 2-crate split earning its keep?**
 
-- **Re-export breadth**: 30+ items re-exported from `conduit` means `eli` writes `use conduit::LLM` instead of `use conduit::llm::LLM`. For a single-consumer workspace, this is ergonomic.
-- **`missing_docs`**: On a 28K-line workspace with zero doc coverage, this adds hundreds of warnings immediately. The critique catches this (X1 → LOW).
-- **API tiering**: "A user who just wants `LLM::new().chat()` shouldn't see `GitHubCopilotOAuthTokens`" — there is no such user. The only consumer is `eli`.
+`conduit` is described as "provider-agnostic LLM toolkit" but it contains:
+- Tape storage (append-only history) — this is agent infrastructure, not LLM toolkit
+- OAuth flows for GitHub Copilot and OpenAI Codex — auth strategies, not core LLM concerns
+- Tool execution — arguably belongs with the agent framework
 
-**Counter-proposal**: Skip library-hygiene recommendations until conduit is published independently.
+Meanwhile `eli` re-wraps conduit concepts extensively:
+- `builtin/agent.rs` constructs `LLM` instances, manages tapes, executes tools — duplicating orchestration that `conduit`'s `LLM` already does
+- `builtin/store.rs` wraps conduit's `TapeStore` trait with `ForkTapeStore` and `FileTapeStore`
+- `builtin/settings.rs` maps env vars to conduit builder calls
+
+The crate boundary creates friction: `eli` has to import, wrap, and re-expose conduit concepts. If conduit were truly a standalone library used by external consumers, this layering would be justified. But conduit has exactly one consumer: eli. Its own `Cargo.toml` description says "Core library for the eli AI assistant."
+
+**Counter-proposal**: Don't merge the crates today. But acknowledge that the two-crate split is a **design decision with ongoing costs**, not the unqualified "strength" both reports present. The original report's recommendation to "narrow conduit re-exports to ~10 items" and the critique's endorsement both push conduit toward being a polished standalone library — effort that's wasted if it never has external consumers. Optimize for eli's convenience instead.
 
 ---
 
-## Challenge 7: `PromptInput`/`PromptValue` — both reports miss the design intent
+## Challenge 5: `utils.rs` and `types.rs` dissolution is busywork
 
-Both types exist with a behavioral difference:
-- `PromptValue::is_empty()` → `s.is_empty()`
-- `PromptInput::is_empty()` → `s.trim().is_empty()`
+The original report recommends dissolving `utils.rs` (move `exclude_none` to `envelope.rs`, `workspace_from_state` to `framework.rs`, `get_entry_text` to `builtin/tape.rs`) and renaming/dissolving `types.rs`.
 
-The critique correctly flags the behavioral gap (GAP-3), but both reports recommend eliminating one type. They don't ask: **why do two similar types exist?**
+**Why this is wrong**:
 
-`PromptValue` is a framework-level type (pipeline messages). `PromptInput` is an agent-level type (user input). Trim behavior exists because user input should treat whitespace-only as empty; pipeline messages should not.
+`utils.rs` is 178 lines with 4 functions and thorough tests. Moving `exclude_none` to `envelope.rs` would bloat a 382-line file that's about envelope construction, not JSON filtering. Moving `workspace_from_state` to `framework.rs` would mix a path-resolution helper into the turn pipeline. The proposed destinations are already larger files — dissolution makes them larger for no cohesion gain.
 
-**Counter-proposal**: Keep both types. Make the relationship explicit:
-- (a) `PromptInput` wraps `PromptValue` (newtype pattern) with trim behavior, or
-- (b) Add `impl From<PromptInput> for PromptValue` to document the conversion
+`types.rs` is 155 lines defining 6 type aliases/structs used across the entire `eli` crate. It's imported by 5+ modules (`hooks.rs`, `framework.rs`, `envelope.rs`, `builtin/mod.rs`, `utils.rs`). This is a **shared dependency root** — scattering its contents creates circular import pressure. Moving `State` into `hooks.rs` (already 1078 lines) and `Envelope` into `envelope.rs` while `framework.rs` imports both creates exactly the tangled dependency graph the report claims to be fixing.
 
-Cheaper and safer than merging.
+**Counter-proposal**: Leave both files alone. They're small, tested, and serve their purpose. "Ambiguous name" is a style preference, not a structural issue. If the name really bothers you, rename `types.rs` to `primitives.rs` — 2 minutes, zero risk.
+
+---
+
+## Challenge 6: `PromptInput` vs `PromptValue` — the critique is right but the fix is harder than stated
+
+The critique correctly notes that `PromptInput::is_empty()` uses `s.trim().is_empty()` while `PromptValue::is_empty()` uses `s.is_empty()`. The `text()` method also differs: `PromptInput::text()` filters by `type == "text"` objects, while `PromptValue::as_text()` accepts bare strings and `{text: ...}` objects.
+
+Both reports recommend unifying these. But `PromptInput` is used internally by `Agent` (3 call sites in `agent.rs`), while `PromptValue` is part of the public `eli` API (in `TurnResult`, hook signatures). The trim semantics exist because the agent layer wants to treat whitespace-only input as empty, while the framework layer doesn't.
+
+**Counter-proposal**: This is a legitimate fix, but frame it as "make `PromptInput` a newtype wrapper around `PromptValue` with the trim behavior" rather than "delete `PromptInput`". The behavioral difference is intentional.
+
+---
+
+## Challenge 7: The reports miss the actual highest-leverage improvement
+
+Neither report mentions that `conduit/src/llm.rs` is both the public API facade AND the implementation. The `LLM` struct has methods for:
+- Building/configuring (builder)
+- Simple chat (sync + async)
+- Streaming chat
+- Tool auto-loops
+- Embedding
+- Tape management
+- Decision injection
+
+This isn't just "split into 6 files" — it's a design issue. The `LLM` struct is a god *object*, not just a god file. Splitting into files without splitting the struct just moves the complexity around.
+
+**Counter-proposal**: If you're going to refactor `llm.rs`, extract `ToolAutoLoop` and `EmbeddingClient` as separate types that hold a reference to `LLM`'s internals. This reduces the `LLM` surface area and makes the file split natural. Just splitting into files without decomposing the struct is cosmetic.
 
 ---
 
 ## Summary: What would actually improve the project
 
-| Action | Value | Effort | Verdict |
-|--------|-------|--------|---------|
-| Extract 8 standalone functions from `llm.rs` | HIGH | LOW | **Do this** |
-| Split `builtin/tools.rs` by tool domain | MEDIUM | MEDIUM | **Do this** — tools are genuinely independent |
-| Fix `Envelope` duplicate in `channels/manager.rs` | LOW | TRIVIAL | **Do this** |
-| Make `PromptInput` wrap `PromptValue` | MEDIUM | LOW | **Do this** |
-| Split `hooks.rs` into spec + runtime | LOW | MEDIUM | **Skip** — cosmetic |
-| Dissolve `utils.rs`/`types.rs` | NEGATIVE | MEDIUM | **Skip** — churn |
-| Split `store.rs` | NEGATIVE | MEDIUM | **Skip** — it's 486 lines of code |
-| Narrow conduit re-exports | LOW | LOW | **Skip** — no external consumers |
-| Add `missing_docs` | LOW | HIGH | **Skip** — not useful at 0% coverage |
+| Recommendation | Verdict | Why |
+|---------------|---------|-----|
+| Split `llm.rs` | **Yes, but decompose the struct too** | Only file that's genuinely too large. Extract `ToolAutoLoop`/`EmbeddingClient` as types |
+| Split `tools.rs` | **No** | Flat registration file; section headers suffice |
+| Split `hooks.rs` | **No** | One trait + one runtime; splitting separates what should be together |
+| Split `store.rs` | **No** | Half the file is tests; 485 lines of code is fine |
+| Split `agent.rs` | **Maybe** | 1059 lines with mixed concerns, but tightly coupled to `Agent` struct |
+| Fix `Envelope` alias duplicate | **Yes, trivial** | Correct but LOW priority |
+| Dissolve `utils.rs`/`types.rs` | **No** | Small, tested, purposeful files |
+| Rename `parsing/types.rs` | **Indifferent** | 54-line file; changes nothing |
+| Narrow conduit re-exports | **No** | conduit has one consumer; optimize for eli's convenience |
+| Add `#![warn(missing_docs)]` | **No** | Hundreds of warnings for zero practical benefit on a zero-doc codebase |
+| Unify `PromptInput`/`PromptValue` | **Yes, carefully** | Newtype wrapper, preserve trim semantics |
+| Question crate boundary | **Missing from both reports** | The most important structural question neither report asks |
 
-**4 actions, not 16.** The rest is churn.
+**Net assessment**: Of the original report's 16-item plan and the critique's trimmed 5-item plan, **3 items are worth doing**: decompose the `LLM` god object in `llm.rs`, fix the `Envelope` alias, and unify `PromptInput`/`PromptValue` carefully. The rest is churn that would generate diffs without improving comprehension, reliability, or maintainability.
+
+A 28K-line, 2-crate workspace with 82 files is already well-organized. The reports apply "10-star open source project" standards to what is currently a single-developer agent framework at v0.3.0. The right bar isn't "what would a 200-person open source project do" — it's "what makes ckl more productive."
