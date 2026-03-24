@@ -17,6 +17,7 @@ import { registry } from "./registry.js";
 
 export { loadConfig, type SidecarConfig } from "./config.js";
 export { registry } from "./registry.js";
+export { startMcpServer } from "./mcp.js";
 export type { ChannelAccountConfig } from "./config.js";
 export type {
   ToolDefinition,
@@ -34,6 +35,50 @@ export interface Sidecar {
   /** Execute a tool by name. */
   callTool(name: string, params?: Record<string, any>): Promise<any>;
   stop(): Promise<void>;
+}
+
+/**
+ * Load plugins and start an MCP server (stdio).
+ *
+ * This is the recommended entry point for external agents like Claude Code
+ * or Cursor. No HTTP server is started — communication is over stdio.
+ *
+ * ```ts
+ * import { createMcpSidecar } from "eli-sidecar";
+ * await createMcpSidecar();
+ * ```
+ */
+export async function createMcpSidecar(
+  configOrPath?: Partial<SidecarConfig> | string,
+): Promise<void> {
+  let config: SidecarConfig;
+
+  if (typeof configOrPath === "string" || configOrPath === undefined) {
+    config = loadConfig(configOrPath);
+  } else {
+    const base = loadConfig();
+    config = { ...base, ...configOrPath };
+  }
+
+  // Redirect all console output to stderr so stdout stays clean for MCP JSON-RPC.
+  const origLog = console.log;
+  const origInfo = console.info;
+  console.log = (...args: any[]) => console.error(...args);
+  console.info = (...args: any[]) => console.error(...args);
+
+  initBridge(config);
+  await loadPlugins(config);
+
+  console.error(
+    `[mcp] loaded: ${registry.channels.size} channel(s), ${registry.tools.size} tool(s)`,
+  );
+
+  const { startMcpServer: startMcp } = await import("./mcp.js");
+  await startMcp({ transport: "stdio", config });
+
+  // Restore (though in MCP mode we stay in stdio forever).
+  console.log = origLog;
+  console.info = origInfo;
 }
 
 /**
@@ -109,17 +154,28 @@ const isCLI =
   isMainModule || process.argv[1]?.endsWith("start.cjs") || false;
 
 if (isCLI) {
-  createSidecar()
-    .then((sidecar) => {
-      const shutdown = async () => {
-        await sidecar.stop();
-        process.exit(0);
-      };
-      process.on("SIGINT", shutdown);
-      process.on("SIGTERM", shutdown);
-    })
-    .catch((err) => {
-      console.error("[sidecar] fatal error:", err);
+  const mcpFlag = process.argv.includes("--mcp");
+
+  if (mcpFlag) {
+    // MCP mode: stdio transport, no HTTP server.
+    createMcpSidecar().catch((err) => {
+      console.error("[mcp] fatal error:", err);
       process.exit(1);
     });
+  } else {
+    // Normal mode: HTTP bridge server.
+    createSidecar()
+      .then((sidecar) => {
+        const shutdown = async () => {
+          await sidecar.stop();
+          process.exit(0);
+        };
+        process.on("SIGINT", shutdown);
+        process.on("SIGTERM", shutdown);
+      })
+      .catch((err) => {
+        console.error("[sidecar] fatal error:", err);
+        process.exit(1);
+      });
+  }
 }

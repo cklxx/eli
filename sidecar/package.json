@@ -11,7 +11,10 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "start.cjs"],
+  "files": [
+    "dist",
+    "start.cjs"
+  ],
   "bin": {
     "eli-sidecar": "start.cjs"
   },
@@ -22,9 +25,19 @@
     "dev": "node --watch start.cjs",
     "test": "bun test"
   },
-  "keywords": ["eli", "openclaw", "feishu", "lark", "sidecar", "agent", "channel"],
+  "keywords": [
+    "eli",
+    "openclaw",
+    "feishu",
+    "lark",
+    "sidecar",
+    "agent",
+    "channel"
+  ],
   "license": "Apache-2.0",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@tencent-weixin/openclaw-weixin": "^2.0.1",
     "express": "^5.1.0",
     "jiti": "^2.6.1",
     "openclaw": "^2026.3.13"
@@ -38,7 +51,7 @@
     }
   },
   "devDependencies": {
-    "@larksuite/openclaw-lark": "^2026.3.18",
+    "@larksuite/openclaw-lark": "^2026.3.25",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",

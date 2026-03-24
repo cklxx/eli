@@ -280,6 +280,23 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
       // No fallback — require explicit session_id to prevent cross-user
       // auth leakage in multi-session scenarios.
 
+      // Synthetic session for external agents that pass `channel` instead of session_id.
+      if (!sessionCtx && req.body?.channel) {
+        const ch = req.body.channel as string;
+        const plugin = registry.channels.get(ch);
+        if (plugin) {
+          sessionCtx = {
+            channel: ch,
+            accountId: (req.body?.account_id ?? "default") as string,
+            chatId: "",
+            senderId: "external-agent",
+            messageId: "",
+            chatType: "p2p",
+            cfg: { channels: sidecarConfig.channels },
+          };
+        }
+      }
+
       const channelPlugin = sessionCtx ? registry.channels.get(sessionCtx.channel) : undefined;
       const description = extractToolDescription(req.body);
       const startedAt = Date.now();
@@ -373,6 +390,92 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
       const channelPlugin = registry.channels.get(sessionCtx.channel);
       await sendSessionNotice(channelPlugin, sessionCtx, text, "tool notice");
       res.json({ ok: true, delivered: true });
+    });
+
+    // Setup: start QR login for a channel.
+    app.post("/setup/:channel/start", async (req, res) => {
+      const channelId = req.params.channel;
+      const plugin = registry.channels.get(channelId);
+      if (!plugin) {
+        res.status(404).json({ error: `channel "${channelId}" not found` });
+        return;
+      }
+      if (!(plugin.gateway as any)?.loginWithQrStart) {
+        res.status(501).json({ error: `channel "${channelId}" does not support QR login` });
+        return;
+      }
+      try {
+        const result = await (plugin.gateway as any).loginWithQrStart({
+          accountId: req.body?.accountId,
+          force: req.body?.force ?? false,
+        });
+        res.json(result);
+      } catch (err: any) {
+        res.status(500).json({ error: err.message ?? "login start failed" });
+      }
+    });
+
+    // Setup: wait for QR scan result.
+    app.post("/setup/:channel/wait", async (req, res) => {
+      const channelId = req.params.channel;
+      const plugin = registry.channels.get(channelId);
+      if (!plugin) {
+        res.status(404).json({ error: `channel "${channelId}" not found` });
+        return;
+      }
+      if (!(plugin.gateway as any)?.loginWithQrWait) {
+        res.status(501).json({ error: `channel "${channelId}" does not support QR login` });
+        return;
+      }
+      const sessionKey = req.body?.sessionKey;
+      if (!sessionKey) {
+        res.status(400).json({ error: "sessionKey required" });
+        return;
+      }
+      try {
+        const result = await (plugin.gateway as any).loginWithQrWait({
+          sessionKey,
+          accountId: req.body?.accountId,
+          timeoutMs: req.body?.timeoutMs ?? 300_000,
+        });
+        res.json(result);
+      } catch (err: any) {
+        res.status(500).json({ error: err.message ?? "login wait failed" });
+      }
+    });
+
+    // Friendly send endpoint for external agents.
+    // POST /send { channel, to, text, account_id? }
+    app.post("/send", async (req, res) => {
+      const { channel, to, text, account_id } = req.body ?? {};
+
+      if (!channel || !to || !text) {
+        res.status(400).json({ error: "missing required fields: channel, to, text" });
+        return;
+      }
+
+      const channelPlugin = registry.channels.get(channel);
+      if (!channelPlugin) {
+        const available = Array.from(registry.channels.keys());
+        res.status(404).json({ error: `channel "${channel}" not found`, available });
+        return;
+      }
+
+      if (!channelPlugin.outbound?.sendText) {
+        res.status(501).json({ error: `channel "${channel}" has no outbound adapter` });
+        return;
+      }
+
+      const accountId = account_id ?? "default";
+      const cfg = { channels: sidecarConfig.channels };
+
+      try {
+        const result = await channelPlugin.outbound.sendText({ cfg, to, text, accountId });
+        res.json(result);
+      } catch (err: any) {
+        console.error(`[bridge] send error:`, err);
+        res.status(500).json({ error: err?.message ?? "send failed" });
+      }
     });
 
     // Health check.
