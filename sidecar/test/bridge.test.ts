@@ -247,6 +247,102 @@ describe("outbound: eli callback", () => {
     expect(pendingTyping.has("mock-channel:default:user_race")).toBe(false);
   });
 
+  it("cleans up typing via legacy path when channel has no lifecycle hooks", async () => {
+    // Simulate the real feishu plugin: no lifecycle.onOutboundReply.
+    // The sidecar must use the legacy removeTypingState path.
+    const noLifecycleChannel: ChannelPlugin = {
+      meta: { id: "no-lifecycle", label: "No Lifecycle" },
+      config: { listAccountIds: () => ["default"], resolveAccount: () => ({}) },
+      capabilities: { chatTypes: ["direct"] },
+      outbound: {
+        deliveryMode: "direct",
+        sendText: async ({ text, to, accountId }: any) => {
+          sentMessages.push({ text, chatId: to, accountId });
+          return { ok: true };
+        },
+      },
+      // No lifecycle hooks — matches the real feishu channel plugin.
+    };
+    registry.channels.clear();
+    registry.registerChannel(noLifecycleChannel);
+
+    pendingTyping.set("no-lifecycle:default:user_legacy", {
+      typingState: { messageId: "om_test_123", reactionId: "rxn_456" },
+      cfg: { channels: {} },
+      accountId: "default",
+    });
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "no-lifecycle:default:user_legacy",
+        channel: "webhook",
+        content: "reply",
+        chat_id: "user_legacy",
+        context: {
+          source_channel: "no-lifecycle",
+          account_id: "default",
+        },
+        output_channel: "webhook",
+      }),
+    });
+
+    expect(resp.status).toBe(200);
+    expect(sentMessages).toHaveLength(1);
+    // Typing state must be removed even without lifecycle hooks.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(pendingTyping.has("no-lifecycle:default:user_legacy")).toBe(false);
+  });
+
+  it("cleans up typing via session_id fallback when context lacks source_channel", async () => {
+    // Regression: before the context propagation fix, normal outbounds
+    // had no source_channel in context. The sidecar falls back to parsing
+    // session_id. Verify typing cleanup still works in this fallback path.
+    const noLifecycleChannel: ChannelPlugin = {
+      meta: { id: "no-lifecycle", label: "No Lifecycle" },
+      config: { listAccountIds: () => ["default"], resolveAccount: () => ({}) },
+      capabilities: { chatTypes: ["direct"] },
+      outbound: {
+        deliveryMode: "direct",
+        sendText: async ({ text, to, accountId }: any) => {
+          sentMessages.push({ text, chatId: to, accountId });
+          return { ok: true };
+        },
+      },
+    };
+    registry.channels.clear();
+    registry.registerChannel(noLifecycleChannel);
+
+    pendingTyping.set("no-lifecycle:default:user_fallback", {
+      typingState: { messageId: "om_test_789", reactionId: "rxn_abc" },
+      cfg: { channels: {} },
+      accountId: "default",
+    });
+
+    // Send outbound WITHOUT source_channel — only session_id for routing.
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "no-lifecycle:default:user_fallback",
+        channel: "webhook",
+        content: "reply",
+        chat_id: "user_fallback",
+        context: {
+          channel: "$webhook",
+          chat_id: "user_fallback",
+        },
+        output_channel: "webhook",
+      }),
+    });
+
+    expect(resp.status).toBe(200);
+    expect(sentMessages).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(pendingTyping.has("no-lifecycle:default:user_fallback")).toBe(false);
+  });
+
   it("returns 404 for unknown source_channel", async () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
