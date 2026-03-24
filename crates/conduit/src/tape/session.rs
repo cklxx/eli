@@ -31,10 +31,7 @@ impl<'a> TapeSession<'a> {
     /// Chat with the model, recording the exchange to the session tape.
     ///
     /// The `tape` field of the request is overridden with this session's tape name.
-    pub async fn chat(
-        &mut self,
-        mut req: ChatRequest<'_>,
-    ) -> Result<String, ConduitError> {
+    pub async fn chat(&mut self, mut req: ChatRequest<'_>) -> Result<String, ConduitError> {
         req.tape = Some(&self.tape);
         self.llm.chat_async(req).await
     }

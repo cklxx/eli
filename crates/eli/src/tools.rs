@@ -5,8 +5,6 @@ use std::sync::Mutex;
 
 use conduit::Tool;
 
-
-
 /// Central tool registry. Tools are registered here by the builtin module on startup.
 pub static REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, Tool>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));

@@ -606,7 +606,10 @@ impl LLM {
     }
 
     /// Get tool calls and execute them against the provided tools.
-    pub async fn run_tools(&mut self, req: ChatRequest<'_>) -> Result<ToolAutoResult, ConduitError> {
+    pub async fn run_tools(
+        &mut self,
+        req: ChatRequest<'_>,
+    ) -> Result<ToolAutoResult, ConduitError> {
         let ChatRequest {
             prompt,
             system_prompt,
@@ -677,9 +680,7 @@ impl LLM {
             first_round = false;
 
             // Execute model call + tool round
-            let round = self
-                ._execute_tool_round(&msgs, &round_params)
-                .await?;
+            let round = self._execute_tool_round(&msgs, &round_params).await?;
 
             // Update cumulative usage
             if let Some(usage) = round.usage {
@@ -690,16 +691,12 @@ impl LLM {
                 ToolRoundOutcome::Text(content) => {
                     // Write final assistant message to tape
                     if let Some(tape_name) = tape {
-                        let meta =
-                            serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
+                        let meta = serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
                         let assistant_msg =
                             serde_json::json!({"role": "assistant", "content": &content});
                         if let Err(e) = self
                             .async_tape
-                            .append_entry(
-                                tape_name,
-                                &TapeEntry::message(assistant_msg, meta),
-                            )
+                            .append_entry(tape_name, &TapeEntry::message(assistant_msg, meta))
                             .await
                         {
                             tracing::error!(
@@ -728,13 +725,8 @@ impl LLM {
                     all_tool_results.extend(execution.tool_results.clone());
 
                     // Persist round to tape or accumulate in memory
-                    self._persist_round(
-                        tape,
-                        &response,
-                        &execution,
-                        &mut in_memory_msgs,
-                    )
-                    .await;
+                    self._persist_round(tape, &response, &execution, &mut in_memory_msgs)
+                        .await;
                 }
             }
             // Loop continues - next iteration reads from tape (or in_memory_msgs)
@@ -767,10 +759,7 @@ impl LLM {
                     for m in extra_msgs {
                         if let Err(e) = self
                             .async_tape
-                            .append_entry(
-                                tape_name,
-                                &TapeEntry::message(m.clone(), meta.clone()),
-                            )
+                            .append_entry(tape_name, &TapeEntry::message(m.clone(), meta.clone()))
                             .await
                         {
                             tracing::error!(
@@ -833,22 +822,22 @@ impl LLM {
         msgs: &[Value],
         params: &RoundParams<'_>,
     ) -> Result<ToolRound, ConduitError> {
-        let response = self
-            .core
-            .run_chat(
-                msgs.to_vec(),
-                params.schemas.clone(),
-                params.model,
-                params.provider,
-                params.max_tokens,
-                false,
-                None,
-                Default::default(),
-                |resp: TransportResponse, _prov: &str, _model: &str, _attempt: u32| {
-                    Ok(resp.payload)
-                },
-            )
-            .await?;
+        let response =
+            self.core
+                .run_chat(
+                    msgs.to_vec(),
+                    params.schemas.clone(),
+                    params.model,
+                    params.provider,
+                    params.max_tokens,
+                    false,
+                    None,
+                    Default::default(),
+                    |resp: TransportResponse, _prov: &str, _model: &str, _attempt: u32| {
+                        Ok(resp.payload)
+                    },
+                )
+                .await?;
 
         let usage = response.get("usage").cloned();
         let raw_calls = extract_tool_calls(&response)?;
@@ -864,7 +853,11 @@ impl LLM {
         // Execute tools
         let execution = self
             .tool_executor
-            .execute_async(ToolCallResponse::List(raw_calls), &params.tools.runnable, params.tool_context)
+            .execute_async(
+                ToolCallResponse::List(raw_calls),
+                &params.tools.runnable,
+                params.tool_context,
+            )
             .await?;
 
         // Log tool errors but continue the loop so the LLM can see the
@@ -918,8 +911,7 @@ impl LLM {
                 .iter()
                 .zip(execution.tool_results.iter())
                 .map(|(call, result)| {
-                    let call_id =
-                        call.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let call_id = call.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
                     serde_json::json!({"call_id": call_id, "output": result})
                 })
                 .collect();
@@ -962,10 +954,7 @@ impl LLM {
     // -- Streaming -----------------------------------------------------------
 
     /// Stream chat completion as an async `TextStream`.
-    pub async fn stream(
-        &mut self,
-        req: ChatRequest<'_>,
-    ) -> Result<AsyncTextStream, ConduitError> {
+    pub async fn stream(&mut self, req: ChatRequest<'_>) -> Result<AsyncTextStream, ConduitError> {
         let ChatRequest {
             prompt,
             system_prompt,

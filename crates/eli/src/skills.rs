@@ -10,8 +10,7 @@ use regex::Regex;
 static FRONTMATTER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)^---\s*\n.*?\n---\s*\n").unwrap());
 
-static SKILL_NAME_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(SKILL_NAME_PATTERN).unwrap());
+static SKILL_NAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(SKILL_NAME_PATTERN).unwrap());
 
 /// Directory under a project workspace containing skills.
 const PROJECT_SKILLS_DIR: &str = ".agents/skills";

@@ -9,7 +9,9 @@ use super::errors::ConduitError;
 use super::execution::LLMCore;
 use super::provider_runtime::ProviderRuntime;
 use super::request_adapters::normalize_responses_kwargs;
-use super::tool_calls::{normalize_tool_calls, tool_call_arguments_string, tool_call_id, tool_call_name};
+use super::tool_calls::{
+    normalize_tool_calls, tool_call_arguments_string, tool_call_id, tool_call_name,
+};
 use crate::clients::parsing::TransportKind;
 use crate::providers;
 

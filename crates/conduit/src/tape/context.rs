@@ -141,9 +141,7 @@ fn truncate_tool_result_content(msg: &mut Value, limit: usize) {
         .unwrap_or(0);
 
     // Cut at last newline before that boundary.
-    let cut = content[..safe_limit]
-        .rfind('\n')
-        .unwrap_or(safe_limit);
+    let cut = content[..safe_limit].rfind('\n').unwrap_or(safe_limit);
     let shown_lines = content[..cut].matches('\n').count() + 1;
     let total_lines = content.matches('\n').count() + 1;
 

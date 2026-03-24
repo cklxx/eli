@@ -1,8 +1,5 @@
 //! One-shot run command.
 
-
-
-
 /// Run a single message through the agent.
 pub(crate) async fn run_command(
     message: String,

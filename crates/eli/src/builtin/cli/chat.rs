@@ -1,6 +1,5 @@
 //! Interactive REPL chat session.
 
-
 /// Start an interactive REPL chat session.
 pub(crate) async fn chat_command(
     chat_id: String,

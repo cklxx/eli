@@ -4,9 +4,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::builtin::config::{
-    EliConfig, Profile, default_model_for_provider, normalize_provider,
-};
+use crate::builtin::config::{EliConfig, Profile, default_model_for_provider, normalize_provider};
 
 /// Login to a provider.
 pub(crate) async fn login_command(

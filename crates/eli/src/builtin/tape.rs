@@ -233,12 +233,7 @@ impl TapeService {
         let entries = self.store.fetch_all(&query).await?;
         // Walk backwards to find the latest grace event.
         for entry in entries.iter().rev() {
-            if entry
-                .payload
-                .get("name")
-                .and_then(|v| v.as_str())
-                == Some("auto-handoff.grace")
-            {
+            if entry.payload.get("name").and_then(|v| v.as_str()) == Some("auto-handoff.grace") {
                 let data = entry.payload.get("data");
                 let remaining = data
                     .and_then(|d| d.get("remaining"))

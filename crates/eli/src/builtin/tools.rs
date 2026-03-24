@@ -569,7 +569,7 @@ fn tool_skill() -> Tool {
                             skill.location.display()
                         ))
                     }
-                    None => ok_val("(no such skill)")
+                    None => ok_val("(no such skill)"),
                 }
             })
         },

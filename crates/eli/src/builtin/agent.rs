@@ -689,8 +689,7 @@ async fn agent_loop(
                                 .unwrap_or_default();
 
                             // 2. Write the handoff anchor.
-                            let summary: String =
-                                outcome.text.chars().take(500).collect();
+                            let summary: String = outcome.text.chars().take(500).collect();
                             let anchor_state = serde_json::json!({
                                 "reason": "auto-handoff: context approaching limit",
                                 "input_tokens": input_tokens,
@@ -699,10 +698,8 @@ async fn agent_loop(
                             });
                             // Use a unique anchor name so that successive
                             // handoffs don't collide during grace periods.
-                            let anchor_name = format!(
-                                "auto-handoff/{}",
-                                Utc::now().format("%Y%m%dT%H%M%S")
-                            );
+                            let anchor_name =
+                                format!("auto-handoff/{}", Utc::now().format("%Y%m%dT%H%M%S"));
                             if let Err(e) = tapes
                                 .handoff(tape_name, &anchor_name, Some(anchor_state))
                                 .await
@@ -714,10 +711,7 @@ async fn agent_loop(
                             //    that when the context is later cut here the LLM
                             //    sees the summary as its first message.
                             let sys_entry = TapeEntry::system(
-                                &format!(
-                                    "[Context summary from auto-handoff]\n{}",
-                                    summary
-                                ),
+                                &format!("[Context summary from auto-handoff]\n{}", summary),
                                 Value::Object(Default::default()),
                             );
                             if let Err(e) = tapes.store().append(tape_name, &sys_entry).await {
