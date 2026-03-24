@@ -71,6 +71,8 @@ export interface ChannelGateway {
   /** OpenClaw uses startAccount/stopAccount in some plugins. */
   startAccount?(params: GatewayStartParams): Promise<void>;
   stopAccount?(params: GatewayStopParams): Promise<void>;
+  loginWithQrStart?(params: GatewayQrStartParams): Promise<any>;
+  loginWithQrWait?(params: GatewayQrWaitParams): Promise<any>;
 }
 
 export interface GatewayStartParams {
@@ -84,6 +86,19 @@ export interface GatewayStopParams {
   accountId: string;
   cfg?: any;
   config?: any;
+  [key: string]: any;
+}
+
+export interface GatewayQrStartParams {
+  accountId?: string;
+  force?: boolean;
+  [key: string]: any;
+}
+
+export interface GatewayQrWaitParams {
+  sessionKey: string;
+  accountId?: string;
+  timeoutMs?: number;
   [key: string]: any;
 }
 
