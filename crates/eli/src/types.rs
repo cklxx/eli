@@ -179,4 +179,56 @@ mod tests {
         assert!(PromptValue::Parts(vec![]).is_empty());
         assert!(!PromptValue::Parts(vec![json!("a")]).is_empty());
     }
+
+    // -- is_blank (trim-aware) ------------------------------------------------
+
+    #[test]
+    fn test_prompt_value_is_blank_text() {
+        assert!(PromptValue::Text("".into()).is_blank());
+        assert!(PromptValue::Text("   ".into()).is_blank());
+        assert!(PromptValue::Text(" \n\t ".into()).is_blank());
+        assert!(!PromptValue::Text("hello".into()).is_blank());
+        assert!(!PromptValue::Text("  hello  ".into()).is_blank());
+    }
+
+    #[test]
+    fn test_prompt_value_is_blank_parts() {
+        assert!(PromptValue::Parts(vec![]).is_blank());
+        assert!(!PromptValue::Parts(vec![json!("a")]).is_blank());
+    }
+
+    // -- strict_text (requires "type": "text") --------------------------------
+
+    #[test]
+    fn test_prompt_value_strict_text_from_text() {
+        let pv = PromptValue::Text("hello world".into());
+        assert_eq!(pv.strict_text(), "hello world");
+    }
+
+    #[test]
+    fn test_prompt_value_strict_text_from_parts() {
+        let pv = PromptValue::Parts(vec![
+            json!({"type": "text", "text": "line1"}),
+            json!({"type": "image", "url": "http://example.com"}),
+            json!({"type": "text", "text": "line2"}),
+        ]);
+        assert_eq!(pv.strict_text(), "line1\nline2");
+    }
+
+    #[test]
+    fn test_prompt_value_strict_text_empty_parts() {
+        let pv = PromptValue::Parts(vec![]);
+        assert_eq!(pv.strict_text(), "");
+    }
+
+    #[test]
+    fn test_prompt_value_strict_text_no_text_type() {
+        // Parts without "type": "text" should be excluded
+        let pv = PromptValue::Parts(vec![
+            json!({"text": "bare"}),           // no type field
+            json!("plain string"),              // not an object
+            json!({"type": "image", "url": "x"}),
+        ]);
+        assert_eq!(pv.strict_text(), "");
+    }
 }
