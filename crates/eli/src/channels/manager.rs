@@ -12,6 +12,7 @@ use super::base::Channel;
 use super::handler::BufferedMessageHandler;
 use super::message::{ChannelMessage, MessageKind};
 use crate::envelope::OutboundMessage;
+use crate::types::Envelope;
 
 // ---------------------------------------------------------------------------
 // ChannelSettings
@@ -99,9 +100,6 @@ pub trait OutboundRouter: Send + Sync {
     /// Cancel all tasks for a given session.
     async fn quit(&self, session_id: &str);
 }
-
-/// A loosely-typed envelope, mirroring the Python `Envelope = Any`.
-pub type Envelope = serde_json::Value;
 
 // ---------------------------------------------------------------------------
 // ChannelManager

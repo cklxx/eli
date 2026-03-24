@@ -31,6 +31,95 @@ pub enum HookError {
     Panic(String),
 }
 
+impl HookError {
+    /// Wrap a hook error with plugin/hook-point context, extracting the inner source.
+    fn wrap(plugin: String, hook_point: &'static str, e: HookError) -> Self {
+        let source = match e {
+            HookError::Plugin { source, .. } => source,
+            other => anyhow::anyhow!("{other}"),
+        };
+        HookError::Plugin {
+            plugin,
+            hook_point,
+            source,
+        }
+    }
+}
+
+/// Iterate plugins in the given order, call an async method that returns
+/// `Result<Option<T>, HookError>`, and return the first `Some` value.
+/// On error or panic, propagate immediately.
+macro_rules! call_first_upgraded {
+    ($iter:expr, $hook_name:literal, |$p:ident| $call:expr) => {{
+        for $p in $iter {
+            let name = $p.plugin_name().to_owned();
+            let result = std::panic::AssertUnwindSafe($call).catch_unwind().await;
+            match result {
+                Ok(Ok(Some(val))) => return Ok(Some(val)),
+                Ok(Ok(None)) => continue,
+                Ok(Err(e)) => {
+                    tracing::warn!(plugin = %name, error = %e, concat!("hook.", $hook_name, " failed"));
+                    return Err(HookError::wrap(name, $hook_name, e));
+                }
+                Err(_) => {
+                    tracing::warn!(plugin = %name, concat!("hook.", $hook_name, " panicked"));
+                    return Err(HookError::Panic(name));
+                }
+            }
+        }
+        Ok(None)
+    }};
+}
+
+/// Iterate plugins, call an async method that returns `Result<T, HookError>`,
+/// and collect all `Ok` results. On error or panic, propagate immediately.
+macro_rules! call_collect_upgraded {
+    ($iter:expr, $hook_name:literal, |$p:ident| $call:expr) => {{
+        let mut results = Vec::new();
+        for $p in $iter {
+            let name = $p.plugin_name().to_owned();
+            let result = std::panic::AssertUnwindSafe($call).catch_unwind().await;
+            match result {
+                Ok(Ok(val)) => results.push(val),
+                Ok(Err(e)) => {
+                    tracing::warn!(plugin = %name, error = %e, concat!("hook.", $hook_name, " failed"));
+                    return Err(HookError::wrap(name, $hook_name, e));
+                }
+                Err(_) => {
+                    tracing::warn!(plugin = %name, concat!("hook.", $hook_name, " panicked"));
+                    return Err(HookError::Panic(name));
+                }
+            }
+        }
+        Ok(results)
+    }};
+}
+
+/// Iterate plugins, call an async method, and swallow any panics.
+macro_rules! call_notify_all {
+    ($iter:expr, $hook_name:literal, |$p:ident| $call:expr) => {
+        for $p in $iter {
+            let name = $p.plugin_name().to_owned();
+            let result = std::panic::AssertUnwindSafe($call).catch_unwind().await;
+            if result.is_err() {
+                tracing::error!(plugin = %name, concat!("hook.", $hook_name, " panicked"));
+            }
+        }
+    };
+}
+
+/// Iterate plugins (sync), call a method, and swallow any panics.
+macro_rules! call_sync_all {
+    ($iter:expr, $hook_name:literal, |$p:ident| $call:expr) => {
+        for $p in $iter {
+            let name = $p.plugin_name().to_owned();
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $call)).is_err() {
+                tracing::error!(plugin = %name, concat!("hook.", $hook_name, " panicked"));
+            }
+        }
+    };
+}
+
 fn preview_text(text: &str) -> String {
     const LIMIT: usize = 1000;
     let mut chars = text.chars();
@@ -45,6 +134,18 @@ fn preview_text(text: &str) -> String {
 
 fn preview_json(value: &Envelope) -> String {
     preview_text(&value.to_string())
+}
+
+fn trace_hook_call(plugin: &str, session_id: &str, hook: &str, input: &str) {
+    tracing::info!(target: "eli_trace", plugin = %plugin, session_id = %session_id, input = %input, "hook.{hook}.call");
+}
+
+fn trace_hook_return(plugin: &str, session_id: &str, hook: &str, output: &str) {
+    tracing::info!(target: "eli_trace", plugin = %plugin, session_id = %session_id, output = %output, "hook.{hook}.return");
+}
+
+fn trace_hook_none(plugin: &str, session_id: &str, hook: &str) {
+    tracing::info!(target: "eli_trace", plugin = %plugin, session_id = %session_id, "hook.{hook}.none");
 }
 
 // ---------------------------------------------------------------------------
@@ -229,69 +330,21 @@ impl HookRuntime {
         &self,
         message: &Envelope,
     ) -> Result<Option<String>, HookError> {
-        for plugin in self.reversed() {
-            let name = plugin.plugin_name().to_owned();
-            let result = std::panic::AssertUnwindSafe(plugin.resolve_session(message))
-                .catch_unwind()
-                .await;
-            match result {
-                Ok(Ok(Some(val))) => return Ok(Some(val)),
-                Ok(Ok(None)) => continue,
-                Ok(Err(e)) => {
-                    tracing::warn!(plugin = %name, error = %e, "hook.resolve_session failed");
-                    return Err(HookError::Plugin {
-                        plugin: name,
-                        hook_point: "resolve_session",
-                        source: match e {
-                            HookError::Plugin { source, .. } => source,
-                            other => anyhow::anyhow!("{other}"),
-                        },
-                    });
-                }
-                Err(_) => {
-                    tracing::warn!(plugin = %name, "hook.resolve_session panicked");
-                    return Err(HookError::Panic(name));
-                }
-            }
-        }
-        Ok(None)
+        call_first_upgraded!(self.reversed(), "resolve_session", |p| p
+            .resolve_session(message))
     }
 
-    /// Load state: collect all results, reverse order, and merge.
+    /// Load state: collect all results and merge.
     pub async fn call_load_state(
         &self,
         message: &Envelope,
         session_id: &str,
     ) -> Result<Vec<Option<State>>, HookError> {
-        let mut results = Vec::new();
-        for plugin in self.plugins.iter() {
-            let name = plugin.plugin_name().to_owned();
-            let result = std::panic::AssertUnwindSafe(plugin.load_state(message, session_id))
-                .catch_unwind()
-                .await;
-            match result {
-                Ok(Ok(state)) => results.push(state),
-                Ok(Err(e)) => {
-                    tracing::warn!(plugin = %name, error = %e, "hook.load_state failed");
-                    return Err(HookError::Plugin {
-                        plugin: name,
-                        hook_point: "load_state",
-                        source: match e {
-                            HookError::Plugin { source, .. } => source,
-                            other => anyhow::anyhow!("{other}"),
-                        },
-                    });
-                }
-                Err(_) => {
-                    tracing::warn!(plugin = %name, "hook.load_state panicked");
-                    return Err(HookError::Panic(name));
-                }
-            }
-        }
-        Ok(results)
+        call_collect_upgraded!(self.plugins.iter(), "load_state", |p| p
+            .load_state(message, session_id))
     }
 
-    /// Build prompt: return the first non-None result.
+    /// Build prompt: return the first non-None result (non-upgraded — panics skip).
     pub async fn call_build_prompt(
         &self,
         message: &Envelope,
@@ -300,35 +353,23 @@ impl HookRuntime {
     ) -> Option<PromptValue> {
         for plugin in self.reversed() {
             let name = plugin.plugin_name().to_owned();
-            tracing::info!(
-                target: "eli_trace",
-                plugin = %name,
-                session_id = %session_id,
-                inbound = %preview_json(message),
-                "hook.build_prompt.call"
-            );
+            trace_hook_call(&name, session_id, "build_prompt", &preview_json(message));
             let result =
                 std::panic::AssertUnwindSafe(plugin.build_prompt(message, session_id, state))
                     .catch_unwind()
                     .await;
             match result {
                 Ok(Some(val)) => {
-                    tracing::info!(
-                        target: "eli_trace",
-                        plugin = %name,
-                        session_id = %session_id,
-                        prompt = %preview_text(&val.as_text()),
-                        "hook.build_prompt.return"
+                    trace_hook_return(
+                        &name,
+                        session_id,
+                        "build_prompt",
+                        &preview_text(&val.as_text()),
                     );
                     return Some(val);
                 }
                 Ok(None) => {
-                    tracing::info!(
-                        target: "eli_trace",
-                        plugin = %name,
-                        session_id = %session_id,
-                        "hook.build_prompt.none"
-                    );
+                    trace_hook_none(&name, session_id, "build_prompt");
                     continue;
                 }
                 Err(_) => {
@@ -340,7 +381,7 @@ impl HookRuntime {
         None
     }
 
-    /// Run model: return the first non-None result.
+    /// Run model: return the first non-None result (upgraded — errors propagate).
     pub async fn call_run_model(
         &self,
         prompt: &PromptValue,
@@ -349,59 +390,30 @@ impl HookRuntime {
     ) -> Result<Option<String>, HookError> {
         for plugin in self.reversed() {
             let name = plugin.plugin_name().to_owned();
-            tracing::info!(
-                target: "eli_trace",
-                plugin = %name,
-                session_id = %session_id,
-                prompt = %preview_text(&prompt.as_text()),
-                "hook.run_model.call"
+            trace_hook_call(
+                &name,
+                session_id,
+                "run_model",
+                &preview_text(&prompt.as_text()),
             );
             let result = std::panic::AssertUnwindSafe(plugin.run_model(prompt, session_id, state))
                 .catch_unwind()
                 .await;
             match result {
                 Ok(Ok(Some(val))) => {
-                    tracing::info!(
-                        target: "eli_trace",
-                        plugin = %name,
-                        session_id = %session_id,
-                        output = %preview_text(&val),
-                        output_len = val.len(),
-                        "hook.run_model.return"
-                    );
+                    trace_hook_return(&name, session_id, "run_model", &preview_text(&val));
                     return Ok(Some(val));
                 }
                 Ok(Ok(None)) => {
-                    tracing::info!(
-                        target: "eli_trace",
-                        plugin = %name,
-                        session_id = %session_id,
-                        "hook.run_model.none"
-                    );
+                    trace_hook_none(&name, session_id, "run_model");
                     continue;
                 }
                 Ok(Err(e)) => {
-                    tracing::warn!(
-                        plugin = %name,
-                        session_id = %session_id,
-                        error = %e,
-                        "hook.run_model failed"
-                    );
-                    return Err(HookError::Plugin {
-                        plugin: name,
-                        hook_point: "run_model",
-                        source: match e {
-                            HookError::Plugin { source, .. } => source,
-                            other => anyhow::anyhow!("{other}"),
-                        },
-                    });
+                    tracing::warn!(plugin = %name, error = %e, "hook.run_model failed");
+                    return Err(HookError::wrap(name, "run_model", e));
                 }
                 Err(_) => {
-                    tracing::warn!(
-                        plugin = %name,
-                        session_id = %session_id,
-                        "hook.run_model panicked"
-                    );
+                    tracing::warn!(plugin = %name, "hook.run_model panicked");
                     return Err(HookError::Panic(name));
                 }
             }
@@ -417,20 +429,12 @@ impl HookRuntime {
         message: &Envelope,
         model_output: &str,
     ) {
-        for plugin in self.plugins.iter() {
-            let name = plugin.plugin_name().to_owned();
-            let result = std::panic::AssertUnwindSafe(plugin.save_state(
-                session_id,
-                state,
-                message,
-                model_output,
-            ))
-            .catch_unwind()
-            .await;
-            if result.is_err() {
-                tracing::error!(plugin = %name, session_id = %session_id, "hook.save_state panicked");
-            }
-        }
+        call_notify_all!(self.plugins.iter(), "save_state", |p| p.save_state(
+            session_id,
+            state,
+            message,
+            model_output
+        ));
     }
 
     /// Render outbound: collect results from all implementations.
@@ -444,12 +448,11 @@ impl HookRuntime {
         let mut results = Vec::new();
         for plugin in self.plugins.iter() {
             let name = plugin.plugin_name().to_owned();
-            tracing::info!(
-                target: "eli_trace",
-                plugin = %name,
-                session_id = %session_id,
-                model_output = %preview_text(model_output),
-                "hook.render_outbound.call"
+            trace_hook_call(
+                &name,
+                session_id,
+                "render_outbound",
+                &preview_text(model_output),
             );
             let result = std::panic::AssertUnwindSafe(plugin.render_outbound(
                 message,
@@ -461,30 +464,13 @@ impl HookRuntime {
             .await;
             match result {
                 Ok(Some(batch)) => {
-                    let preview = batch
-                        .first()
-                        .map(preview_json)
-                        .unwrap_or_else(|| String::from("(empty batch)"));
-                    tracing::info!(
-                        target: "eli_trace",
-                        plugin = %name,
-                        session_id = %session_id,
-                        batch_len = batch.len(),
-                        first_outbound = %preview,
-                        "hook.render_outbound.return"
-                    );
+                    let preview = batch.first().map(preview_json).unwrap_or_default();
+                    trace_hook_return(&name, session_id, "render_outbound", &preview);
                     results.push(batch);
                 }
-                Ok(None) => {
-                    tracing::info!(
-                        target: "eli_trace",
-                        plugin = %name,
-                        session_id = %session_id,
-                        "hook.render_outbound.none"
-                    );
-                }
+                Ok(None) => trace_hook_none(&name, session_id, "render_outbound"),
                 Err(_) => {
-                    tracing::error!(plugin = %name, session_id = %session_id, "hook.render_outbound panicked");
+                    tracing::error!(plugin = %name, "hook.render_outbound panicked");
                 }
             }
         }
@@ -493,29 +479,14 @@ impl HookRuntime {
 
     /// Dispatch outbound: call all implementations.
     pub async fn call_dispatch_outbound(&self, message: &Envelope) {
-        for plugin in self.plugins.iter() {
-            let name = plugin.plugin_name().to_owned();
-            let result = std::panic::AssertUnwindSafe(plugin.dispatch_outbound(message))
-                .catch_unwind()
-                .await;
-            if result.is_err() {
-                tracing::error!(plugin = %name, "hook.dispatch_outbound panicked");
-            }
-        }
+        call_notify_all!(self.plugins.iter(), "dispatch_outbound", |p| p
+            .dispatch_outbound(message));
     }
 
     /// Register CLI commands on all plugins (synchronous).
     pub fn call_register_cli_commands(&self, app: &mut clap::Command) {
-        for plugin in self.plugins.iter() {
-            let name = plugin.plugin_name().to_owned();
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                plugin.register_cli_commands(app)
-            }))
-            .is_err()
-            {
-                tracing::error!(plugin = %name, "hook.register_cli_commands panicked");
-            }
-        }
+        call_sync_all!(self.plugins.iter(), "register_cli_commands", |p| p
+            .register_cli_commands(app));
     }
 
     /// Notify all error observers, swallowing any panics/errors from the observers.
@@ -525,15 +496,8 @@ impl HookRuntime {
         error: &anyhow::Error,
         message: Option<&Envelope>,
     ) {
-        for plugin in self.plugins.iter() {
-            let name = plugin.plugin_name().to_owned();
-            let result = std::panic::AssertUnwindSafe(plugin.on_error(stage, error, message))
-                .catch_unwind()
-                .await;
-            if result.is_err() {
-                tracing::error!(plugin = %name, stage = %stage, "hook.on_error panicked");
-            }
-        }
+        call_notify_all!(self.plugins.iter(), "on_error", |p| p
+            .on_error(stage, error, message));
     }
 
     /// Collect system prompt fragments from all plugins (reversed, joined).
@@ -541,15 +505,12 @@ impl HookRuntime {
         let mut fragments: Vec<String> = Vec::new();
         for plugin in self.reversed() {
             let name = plugin.plugin_name().to_owned();
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 plugin.system_prompt(prompt, state)
-            }));
-            match result {
-                Ok(Some(fragment)) if !fragment.is_empty() => fragments.push(fragment),
+            })) {
+                Ok(Some(f)) if !f.is_empty() => fragments.push(f),
                 Ok(_) => {}
-                Err(_) => {
-                    tracing::error!(plugin = %name, "hook.system_prompt panicked");
-                }
+                Err(_) => tracing::error!(plugin = %name, "hook.system_prompt panicked"),
             }
         }
         fragments.join("\n\n")
@@ -559,15 +520,12 @@ impl HookRuntime {
     pub fn call_provide_tape_store(&self) -> Option<TapeStoreKind> {
         for plugin in self.reversed() {
             let name = plugin.plugin_name().to_owned();
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 plugin.provide_tape_store()
-            }));
-            match result {
+            })) {
                 Ok(Some(store)) => return Some(store),
                 Ok(None) => {}
-                Err(_) => {
-                    tracing::error!(plugin = %name, "hook.provide_tape_store panicked");
-                }
+                Err(_) => tracing::error!(plugin = %name, "hook.provide_tape_store panicked"),
             }
         }
         None
@@ -579,18 +537,9 @@ impl HookRuntime {
         message_handler: MessageHandler,
     ) -> Vec<Box<dyn ChannelHook>> {
         let mut channels = Vec::new();
-        for plugin in self.plugins.iter() {
-            let name = plugin.plugin_name().to_owned();
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                plugin.provide_channels(message_handler.clone())
-            }));
-            match result {
-                Ok(mut provided) => channels.append(&mut provided),
-                Err(_) => {
-                    tracing::error!(plugin = %name, "hook.provide_channels panicked");
-                }
-            }
-        }
+        call_sync_all!(self.plugins.iter(), "provide_channels", |p| {
+            channels.append(&mut p.provide_channels(message_handler.clone()));
+        });
         channels
     }
 

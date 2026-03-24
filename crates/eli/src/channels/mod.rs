@@ -15,7 +15,7 @@ pub mod webhook;
 pub use base::Channel;
 pub use cli::{CliChannel, CliRenderer};
 pub use handler::BufferedMessageHandler;
-pub use manager::{ChannelManager, ChannelSettings, Envelope, InboundProcessor, OutboundRouter};
+pub use manager::{ChannelManager, ChannelSettings, InboundProcessor, OutboundRouter};
 pub use message::{ChannelMessage, DataFetcher, MediaItem, MediaType, MessageKind};
 pub use telegram::{TelegramChannel, TelegramSettings};
 pub use webhook::{WebhookChannel, WebhookSettings};
