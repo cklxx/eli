@@ -88,12 +88,18 @@ impl EmbeddingClient {
             "input": input_value,
         });
 
-        let response = client.post(&url).bearer_auth(&api_key).json(&body).send().await.map_err(|e| {
-            ErrorPayload::new(
-                ErrorKind::Provider,
-                format!("{}:{}: {}", provider_name, model_id, e),
-            )
-        })?;
+        let response = client
+            .post(&url)
+            .bearer_auth(&api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                ErrorPayload::new(
+                    ErrorKind::Provider,
+                    format!("{}:{}: {}", provider_name, model_id, e),
+                )
+            })?;
 
         let status = response.status();
         if !status.is_success() {

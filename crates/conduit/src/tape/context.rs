@@ -164,7 +164,9 @@ fn msg_role(msg: &Value) -> &str {
 
 /// Count characters in a message's content field.
 fn content_char_count(msg: &Value) -> usize {
-    msg.get("content").and_then(|c| c.as_str()).map_or(0, str::len)
+    msg.get("content")
+        .and_then(|c| c.as_str())
+        .map_or(0, str::len)
 }
 
 /// Walk backwards through `msgs` and return the index where the last `rounds`
@@ -182,8 +184,7 @@ fn find_trim_boundary(msgs: &[Value], rounds: usize) -> usize {
     0
 }
 
-const TRIM_NOTICE: &str =
-    "[Earlier tool interactions trimmed to fit context window. Use tape.search to review full history.]";
+const TRIM_NOTICE: &str = "[Earlier tool interactions trimmed to fit context window. Use tape.search to review full history.]";
 
 /// Aggressive trim: keep system messages + last N complete rounds.
 /// If the kept portion starts with an assistant message, the trim notice is
@@ -207,7 +208,10 @@ fn aggressive_trim(messages: &mut Vec<Value>) {
 /// message, or as a new assistant message before the kept portion.
 fn inject_trim_notice(recent: &mut [Value], before: &mut Vec<Value>) {
     if msg_role(&recent[0]) == "assistant" {
-        let existing = recent[0].get("content").and_then(|c| c.as_str()).unwrap_or("");
+        let existing = recent[0]
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
         recent[0]["content"] = Value::String(format!("{TRIM_NOTICE}\n\n{existing}"));
     } else {
         before.push(serde_json::json!({"role": "assistant", "content": TRIM_NOTICE}));
@@ -226,7 +230,12 @@ mod tests {
     fn assert_no_consecutive_roles(messages: &[Value]) {
         for w in messages.windows(2) {
             let (a, b) = (msg_role(&w[0]), msg_role(&w[1]));
-            assert!(a != b || a == "system", "consecutive '{a}': {:?} / {:?}", w[0], w[1]);
+            assert!(
+                a != b || a == "system",
+                "consecutive '{a}': {:?} / {:?}",
+                w[0],
+                w[1]
+            );
         }
     }
 

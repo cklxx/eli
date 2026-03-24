@@ -828,7 +828,9 @@ mod tests {
         let store = InMemoryTapeStore::new();
         let manager = TapeManager::new(Some(Box::new(store.clone())), None);
 
-        let tool_calls = vec![json!({"id": "c1", "type": "function", "function": {"name": "greet", "arguments": "{}"}})];
+        let tool_calls = vec![
+            json!({"id": "c1", "type": "function", "function": {"name": "greet", "arguments": "{}"}}),
+        ];
         let tool_results = vec![json!({"tool_call_id": "c1", "content": "hello"})];
 
         manager
@@ -852,15 +854,16 @@ mod tests {
         let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
 
         // Find the assistant response message (has role=assistant in payload)
-        let response_pos = entries
-            .iter()
-            .position(|e| {
-                e.kind == "message"
-                    && e.payload.get("role").and_then(|v| v.as_str()) == Some("assistant")
-            });
+        let response_pos = entries.iter().position(|e| {
+            e.kind == "message"
+                && e.payload.get("role").and_then(|v| v.as_str()) == Some("assistant")
+        });
         let tool_result_pos = kinds.iter().position(|k| *k == "tool_result");
 
-        assert!(response_pos.is_some(), "expected an assistant message entry");
+        assert!(
+            response_pos.is_some(),
+            "expected an assistant message entry"
+        );
         assert!(tool_result_pos.is_some(), "expected a tool_result entry");
         assert!(
             response_pos.unwrap() < tool_result_pos.unwrap(),
@@ -897,5 +900,4 @@ mod tests {
         assert_eq!(entries.iter().filter(|e| e.kind == "system").count(), 1);
         assert_eq!(entries.iter().filter(|e| e.kind == "message").count(), 6); // 3 user + 3 assistant
     }
-
 }

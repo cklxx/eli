@@ -26,7 +26,9 @@ fn sse_events(buffer: &str) -> impl Iterator<Item = Value> + '_ {
 
 /// Append `suffix` to a string-valued map entry, inserting if absent.
 fn concat_str_entry(map: &mut serde_json::Map<String, Value>, key: &str, suffix: &str) {
-    let val = map.entry(key).or_insert_with(|| Value::String(String::new()));
+    let val = map
+        .entry(key)
+        .or_insert_with(|| Value::String(String::new()));
     if let Some(s) = val.as_str() {
         *val = Value::String(format!("{s}{suffix}"));
     }
@@ -43,7 +45,9 @@ fn merge_tool_call_delta(map: &mut BTreeMap<u64, serde_json::Map<String, Value>>
         }
     }
     // Merge function sub-object: name once, arguments concatenated
-    let Some(fd) = delta.get("function").and_then(|f| f.as_object()) else { return };
+    let Some(fd) = delta.get("function").and_then(|f| f.as_object()) else {
+        return;
+    };
     let fn_obj = entry
         .entry("function")
         .or_insert_with(|| Value::Object(serde_json::Map::new()))
@@ -58,7 +62,10 @@ fn merge_tool_call_delta(map: &mut BTreeMap<u64, serde_json::Map<String, Value>>
 }
 
 /// Build a Completion-format response JSON from accumulated parts.
-fn build_completion_response(content: &str, tc_map: BTreeMap<u64, serde_json::Map<String, Value>>) -> Value {
+fn build_completion_response(
+    content: &str,
+    tc_map: BTreeMap<u64, serde_json::Map<String, Value>>,
+) -> Value {
     let tc_vec: Vec<Value> = tc_map.into_values().map(Value::Object).collect();
     let mut msg = serde_json::json!({"role": "assistant", "content": content});
     if !tc_vec.is_empty() {
@@ -73,14 +80,19 @@ fn parse_completion_sse(buffer: &str) -> Result<Value, ConduitError> {
     let mut tc_map: BTreeMap<u64, serde_json::Map<String, Value>> = BTreeMap::new();
 
     for event in sse_events(buffer) {
-        let Some(choices) = event.get("choices").and_then(|c| c.as_array()) else { continue };
+        let Some(choices) = event.get("choices").and_then(|c| c.as_array()) else {
+            continue;
+        };
         for choice in choices {
-            let Some(delta) = choice.get("delta") else { continue };
+            let Some(delta) = choice.get("delta") else {
+                continue;
+            };
             if let Some(c) = delta.get("content").and_then(|c| c.as_str()) {
                 content.push_str(c);
             }
             if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
-                tcs.iter().for_each(|d| merge_tool_call_delta(&mut tc_map, d));
+                tcs.iter()
+                    .for_each(|d| merge_tool_call_delta(&mut tc_map, d));
             }
         }
     }
@@ -127,23 +139,22 @@ fn parse_messages_sse(buffer: &str) -> Result<Value, ConduitError> {
                     current_tool = Some(tool);
                 }
             }
-            "content_block_delta" => {
-                match event.pointer("/delta/type").and_then(|t| t.as_str()) {
-                    Some("text_delta") => {
-                        if let Some(t) = event.pointer("/delta/text").and_then(|t| t.as_str()) {
-                            content.push_str(t);
-                        }
+            "content_block_delta" => match event.pointer("/delta/type").and_then(|t| t.as_str()) {
+                Some("text_delta") => {
+                    if let Some(t) = event.pointer("/delta/text").and_then(|t| t.as_str()) {
+                        content.push_str(t);
                     }
-                    Some("input_json_delta") => {
-                        if let Some(p) =
-                            event.pointer("/delta/partial_json").and_then(|p| p.as_str())
-                        {
-                            tool_args.push_str(p);
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                Some("input_json_delta") => {
+                    if let Some(p) = event
+                        .pointer("/delta/partial_json")
+                        .and_then(|p| p.as_str())
+                    {
+                        tool_args.push_str(p);
+                    }
+                }
+                _ => {}
+            },
             "content_block_stop" => {
                 if let Some(mut tool) = current_tool.take() {
                     let input: Value =
@@ -168,7 +179,10 @@ fn parse_messages_sse(buffer: &str) -> Result<Value, ConduitError> {
     blocks.extend(tool_use_blocks);
     let mut result = serde_json::json!({"role": "assistant", "content": blocks});
     if let Some(u) = usage {
-        result.as_object_mut().unwrap().insert("usage".to_owned(), u);
+        result
+            .as_object_mut()
+            .unwrap()
+            .insert("usage".to_owned(), u);
     }
     Ok(result)
 }
@@ -237,8 +251,7 @@ data: [DONE]\n";
         assert_eq!(tc["type"], "function");
         assert_eq!(tc["function"]["name"], "get_weather");
         assert_eq!(
-            tc["function"]["arguments"],
-            "{\"location\": \"NYC\"}",
+            tc["function"]["arguments"], "{\"location\": \"NYC\"}",
             "arguments from two deltas should be concatenated"
         );
     }
