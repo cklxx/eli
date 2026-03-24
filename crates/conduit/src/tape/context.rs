@@ -108,10 +108,8 @@ const AGGRESSIVE_TRIM_KEEP_ROUNDS: usize = 2;
 
 /// Apply context budget: truncate large tool results and trim if total exceeds budget.
 pub fn apply_context_budget(messages: &mut Vec<Value>) {
-    // Phase 1: Truncate individual tool results
     for msg in messages.iter_mut() {
-        let is_tool = msg.get("role").and_then(|r| r.as_str()) == Some("tool");
-        if is_tool {
+        if msg_role(msg) == "tool" {
             truncate_tool_result_content(msg, MAX_TOOL_RESULT_CHARS);
         }
     }
@@ -159,79 +157,61 @@ fn truncate_tool_result_content(msg: &mut Value, limit: usize) {
     }
 }
 
-/// Count characters in a message's content field.
-fn content_char_count(msg: &Value) -> usize {
-    msg.get("content")
-        .and_then(|c| c.as_str())
-        .map(|s| s.len())
-        .unwrap_or(0)
+/// Extract the role string from a message value.
+fn msg_role(msg: &Value) -> &str {
+    msg.get("role").and_then(|r| r.as_str()).unwrap_or("")
 }
 
-/// Aggressive trim: keep system messages + last 2 complete tool interaction rounds.
-fn aggressive_trim(messages: &mut Vec<Value>) {
-    // Separate system messages from conversation
-    let system_msgs: Vec<Value> = messages
-        .iter()
-        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
-        .cloned()
-        .collect();
+/// Count characters in a message's content field.
+fn content_char_count(msg: &Value) -> usize {
+    msg.get("content").and_then(|c| c.as_str()).map_or(0, str::len)
+}
 
-    let conversation: Vec<Value> = messages
-        .iter()
-        .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
-        .cloned()
-        .collect();
-
-    // Find the start of the last AGGRESSIVE_TRIM_KEEP_ROUNDS complete rounds.
-    // A round = user msg + assistant msg (possibly with tool_calls) + tool results.
-    // Walk backwards to find where the Nth-to-last user message starts.
-    let mut user_count = 0;
-    let mut keep_from = conversation.len();
-    for (i, msg) in conversation.iter().enumerate().rev() {
-        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
-        if role == "user" {
-            user_count += 1;
-            if user_count >= AGGRESSIVE_TRIM_KEEP_ROUNDS {
-                keep_from = i;
-                break;
+/// Walk backwards through `msgs` and return the index where the last `rounds`
+/// user-message rounds begin. Returns 0 if fewer than `rounds` user messages exist.
+fn find_trim_boundary(msgs: &[Value], rounds: usize) -> usize {
+    let mut seen = 0;
+    for (i, m) in msgs.iter().enumerate().rev() {
+        if msg_role(m) == "user" {
+            seen += 1;
+            if seen >= rounds {
+                return i;
             }
         }
     }
-    // If we didn't find enough user messages, keep everything
-    if user_count < AGGRESSIVE_TRIM_KEEP_ROUNDS {
-        keep_from = 0;
-    }
+    0
+}
 
-    let mut recent: Vec<Value> = conversation[keep_from..].to_vec();
+const TRIM_NOTICE: &str =
+    "[Earlier tool interactions trimmed to fit context window. Use tape.search to review full history.]";
 
-    messages.clear();
-    messages.extend(system_msgs);
+/// Aggressive trim: keep system messages + last N complete rounds.
+/// If the kept portion starts with an assistant message, the trim notice is
+/// prepended to it rather than injected as a separate message (which would
+/// violate alternating-roles API constraints).
+fn aggressive_trim(messages: &mut Vec<Value>) {
+    let (system, conversation): (Vec<_>, Vec<_>) =
+        messages.drain(..).partition(|m| msg_role(m) == "system");
+
+    let keep_from = find_trim_boundary(&conversation, AGGRESSIVE_TRIM_KEEP_ROUNDS);
+    let mut recent: Vec<Value> = conversation.into_iter().skip(keep_from).collect();
+
+    messages.extend(system);
     if keep_from > 0 {
-        const TRIM_NOTICE: &str = "[Earlier tool interactions trimmed to fit context window. Use tape.search to review full history.]";
-        // If the kept conversation starts with an assistant message, prepend
-        // the trim notice to its content instead of injecting a separate
-        // assistant message (which would violate alternating-roles constraints).
-        if recent
-            .first()
-            .and_then(|m| m.get("role"))
-            .and_then(|r| r.as_str())
-            == Some("assistant")
-        {
-            let first = &mut recent[0];
-            let existing = first
-                .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
-            first["content"] =
-                Value::String(format!("{TRIM_NOTICE}\n\n{existing}"));
-        } else {
-            messages.push(serde_json::json!({
-                "role": "assistant",
-                "content": TRIM_NOTICE
-            }));
-        }
+        inject_trim_notice(&mut recent, messages);
     }
     messages.extend(recent);
+}
+
+/// Insert the trim notice — either prepended to an existing leading assistant
+/// message, or as a new assistant message before the kept portion.
+fn inject_trim_notice(recent: &mut [Value], before: &mut Vec<Value>) {
+    if msg_role(&recent[0]) == "assistant" {
+        let existing = recent[0].get("content").and_then(|c| c.as_str()).unwrap_or("");
+        recent[0]["content"] = Value::String(format!("{TRIM_NOTICE}\n\n{existing}"));
+    } else {
+        before.push(serde_json::json!({"role": "assistant", "content": TRIM_NOTICE}));
+    }
 }
 
 #[cfg(test)]
@@ -239,88 +219,52 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Verify that aggressive_trim does not produce consecutive assistant messages
-    /// when the kept conversation starts with an assistant message.
-    #[test]
-    fn aggressive_trim_no_consecutive_assistant_when_recent_starts_with_assistant() {
-        // Build a conversation with many rounds so trimming kicks in.
-        // After the old user messages, the kept portion will start with
-        // an assistant message (the tool_calls response).
-        let mut messages = vec![
-            json!({"role": "system", "content": "You are helpful."}),
-        ];
+    fn msg(role: &str, text: &str) -> Value {
+        json!({"role": role, "content": text})
+    }
 
-        // Add enough rounds so the first ones get trimmed.
-        // AGGRESSIVE_TRIM_KEEP_ROUNDS is 2, so we need >2 user messages.
-        for i in 0..4 {
-            messages.push(json!({"role": "user", "content": format!("question {i}")}));
-            messages.push(json!({"role": "assistant", "content": format!("answer {i}")}));
-        }
-
-        // Now make the kept portion start with assistant by adding a tool round:
-        // user -> assistant (tool_call) -> tool -> assistant
-        // We want 2 user rounds at the end where the boundary falls on an assistant msg.
-        let mut messages2 = vec![
-            json!({"role": "system", "content": "You are helpful."}),
-        ];
-        // Old rounds that will be trimmed
-        for i in 0..3 {
-            messages2.push(json!({"role": "user", "content": format!("old q{i}")}));
-            messages2.push(json!({"role": "assistant", "content": format!("old a{i}")}));
-        }
-        // This assistant msg will be the start of `recent` if keep_from lands here
-        messages2.push(json!({"role": "assistant", "content": "continued thought"}));
-        messages2.push(json!({"role": "user", "content": "recent q1"}));
-        messages2.push(json!({"role": "assistant", "content": "recent a1"}));
-        messages2.push(json!({"role": "user", "content": "recent q2"}));
-        messages2.push(json!({"role": "assistant", "content": "recent a2"}));
-
-        aggressive_trim(&mut messages2);
-
-        // Check no two consecutive messages share the same role
-        for window in messages2.windows(2) {
-            let role_a = window[0].get("role").and_then(|r| r.as_str()).unwrap_or("");
-            let role_b = window[1].get("role").and_then(|r| r.as_str()).unwrap_or("");
-            assert!(
-                role_a != role_b || role_a == "system",
-                "consecutive messages with role '{role_a}' found: {:?} and {:?}",
-                window[0],
-                window[1],
-            );
+    fn assert_no_consecutive_roles(messages: &[Value]) {
+        for w in messages.windows(2) {
+            let (a, b) = (msg_role(&w[0]), msg_role(&w[1]));
+            assert!(a != b || a == "system", "consecutive '{a}': {:?} / {:?}", w[0], w[1]);
         }
     }
 
-    /// When kept conversation starts with a user message, the trim notice
-    /// should be injected as a separate assistant message (original behavior).
+    #[test]
+    fn inject_trim_notice_prepends_to_leading_assistant() {
+        let mut recent = vec![msg("assistant", "hello"), msg("user", "q")];
+        let mut before = vec![msg("system", "sys")];
+        inject_trim_notice(&mut recent, &mut before);
+
+        assert_eq!(before.len(), 1); // no extra assistant injected
+        let content = recent[0]["content"].as_str().unwrap();
+        assert!(content.starts_with(TRIM_NOTICE));
+        assert!(content.contains("hello"));
+    }
+
+    #[test]
+    fn inject_trim_notice_adds_message_before_user() {
+        let mut recent = vec![msg("user", "q"), msg("assistant", "a")];
+        let mut before = vec![msg("system", "sys")];
+        inject_trim_notice(&mut recent, &mut before);
+
+        assert_eq!(before.len(), 2);
+        assert_eq!(msg_role(&before[1]), "assistant");
+        assert!(before[1]["content"].as_str().unwrap().contains("trimmed"));
+    }
+
     #[test]
     fn aggressive_trim_injects_notice_before_user() {
-        let mut messages = vec![
-            json!({"role": "system", "content": "system"}),
-        ];
+        let mut msgs = vec![msg("system", "sys")];
         for i in 0..4 {
-            messages.push(json!({"role": "user", "content": format!("q{i}")}));
-            messages.push(json!({"role": "assistant", "content": format!("a{i}")}));
+            msgs.push(msg("user", &format!("q{i}")));
+            msgs.push(msg("assistant", &format!("a{i}")));
         }
 
-        aggressive_trim(&mut messages);
-
-        // Should have system, then assistant trim notice, then user/assistant pairs
-        assert_eq!(
-            messages[0].get("role").and_then(|r| r.as_str()),
-            Some("system")
-        );
-        assert_eq!(
-            messages[1].get("role").and_then(|r| r.as_str()),
-            Some("assistant")
-        );
-        assert!(messages[1]
-            .get("content")
-            .and_then(|c| c.as_str())
-            .unwrap()
-            .contains("trimmed"));
-        assert_eq!(
-            messages[2].get("role").and_then(|r| r.as_str()),
-            Some("user")
-        );
+        aggressive_trim(&mut msgs);
+        assert_no_consecutive_roles(&msgs);
+        assert_eq!(msg_role(&msgs[1]), "assistant");
+        assert!(msgs[1]["content"].as_str().unwrap().contains("trimmed"));
+        assert_eq!(msg_role(&msgs[2]), "user");
     }
 }
