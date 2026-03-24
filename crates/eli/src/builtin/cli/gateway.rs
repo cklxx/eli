@@ -163,12 +163,14 @@ fn start_sidecar(wh: &crate::channels::webhook::WebhookSettings) -> Option<std::
 
     // Use process_group(0) so the sidecar and all its children share a
     // process group that we can kill atomically on shutdown.
+    // Pipe stdin so sidecar can detect parent death (pipe close = exit).
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new("node");
     cmd.arg("start.cjs")
         .current_dir(&sidecar_dir)
         .env("SIDECAR_ELI_URL", &eli_url)
         .env("SIDECAR_SKILLS_DIR", &workspace)
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .process_group(0);
@@ -282,6 +284,7 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     });
 
     let framework = super::builtin_framework().await;
+    let inflight = Arc::new(tokio::sync::Semaphore::new(0));
     loop {
         tokio::select! {
             Some(msg) = rx.recv() => {
@@ -303,59 +306,70 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
                     "output_channel": output_channel,
                 });
 
-                match framework.process_inbound(inbound).await {
-                    Ok(result) => {
-                        tracing::info!(session = %result.session_id, "framework run completed");
-                        for outbound in &result.outbounds {
-                            let out_ch = outbound
-                                .get("output_channel")
-                                .and_then(|v| v.as_str())
-                                .or_else(|| outbound.get("channel").and_then(|v| v.as_str()))
-                                .unwrap_or("");
+                // Spawn processing so the main loop stays responsive to cancel.
+                let fw = framework.clone();
+                let chs = channels.clone();
+                let cancel_inner = cancel.clone();
+                let sem = inflight.clone();
+                sem.add_permits(1);
+                tokio::spawn(async move {
+                    let _permit = sem.acquire().await;
+                    let result = tokio::select! {
+                        r = fw.process_inbound(inbound) => r,
+                        () = cancel_inner.cancelled() => return,
+                    };
+                    match result {
+                        Ok(result) => {
+                            tracing::info!(session = %result.session_id, "framework run completed");
+                            for outbound in &result.outbounds {
+                                let out_ch = outbound
+                                    .get("output_channel")
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| outbound.get("channel").and_then(|v| v.as_str()))
+                                    .unwrap_or("");
 
-                            let channel = match channels.get(out_ch) {
-                                Some(ch) => ch.clone(),
-                                None => continue,
-                            };
+                                let channel = match chs.get(out_ch) {
+                                    Some(ch) => ch.clone(),
+                                    None => continue,
+                                };
 
-                            let content = super::outbound_string_field(outbound, "content");
-                            let cleanup_only = outbound
-                                .get("context")
-                                .and_then(|v| v.as_object())
-                                .and_then(|ctx| ctx.get(crate::builtin::CLEANUP_ONLY_CONTEXT_KEY))
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-                            if content.trim().is_empty() && !cleanup_only {
-                                continue;
-                            }
+                                let content = super::outbound_string_field(outbound, "content");
+                                let cleanup_only = outbound
+                                    .get("context")
+                                    .and_then(|v| v.as_object())
+                                    .and_then(|ctx| ctx.get(crate::builtin::CLEANUP_ONLY_CONTEXT_KEY))
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false);
+                                if content.trim().is_empty() && !cleanup_only {
+                                    continue;
+                                }
 
-                            let chat_id = super::outbound_string_field(outbound, "chat_id");
-                            if chat_id.is_empty() {
-                                continue;
-                            }
+                                let chat_id = super::outbound_string_field(outbound, "chat_id");
+                                if chat_id.is_empty() {
+                                    continue;
+                                }
 
-                            let session_id = outbound
-                                .get("session_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or(&result.session_id);
-                            // Carry over context from the outbound or inbound so
-                            // the webhook sidecar can route replies correctly.
-                            let reply_context = outbound
-                                .get("context")
-                                .and_then(|v| v.as_object())
-                                .cloned()
-                                .unwrap_or_else(|| inbound_context.clone());
-                            let reply = ChannelMessage::new(session_id, out_ch, &content)
-                                .with_chat_id(chat_id)
-                                .with_context(reply_context)
-                                .finalize();
-                            if let Err(e) = channel.send(reply).await {
-                                eprintln!("Failed to send reply via {out_ch}: {e}");
+                                let session_id = outbound
+                                    .get("session_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&result.session_id);
+                                let reply_context = outbound
+                                    .get("context")
+                                    .and_then(|v| v.as_object())
+                                    .cloned()
+                                    .unwrap_or_else(|| inbound_context.clone());
+                                let reply = ChannelMessage::new(session_id, out_ch, &content)
+                                    .with_chat_id(chat_id)
+                                    .with_context(reply_context)
+                                    .finalize();
+                                if let Err(e) = channel.send(reply).await {
+                                    eprintln!("Failed to send reply via {out_ch}: {e}");
+                                }
                             }
                         }
+                        Err(e) => eprintln!("Framework error: {e}"),
                     }
-                    Err(e) => eprintln!("Framework error: {e}"),
-                }
+                });
             }
             () = cancel.cancelled() => {
                 break;

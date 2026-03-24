@@ -75,6 +75,11 @@ async function addTypingState(params: {
     }
   }
 
+  // Legacy fallback: only for feishu channel (the only one using Lark reactions).
+  if (channelPlugin?.meta?.id !== "feishu") {
+    return null;
+  }
+
   try {
     const { addTypingIndicator } = require(
       require("path").dirname(require.resolve("@larksuite/openclaw-lark"))
@@ -106,6 +111,11 @@ async function removeTypingState(
     } catch (e: any) {
       console.log(`[runtime] lifecycle typing removal failed: ${e.message}`);
     }
+    return;
+  }
+
+  // Legacy fallback: only for feishu channel (the only one using Lark reactions).
+  if (channelPlugin?.meta?.id !== "feishu") {
     return;
   }
 

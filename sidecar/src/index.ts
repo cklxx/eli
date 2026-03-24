@@ -172,6 +172,14 @@ if (isCLI) {
         };
         process.on("SIGINT", shutdown);
         process.on("SIGTERM", shutdown);
+
+        // Detect parent death: eli pipes stdin to us. When the parent
+        // process dies (killed, crashed), the pipe closes and we get 'end'.
+        process.stdin.resume();
+        process.stdin.on("end", () => {
+          console.log("[sidecar] parent stdin closed, shutting down...");
+          shutdown();
+        });
       })
       .catch((err) => {
         console.error("[sidecar] fatal error:", err);

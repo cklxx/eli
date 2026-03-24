@@ -375,8 +375,8 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
             result = await channelPlugin.lifecycle.wrapToolExecution(sessionCtx, () =>
               tool.execute(id, params)
             );
-          } else {
-            // Legacy fallback: try openclaw-lark LarkTicket wrapping.
+          } else if (sessionCtx.channel === "feishu") {
+            // Legacy fallback: LarkTicket wrapping (feishu only).
             try {
               const pluginDir = require("path").dirname(require.resolve("@larksuite/openclaw-lark"));
               const { withTicket } = require(pluginDir + "/src/core/lark-ticket.js");
@@ -392,6 +392,8 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
             } catch {
               result = await tool.execute(id, params);
             }
+          } else {
+            result = await tool.execute(id, params);
           }
         } else {
           result = await tool.execute(id, params);
