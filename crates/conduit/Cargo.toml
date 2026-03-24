@@ -2,11 +2,11 @@
 name = "conduit"
 version = "0.6.0"
 edition = "2024"
-description = "Core library for the eli AI assistant"
-license = "MIT"
+description = "Provider-agnostic LLM toolkit — streaming, tool calls, tape storage, OAuth"
+license = "Apache-2.0"
 repository = "https://github.com/cklxx/eli"
-homepage = "https://github.com/cklxx/eli"
-keywords = ["ai", "llm", "assistant", "library"]
+homepage = "https://eliagent.github.io"
+keywords = ["ai", "llm", "streaming", "openai", "anthropic"]
 categories = ["api-bindings"]
 
 [dependencies]

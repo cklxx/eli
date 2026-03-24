@@ -1,22 +1,46 @@
-# Eli
+# Eli — Ease Lives Instantly
 
-Hook-first AI agent framework in Rust. One pipeline for CLI, Telegram, Feishu, and any [OpenClaw](https://github.com/nicepkg/openclaw) channel plugin.
+> Hook-first AI agent framework in Rust. One pipeline for CLI, Telegram, and any channel.
 
-## Features
+I needed an AI agent that could live in my team's group chat — not a chatbot, a teammate. Everything in the space was Python, couldn't deploy as a single binary, and fell apart the moment you needed real concurrency. So I built eli in Rust.
 
-- **Hook-based pipeline** — 12 hook points, last-registered-wins. Builtins register first, your plugins override
-- **Multi-channel** — CLI REPL, Telegram bot, Feishu/DingTalk/Discord/Slack via OpenClaw sidecar
-- **Provider-agnostic LLM** — OpenAI, Anthropic Claude, GitHub Copilot, custom endpoints
-- **21 builtin tools** — shell, filesystem, web fetch, subagent, tape operations, decisions
-- **Skills** — Markdown-defined capabilities (`SKILL.md`) with project/global precedence
-- **Tape system** — Append-only conversation history with anchors, search, and forking
-- **MCP server mode** — Expose sidecar tools over stdio for Claude Code / Cursor integration
-- **Auto-handoff** — Context-aware tape branching when approaching token limits
+<!-- TODO: replace with actual recording via `vhs demo.tape` -->
+```
+$ eli chat
+eli> summarize this repo in one paragraph
+
+Eli is a hook-first AI agent framework written in Rust. It runs a 7-stage
+turn pipeline (resolve_session → load_state → build_prompt → run_model →
+save_state → render_outbound → dispatch_outbound) where every stage is a
+hook point that plugins can override. It ships with 21 builtin tools, a
+tape-based conversation history, and works across CLI, Telegram, and any
+channel via an OpenClaw sidecar. The LLM layer (conduit) is provider-
+agnostic — switch between OpenAI, Claude, Copilot, or Ollama with one
+env var.
+
+eli> /quit
+```
+
+## Why Eli?
+
+|   | Eli | LangChain | CrewAI | AutoGen |
+|---|-----|-----------|--------|---------|
+| **Language** | Rust | Python | Python | Python |
+| **Binary** | Single static binary | pip install + deps | pip install + deps | pip install + deps |
+| **Architecture** | Hook pipeline (12 points) | Chain/graph | Role-based crew | Multi-agent conversation |
+| **Extensibility** | Last-registered-wins hooks | Callbacks + chains | Custom agents | Custom agents |
+| **Channels** | CLI, Telegram, Feishu, Slack, Discord | None (library) | None (library) | None (library) |
+| **Memory** | Tape (append-only, forkable) | Various memory classes | Shared memory | Chat history |
+| **Deploy** | `cargo install` or Docker | Python environment | Python environment | Python environment |
+
+Eli is smaller and younger. The tradeoff: you get Rust's performance, type safety, and single-binary deploys. If you want a mature ecosystem with hundreds of integrations, use LangChain. If you want a fast, self-contained agent that deploys anywhere and handles real concurrency, try eli.
 
 ## Quick Start
 
 ```bash
-cargo install --path crates/eli
+git clone https://github.com/cklxx/eli.git
+cd eli && cargo build --release
+cp env.example .env    # add your API key
 ```
 
 ```bash
@@ -24,6 +48,17 @@ eli chat                    # interactive REPL
 eli run "summarize this"    # one-shot execution
 eli gateway                 # multi-channel listener
 ```
+
+## Features
+
+- **Hook-based pipeline** — 12 hook points, last-registered-wins. Builtins register first, your plugins override
+- **Multi-channel** — CLI REPL, Telegram bot, Feishu/DingTalk/Discord/Slack via OpenClaw sidecar
+- **Provider-agnostic LLM** — OpenAI, Anthropic Claude, GitHub Copilot, DeepSeek, Ollama, custom endpoints
+- **21 builtin tools** — shell, filesystem, web fetch, subagent, tape operations, decisions
+- **Skills** — Markdown-defined capabilities (`SKILL.md`) with project/global precedence
+- **Tape system** — Append-only conversation history with anchors, search, and forking
+- **MCP server mode** — Expose sidecar tools over stdio for Claude Code / Cursor integration
+- **Auto-handoff** — Context-aware tape branching when approaching token limits
 
 ## Commands
 
@@ -46,10 +81,10 @@ eli gateway                 # multi-channel listener
 ELI_TELEGRAM_TOKEN=xxx eli gateway
 
 # Feishu / DingTalk / Discord (via OpenClaw sidecar — auto-starts)
-eli gateway --enable-channel webhook
+eli gateway
 ```
 
-The webhook channel launches a Node.js sidecar that loads any OpenClaw channel plugin. First run prompts for credentials interactively.
+The sidecar launches a Node.js bridge that loads any OpenClaw channel plugin. First run prompts for credentials interactively.
 
 ## Architecture
 
@@ -86,16 +121,6 @@ The webhook channel launches a Node.js sidecar that loads any OpenClaw channel p
 | `ELI_TRACE` | — | Enable structured trace logging (`1` / `true`) |
 
 Profiles: `~/.eli/config.toml` — per-provider API keys and defaults.
-
-## Project Structure
-
-```
-crates/
-  conduit/          LLM toolkit (streaming, tools, tape, embeddings)
-  eli/              Agent framework (pipeline, channels, builtins)
-sidecar/            Node.js bridge for OpenClaw plugins
-.agents/skills/     Project-level skill definitions
-```
 
 ## Skills
 

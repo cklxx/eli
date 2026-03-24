@@ -2,11 +2,11 @@
 name = "eli"
 version = "0.3.0"
 edition = "2024"
-description = "A terminal-based AI assistant and productivity tool"
-license = "MIT"
+description = "Ease Lives Instantly — hook-first AI agent framework with multi-channel support"
+license = "Apache-2.0"
 repository = "https://github.com/cklxx/eli"
-homepage = "https://github.com/cklxx/eli"
-keywords = ["cli", "ai", "assistant", "terminal", "tui"]
+homepage = "https://eliagent.github.io"
+keywords = ["ai", "agent", "llm", "rust", "framework"]
 categories = ["command-line-utilities"]
 
 [[bin]]
