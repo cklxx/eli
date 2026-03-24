@@ -270,10 +270,11 @@ impl TapeStore for InMemoryTapeStore {
     }
 
     fn reset(&self, tape: &str) -> Result<(), ConduitError> {
-        let mut tapes = self.tapes.write().unwrap_or_else(|e| e.into_inner());
-        tapes.remove(tape);
+        // Lock next_ids before tapes — same order as append() to prevent deadlock.
         let mut ids = self.next_ids.write().unwrap_or_else(|e| e.into_inner());
         ids.remove(tape);
+        let mut tapes = self.tapes.write().unwrap_or_else(|e| e.into_inner());
+        tapes.remove(tape);
         Ok(())
     }
 
