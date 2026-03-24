@@ -252,10 +252,11 @@ function buildPluginRuntime(config: SidecarConfig) {
          */
         dispatchReplyFromConfig: async (params: any) => {
           const ctx = params.ctx ?? {};
-          // OpenClaw ctx uses PascalCase keys. Body is an envelope object with a nested .body field.
-          const bodyEnvelope = ctx.Body ?? {};
-          const textBody = typeof bodyEnvelope === "string" ? bodyEnvelope
-            : (bodyEnvelope.body ?? ctx.RawBody ?? ctx.BodyForAgent ?? "");
+          // OpenClaw ctx uses PascalCase keys.
+          // BodyForAgent has media paths substituted (e.g. ![image](/path/to/img.jpg))
+          // and mention annotations — preferred for AI processing.
+          // RawBody is the original text. Body has speaker prefix.
+          const textBody = ctx.BodyForAgent ?? ctx.RawBody ?? ctx.Body ?? "";
           const senderId = ctx.SenderId ?? "";
           const senderName = ctx.SenderName ?? senderId;
           const to = ctx.To ?? "";  // "To" contains the chat target (e.g. channel:account:chatId)
@@ -293,6 +294,20 @@ function buildPluginRuntime(config: SidecarConfig) {
 
           // Pass the "To" field as-is so the outbound bridge can use it
           // as the channel route target for sendText.
+          // Collect media file paths from the plugin's media resolution.
+          const mediaPaths: string[] = [];
+          if (ctx.MediaPaths && Array.isArray(ctx.MediaPaths)) {
+            mediaPaths.push(...ctx.MediaPaths);
+          } else if (ctx.MediaPath) {
+            mediaPaths.push(ctx.MediaPath);
+          }
+          const mediaTypes: string[] = [];
+          if (ctx.MediaTypes && Array.isArray(ctx.MediaTypes)) {
+            mediaTypes.push(...ctx.MediaTypes);
+          } else if (ctx.MediaType) {
+            mediaTypes.push(ctx.MediaType);
+          }
+
           const envelope: InboundEnvelope = {
             channel,
             accountId,
@@ -302,6 +317,8 @@ function buildPluginRuntime(config: SidecarConfig) {
             chatId,
             text: typeof textBody === "string" ? textBody : JSON.stringify(textBody),
             channel_target: to,  // e.g. "user:ou_xxx" or "channel:account:chatId"
+            media_paths: mediaPaths.length > 0 ? mediaPaths : undefined,
+            media_types: mediaTypes.length > 0 ? mediaTypes : undefined,
           };
 
           // Fire-and-forget typing indicator (don't block message forwarding).
@@ -340,6 +357,9 @@ function buildPluginRuntime(config: SidecarConfig) {
           markFullyComplete: () => {},
           abortCard: async () => {},
         }),
+        withReplyDispatcher: async (params: any) => {
+          if (params?.run) await params.run();
+        },
         /**
          * System command dispatch (for /new, /reset, etc.).
          * Route to eli as well.
@@ -392,6 +412,10 @@ function buildPluginRuntime(config: SidecarConfig) {
       },
       media: {
         saveMediaBuffer: async () => null,
+      },
+      session: {
+        resolveStorePath: (_store: any, _opts: any) => "/tmp/openclaw/sessions",
+        recordInboundSession: async () => {},
       },
       pairing: {
         buildPairingReply: () => null,
@@ -473,7 +497,7 @@ export async function loadPlugins(config: SidecarConfig): Promise<void> {
         }
       }
 
-      const api = new SidecarPluginApi(plugin.id ?? pluginName, config);
+      const api = new SidecarPluginApi(plugin.id ?? pluginName, config, pluginRuntime);
       plugin.register(api);
       console.log(`[runtime] plugin loaded: ${plugin.id ?? pluginName}`);
 
@@ -704,6 +728,55 @@ export async function startChannels(config: SidecarConfig): Promise<void> {
       }
     }
 
+    // If no real accounts exist and the plugin supports QR login, trigger it.
+    const hasRealAccounts =
+      accountIds.length > 0 &&
+      !(accountIds.length === 1 && accountIds[0] === "default");
+    if (!hasRealAccounts && plugin.gateway?.loginWithQrStart) {
+      console.log(`[runtime] ${channelId}: no accounts configured, starting QR login...`);
+      try {
+        const startResult = await (plugin.gateway as any).loginWithQrStart({});
+        const qrUrl = (startResult as any).qrDataUrl;
+        const sessionKey = (startResult as any).sessionKey;
+        if (qrUrl) {
+          console.log(`\n使用微信扫描以下二维码，以完成连接：\n`);
+          try {
+            const qrterm = require("qrcode-terminal");
+            qrterm.generate(qrUrl, { small: true }, (qr: string) => {
+              console.log(qr);
+              console.log(`如果二维码未能成功展示，请用浏览器打开以下链接扫码：`);
+              console.log(qrUrl);
+            });
+          } catch {
+            console.log(`请用浏览器打开以下链接扫码：`);
+            console.log(qrUrl);
+          }
+          console.log(`\n等待扫码...\n`);
+          const waitResult = await (plugin.gateway as any).loginWithQrWait({
+            sessionKey,
+            timeoutMs: 300_000,
+          });
+          if (waitResult.connected) {
+            console.log(`[runtime] ${channelId}: ✅ 登录成功`);
+            // Re-list accounts after login.
+            try {
+              accountIds = await plugin.config.listAccountIds({
+                channels: { [channelId]: channelConfig },
+              });
+            } catch {
+              accountIds = [];
+            }
+          } else {
+            console.error(`[runtime] ${channelId}: 登录失败 — ${waitResult.message}`);
+          }
+        } else {
+          console.error(`[runtime] ${channelId}: ${startResult.message}`);
+        }
+      } catch (err) {
+        console.error(`[runtime] ${channelId} QR login failed:`, err);
+      }
+    }
+
     for (const accountId of accountIds) {
       console.log(`[runtime] starting channel "${channelId}" account "${accountId}"`);
 
@@ -715,20 +788,26 @@ export async function startChannels(config: SidecarConfig): Promise<void> {
 
       const ctx = buildGatewayContext(channelId, accountId, config, onMessage);
 
+      // Resolve account for plugins that need ctx.account (e.g. weixin).
       try {
-        const startFn = plugin.gateway.startAccount ?? plugin.gateway.start;
-        if (!startFn) {
-          console.error(`[runtime] channel "${channelId}" gateway has no start/startAccount`);
-          continue;
-        }
-        await startFn.call(plugin.gateway, ctx);
-        console.log(`[runtime] channel "${channelId}" account "${accountId}" started`);
-      } catch (err) {
-        console.error(
-          `[runtime] failed to start channel "${channelId}" account "${accountId}":`,
-          err,
+        const account = plugin.config.resolveAccount(
+          ctx.cfg,
+          accountId,
         );
+        (ctx as any).account = account;
+      } catch {
+        // Plugin doesn't support resolveAccount or account not found — skip.
       }
+
+      const startFn = plugin.gateway.startAccount ?? plugin.gateway.start;
+      if (!startFn) {
+        console.error(`[runtime] channel "${channelId}" gateway has no start/startAccount`);
+        continue;
+      }
+      // Fire-and-forget: gateways run in the background (some block forever).
+      void startFn.call(plugin.gateway, ctx)
+        .then(() => console.log(`[runtime] channel "${channelId}" account "${accountId}" gateway returned`))
+        .catch((err: any) => console.error(`[runtime] failed to start channel "${channelId}" account "${accountId}":`, err));
     }
   }
 }

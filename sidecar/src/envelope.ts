@@ -8,6 +8,23 @@ export function envelopeToEliMessage(env: InboundEnvelope): EliChannelMessage {
   const chatId = env.chatId ?? env.senderId;
   const sessionId = `${env.channel}:${env.accountId}:${chatId}`;
 
+  const context: Record<string, any> = {
+    source_channel: env.channel,
+    account_id: env.accountId,
+    sender_id: env.senderId,
+    sender_name: env.senderName ?? "",
+    chat_type: env.chatType,
+    group_label: env.groupLabel ?? "",
+    reply_to_id: env.replyToId ?? "",
+    channel_target: env.channel_target ?? (env as any).feishu_to ?? "",
+  };
+
+  // Forward media metadata so the agent can access downloaded files.
+  if (env.media_paths && env.media_paths.length > 0) {
+    context.media_paths = env.media_paths;
+    context.media_types = env.media_types ?? [];
+  }
+
   return {
     session_id: sessionId,
     channel: "webhook",
@@ -15,16 +32,7 @@ export function envelopeToEliMessage(env: InboundEnvelope): EliChannelMessage {
     chat_id: chatId,
     is_active: true,
     kind: "normal",
-    context: {
-      source_channel: env.channel,
-      account_id: env.accountId,
-      sender_id: env.senderId,
-      sender_name: env.senderName ?? "",
-      chat_type: env.chatType,
-      group_label: env.groupLabel ?? "",
-      reply_to_id: env.replyToId ?? "",
-      channel_target: env.channel_target ?? (env as any).feishu_to ?? "",
-    },
+    context,
     output_channel: "webhook",
   };
 }

@@ -168,6 +168,10 @@ export interface InboundEnvelope {
   groupLabel?: string;
   text: string;
   mediaPath?: string;
+  /** Local file paths for media attachments (resolved by channel plugin). */
+  media_paths?: string[];
+  /** Media types corresponding to media_paths (image, file, audio, video, sticker). */
+  media_types?: string[];
   replyToId?: string;
   [key: string]: any;
 }
