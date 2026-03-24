@@ -105,10 +105,10 @@ impl Agent {
         // Ensure bootstrap anchor exists.
         tapes.ensure_bootstrap_anchor(&tape_name).await?;
 
-        // Check for comma-command.
+        // Check for slash-command.
         if let PromptInput::Text(ref text) = prompt {
             let trimmed = text.trim();
-            if trimmed.starts_with(',') {
+            if trimmed.starts_with('/') {
                 return run_command(tapes, &tape_name, trimmed, &tool_state).await;
             }
         }
@@ -1013,7 +1013,7 @@ mod tests {
         let file_path = tmp.path().join("workspace").join("note.txt");
         std::fs::write(&file_path, "hello from workspace").unwrap();
 
-        let output = run_command(&service, &tape_name, ",fs.read path=note.txt", &tool_state)
+        let output = run_command(&service, &tape_name, "/fs.read path=note.txt", &tool_state)
             .await
             .unwrap();
 
@@ -1027,7 +1027,7 @@ mod tests {
         let (_tmp, service, tape_name, tool_state) = test_tape_service();
         service.ensure_bootstrap_anchor(&tape_name).await.unwrap();
 
-        let output = run_command(&service, &tape_name, ",tape_info", &tool_state)
+        let output = run_command(&service, &tape_name, "/tape_info", &tool_state)
             .await
             .unwrap();
 

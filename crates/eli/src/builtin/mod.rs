@@ -80,7 +80,7 @@ impl BuiltinImpl {
     /// Build a prompt from an inbound message.
     pub fn build_prompt(&self, message: &ChannelMessage) -> PromptInput {
         let content = extract_message_text(&message.content);
-        if content.starts_with(',') {
+        if content.starts_with('/') {
             return PromptInput::Text(content);
         }
         let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();

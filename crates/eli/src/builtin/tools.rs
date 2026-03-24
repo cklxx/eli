@@ -1094,22 +1094,22 @@ fn tool_help() -> Tool {
         |_args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 ok_val(
-                    "Commands use ',' at line start.\n\
+                    "Commands use '/' at line start.\n\
                      Known internal commands:\n\
-                     \x20 ,help\n\
-                     \x20 ,skill name=foo\n\
-                     \x20 ,tape.info\n\
-                     \x20 ,tape.search query=error\n\
-                     \x20 ,tape.handoff name=phase-1 summary='done'\n\
-                     \x20 ,tape.anchors\n\
-                     \x20 ,fs.read path=README.md\n\
-                     \x20 ,fs.write path=tmp.txt content='hello'\n\
-                     \x20 ,fs.edit path=tmp.txt old=hello new=world\n\
-                     \x20 ,bash cmd='sleep 5' background=true\n\
-                     \x20 ,bash.output shell_id=bsh-12345678\n\
-                     \x20 ,bash.kill shell_id=bsh-12345678\n\
-                     \x20 ,quit\n\
-                     Any unknown command after ',' is executed as shell via bash.",
+                     \x20 /help\n\
+                     \x20 /skill name=foo\n\
+                     \x20 /tape.info\n\
+                     \x20 /tape.search query=error\n\
+                     \x20 /tape.handoff name=phase-1 summary='done'\n\
+                     \x20 /tape.anchors\n\
+                     \x20 /fs.read path=README.md\n\
+                     \x20 /fs.write path=tmp.txt content='hello'\n\
+                     \x20 /fs.edit path=tmp.txt old=hello new=world\n\
+                     \x20 /bash cmd='sleep 5' background=true\n\
+                     \x20 /bash.output shell_id=bsh-12345678\n\
+                     \x20 /bash.kill shell_id=bsh-12345678\n\
+                     \x20 /quit\n\
+                     Any unknown command after '/' is executed as shell via bash.",
                 )
             })
         },

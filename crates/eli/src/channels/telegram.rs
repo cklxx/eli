@@ -616,8 +616,8 @@ impl Channel for TelegramChannel {
                         content
                     };
 
-                    // Comma commands pass through directly.
-                    if content.trim().starts_with(',') {
+                    // Slash commands pass through directly.
+                    if content.trim().starts_with('/') {
                         let channel_msg =
                             ChannelMessage::new(&session_id, "telegram", content.trim())
                                 .with_chat_id(&chat_id)

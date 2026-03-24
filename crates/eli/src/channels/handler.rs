@@ -71,7 +71,7 @@ impl BufferedMessageHandler {
         let now = Instant::now();
 
         // Commands bypass buffering entirely.
-        if message.content.starts_with(',') {
+        if message.content.starts_with('/') {
             let mut inner = self.inner.lock().await;
             let dropped = inner.pending.len();
             inner.pending.clear();
@@ -189,10 +189,10 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let handler = BufferedMessageHandler::new(tx, 10.0, 10.0, 0.01);
 
-        handler.handle(make_msg(",help", false)).await;
+        handler.handle(make_msg("/help", false)).await;
 
         let received = rx.try_recv().unwrap();
-        assert_eq!(received.content, ",help");
+        assert_eq!(received.content, "/help");
     }
 
     #[tokio::test]
@@ -202,10 +202,10 @@ mod tests {
 
         handler.handle(make_msg("buffered", true)).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
-        handler.handle(make_msg(",reset", false)).await;
+        handler.handle(make_msg("/reset", false)).await;
 
         let received = rx.try_recv().unwrap();
-        assert_eq!(received.content, ",reset");
+        assert_eq!(received.content, "/reset");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(rx.try_recv().is_err());

@@ -39,12 +39,12 @@ impl CliRenderer {
             ResetColor,
             Print(format!("│ workspace: {:<47}│\n", workspace)),
             Print(format!("│ model: {:<51}│\n", model)),
-            Print(format!("│ internal command prefix: ','{:<31}│\n", "")),
+            Print(format!("│ internal command prefix: '/'{:<31}│\n", "")),
             Print(format!(
-                "│ shell command prefix: ',' at line start{:<18}│\n",
+                "│ shell command prefix: '/' at line start{:<18}│\n",
                 ""
             )),
-            Print(format!("│ type ',help' for command list{:<30}│\n", "")),
+            Print(format!("│ type '/help' for command list{:<30}│\n", "")),
             SetForegroundColor(Color::Cyan),
             Print(format!("└{border}┘\n")),
             ResetColor,
@@ -198,7 +198,7 @@ impl CliChannel {
     fn prompt_symbol(mode: CliMode) -> &'static str {
         match mode {
             CliMode::Agent => "> ",
-            CliMode::Shell => ", ",
+            CliMode::Shell => "/ ",
         }
     }
 
@@ -215,10 +215,10 @@ impl CliChannel {
         if mode != CliMode::Shell {
             return raw.to_owned();
         }
-        if raw.starts_with(',') {
+        if raw.starts_with('/') {
             return raw.to_owned();
         }
-        format!(",{raw}")
+        format!("/{raw}")
     }
 }
 
@@ -271,17 +271,17 @@ impl Channel for CliChannel {
 
                 // Built-in commands.
                 match raw.as_str() {
-                    ",quit" | ",exit" => break,
-                    ",help" => {
+                    "/quit" | "/exit" => break,
+                    "/help" => {
                         let r = CliRenderer::new();
                         r.info("Commands:");
-                        r.info("  ,quit / ,exit   — exit the REPL");
-                        r.info("  ,help           — show this help");
+                        r.info("  /quit / /exit   — exit the REPL");
+                        r.info("  /help           — show this help");
                         r.info("  Ctrl-X          — toggle agent/shell mode");
                         r.info("");
                         continue;
                     }
-                    ",mode" => {
+                    "/mode" => {
                         mode = match mode {
                             CliMode::Agent => CliMode::Shell,
                             CliMode::Shell => CliMode::Agent,
