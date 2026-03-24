@@ -837,12 +837,19 @@ export async function stopChannels(config: SidecarConfig): Promise<void> {
 
     for (const accountId of accountIds) {
       try {
-        await stopFn.call(plugin.gateway, {
+        // Timeout per-account stop to prevent one hung plugin from blocking shutdown.
+        const stopPromise = stopFn.call(plugin.gateway, {
           accountId,
           cfg: { channels: { [channelId]: channelConfig } },
           log: pluginLogger(`${channelId}.${accountId}`),
         });
-        log.info("channel stopped", { channel: channelId, account: accountId });
+        const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 3000));
+        const result = await Promise.race([stopPromise.then(() => "ok" as const), timeout]);
+        if (result === "timeout") {
+          log.warn("channel stop timed out", { channel: channelId, account: accountId });
+        } else {
+          log.info("channel stopped", { channel: channelId, account: accountId });
+        }
       } catch (err) {
         log.error("failed to stop channel", { channel: channelId, account: accountId, err: String(err) });
       }

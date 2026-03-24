@@ -278,12 +278,16 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         eprintln!("Warning: sidecar not ready: {e}");
     }
 
-    // Handle Ctrl-C.
+    // Handle Ctrl-C. First signal → graceful shutdown. Second → force exit.
     let cancel_for_signal = cancel.clone();
     tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
         println!("\nShutting down...");
         cancel_for_signal.cancel();
+        // Second Ctrl-C → force exit immediately.
+        let _ = tokio::signal::ctrl_c().await;
+        eprintln!("\nForce exit.");
+        std::process::exit(1);
     });
 
     let framework = super::builtin_framework().await;
@@ -388,6 +392,13 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         }
     }
 
+    // Drain inflight framework tasks (max 5s) before killing sidecar,
+    // so outbound replies can still reach channel plugins.
+    let drain_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while let Ok(Ok(permit)) = tokio::time::timeout_at(drain_deadline, inflight.acquire()).await {
+        permit.forget(); // consumed
+    }
+
     // Clean up — kill the entire sidecar process group so child processes
     // (jiti workers, etc.) don't leak.
     if let Some(mut child) = sidecar_child {
@@ -397,10 +408,13 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         let _ = std::process::Command::new("kill")
             .args(["-TERM", &format!("-{pid}")])
             .status();
-        // Give it a moment to exit gracefully, then force-kill.
+        // Give it a moment to exit gracefully, then force-kill the process group.
         let waited = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            let _ = child.kill(); // SIGKILL if still alive
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            // SIGKILL the entire process group, not just the main child.
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &format!("-{}", pid)])
+                .status();
             child.wait()
         });
         match waited.join() {
