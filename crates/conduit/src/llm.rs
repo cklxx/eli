@@ -1029,37 +1029,43 @@ impl LLM {
             )
             .await?;
 
-        let byte_stream = response.bytes_stream();
         let parser = parser_for_transport(transport);
-        let text_stream = byte_stream.filter_map(move |chunk| async move {
-            match chunk {
-                Ok(bytes) => {
-                    let text = String::from_utf8_lossy(&bytes).to_string();
-                    let mut output = String::new();
-                    for line in text.lines() {
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if data == "[DONE]" {
-                                continue;
-                            }
-                            if let Ok(val) = serde_json::from_str::<Value>(data) {
-                                let content = parser.extract_chunk_text(&val);
-                                if !content.is_empty() {
-                                    output.push_str(&content);
-                                }
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+
+        tokio::spawn(async move {
+            let mut byte_stream = response.bytes_stream();
+            let mut buffer = String::new();
+
+            while let Some(chunk_result) = byte_stream.next().await {
+                let bytes = match chunk_result {
+                    Ok(b) => b,
+                    Err(_) => break,
+                };
+                buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                // Parse complete SSE lines from the buffer, leaving partial
+                // lines for the next chunk.
+                while let Some(line_end) = buffer.find('\n') {
+                    let line = buffer[..line_end].trim_end_matches('\r').to_owned();
+                    buffer = buffer[line_end + 1..].to_owned();
+
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if data == "[DONE]" {
+                            break;
+                        }
+                        if let Ok(val) = serde_json::from_str::<Value>(data) {
+                            let content = parser.extract_chunk_text(&val);
+                            if !content.is_empty() && tx.send(content).await.is_err() {
+                                return;
                             }
                         }
                     }
-                    if output.is_empty() {
-                        None
-                    } else {
-                        Some(output)
-                    }
                 }
-                Err(_) => None,
             }
         });
 
-        Ok(AsyncTextStream::new(text_stream, None))
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(AsyncTextStream::new(stream, None))
     }
 
     // -- Responses -----------------------------------------------------------
