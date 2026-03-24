@@ -164,6 +164,7 @@ impl BuiltinImpl {
             .with_chat_id(&message.chat_id)
             .with_output_channel(output_channel)
             .with_kind(message.kind)
+            .with_context(message.context.clone())
             .finalize();
         vec![outbound]
     }
@@ -250,7 +251,9 @@ impl EliHookSpec for BuiltinImpl {
         &self,
         message: &Envelope,
     ) -> Result<Option<String>, crate::hooks::HookError> {
-        Ok(Some(self.resolve_session(&envelope_to_channel_message(message))))
+        Ok(Some(
+            self.resolve_session(&envelope_to_channel_message(message)),
+        ))
     }
 
     async fn load_state(
@@ -371,6 +374,58 @@ mod tests {
                 .get("source_channel")
                 .and_then(|v| v.as_str()),
             Some("feishu")
+        );
+    }
+
+    #[test]
+    fn test_render_outbound_normal_propagates_inbound_context() {
+        let builtin = BuiltinImpl::new();
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "source_channel".to_owned(),
+            Value::String("feishu".to_owned()),
+        );
+        extra.insert(
+            "account_id".to_owned(),
+            Value::String("default".to_owned()),
+        );
+        extra.insert(
+            "channel_target".to_owned(),
+            Value::String("user:ou_abc".to_owned()),
+        );
+        let message = ChannelMessage::new("feishu:default:ou_abc", "webhook", "hello")
+            .with_chat_id("ou_abc")
+            .with_context(extra)
+            .finalize();
+
+        let outbounds =
+            builtin.render_outbound(&message, "feishu:default:ou_abc", "reply text");
+
+        assert_eq!(outbounds.len(), 1);
+        assert_eq!(outbounds[0].content, "reply text");
+        // Inbound context must be propagated so the sidecar can route
+        // the outbound correctly and clean up typing indicators.
+        assert_eq!(
+            outbounds[0]
+                .context
+                .get("source_channel")
+                .and_then(|v| v.as_str()),
+            Some("feishu"),
+            "normal outbound must carry source_channel from inbound context"
+        );
+        assert_eq!(
+            outbounds[0]
+                .context
+                .get("account_id")
+                .and_then(|v| v.as_str()),
+            Some("default"),
+        );
+        assert_eq!(
+            outbounds[0]
+                .context
+                .get("channel_target")
+                .and_then(|v| v.as_str()),
+            Some("user:ou_abc"),
         );
     }
 }
