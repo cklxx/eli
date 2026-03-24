@@ -161,15 +161,19 @@ fn start_sidecar(wh: &crate::channels::webhook::WebhookSettings) -> Option<std::
         .to_string_lossy()
         .to_string();
 
-    match std::process::Command::new("node")
-        .arg("start.cjs")
+    // Use process_group(0) so the sidecar and all its children share a
+    // process group that we can kill atomically on shutdown.
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new("node");
+    cmd.arg("start.cjs")
         .current_dir(&sidecar_dir)
         .env("SIDECAR_ELI_URL", &eli_url)
         .env("SIDECAR_SKILLS_DIR", &workspace)
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
-        .spawn()
-    {
+        .process_group(0);
+
+    match cmd.spawn() {
         Ok(child) => {
             println!("Sidecar started (pid={})", child.id());
             Some(child)
@@ -368,12 +372,21 @@ pub(crate) async fn gateway_command(enable_channels: Vec<String>) -> anyhow::Res
         }
     }
 
-    // Clean up.
+    // Clean up — kill the entire sidecar process group so child processes
+    // (jiti workers, etc.) don't leak.
     if let Some(mut child) = sidecar_child {
-        println!("Stopping sidecar (pid={})...", child.id());
-        let _ = child.kill();
-        // Non-blocking wait with timeout.
-        let waited = std::thread::spawn(move || child.wait());
+        let pid = child.id();
+        println!("Stopping sidecar (pgid={pid})...");
+        // Kill the process group (negative pid) with SIGTERM.
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &format!("-{pid}")])
+            .status();
+        // Give it a moment to exit gracefully, then force-kill.
+        let waited = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let _ = child.kill(); // SIGKILL if still alive
+            child.wait()
+        });
         match waited.join() {
             Ok(Ok(_)) => println!("Sidecar stopped."),
             _ => println!("Sidecar force-killed."),
