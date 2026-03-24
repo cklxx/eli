@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::envelope::{content_of, field_of, field_of_str, unpack_batch_vec};
-use crate::hooks::{Channel, EliHookSpec, HookRuntime, TapeStoreKind};
+use crate::hooks::{ChannelHook, EliHookSpec, HookRuntime, TapeStoreKind};
 use crate::types::{
     Envelope, MessageHandler, OutboundChannelRouter, PromptValue, State, TurnResult,
 };
@@ -107,8 +107,12 @@ impl EliFramework {
 
         // 1. Resolve session
         let session_id = match rt.call_resolve_session(&inbound).await {
-            Some(id) => id,
-            None => Self::default_session_id(&inbound),
+            Ok(Some(id)) => id,
+            Ok(None) => Self::default_session_id(&inbound),
+            Err(e) => {
+                tracing::warn!(error = %e, "resolve_session failed, using default session id");
+                Self::default_session_id(&inbound)
+            }
         };
 
         // Inject session_id into the inbound envelope if it's an object
@@ -125,8 +129,15 @@ impl EliFramework {
             Value::String(workspace.to_string_lossy().to_string()),
         );
 
-        let hook_states = rt.call_load_state(&inbound, &session_id).await;
-        // Merge in reverse order so later-registered plugins override earlier ones
+        let hook_states = match rt.call_load_state(&inbound, &session_id).await {
+            Ok(states) => states,
+            Err(e) => {
+                tracing::warn!(error = %e, session_id = %session_id, "load_state failed, using empty state");
+                Vec::new()
+            }
+        };
+        // Iterate last-registered-first; `or_insert` keeps the first value seen
+        // per key, so later-registered plugins take priority.
         for hs in hook_states.into_iter().rev().flatten() {
             for (k, v) in hs {
                 state.entry(k).or_insert(v);
@@ -143,14 +154,21 @@ impl EliFramework {
         let model_output: String;
         let run_result = rt.call_run_model(&prompt, &session_id, &state).await;
         match run_result {
-            Some(output) => {
+            Ok(Some(output)) => {
                 model_output = output;
             }
-            None => {
+            Ok(None) => {
                 let fallback_err = anyhow::anyhow!("no model skill returned output");
                 rt.notify_error("run_model:fallback", &fallback_err, Some(&inbound))
                     .await;
                 model_output = "[Error: no model plugin available]".to_owned();
+            }
+            Err(e) => {
+                let err_msg = format!("{e}");
+                let anyhow_err = anyhow::anyhow!("run_model hook failed: {}", err_msg);
+                rt.notify_error("run_model", &anyhow_err, Some(&inbound))
+                    .await;
+                model_output = format!("[Error: {err_msg}]");
             }
         }
 
@@ -219,10 +237,10 @@ impl EliFramework {
     pub async fn get_channels(
         &self,
         message_handler: MessageHandler,
-    ) -> HashMap<String, Box<dyn Channel>> {
+    ) -> HashMap<String, Box<dyn ChannelHook>> {
         let rt = self.hook_runtime.read().await;
         let all_channels = rt.call_provide_channels(message_handler);
-        let mut map: HashMap<String, Box<dyn Channel>> = HashMap::new();
+        let mut map: HashMap<String, Box<dyn ChannelHook>> = HashMap::new();
         for ch in all_channels {
             let name = ch.name().to_string();
             map.entry(name).or_insert(ch);
@@ -305,7 +323,7 @@ impl Default for EliFramework {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::EliHookSpec;
+    use crate::hooks::{EliHookSpec, HookError};
     use async_trait::async_trait;
     use serde_json::json;
     use std::sync::Arc;
@@ -318,12 +336,15 @@ mod tests {
             "session-plugin"
         }
 
-        async fn resolve_session(&self, message: &Envelope) -> Option<String> {
-            message
+        async fn resolve_session(
+            &self,
+            message: &Envelope,
+        ) -> Result<Option<String>, HookError> {
+            Ok(message
                 .as_object()
                 .and_then(|o| o.get("session_id"))
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_owned())
+                .map(|s| s.to_owned()))
         }
     }
 
@@ -355,8 +376,8 @@ mod tests {
             prompt: &PromptValue,
             _session_id: &str,
             _state: &State,
-        ) -> Option<String> {
-            Some(format!("echo: {}", prompt.as_text()))
+        ) -> Result<Option<String>, HookError> {
+            Ok(Some(format!("echo: {}", prompt.as_text())))
         }
     }
 

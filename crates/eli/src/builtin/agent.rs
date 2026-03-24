@@ -149,7 +149,7 @@ impl Agent {
 
         // Tools prompt.
         {
-            let reg = REGISTRY.lock().unwrap();
+            let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
             let tools_prompt = render_tools_prompt(reg.values());
             if !tools_prompt.is_empty() {
                 blocks.push(tools_prompt);
@@ -264,7 +264,7 @@ fn build_tool_context(
 }
 
 fn lookup_registered_tool(name: &str) -> Option<Tool> {
-    let reg = REGISTRY.lock().unwrap();
+    let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     reg.get(name)
         .cloned()
         .or_else(|| {
@@ -528,7 +528,7 @@ fn build_system_prompt(
 
     // Tools prompt.
     {
-        let reg = REGISTRY.lock().unwrap();
+        let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
         let tools_prompt = render_tools_prompt(reg.values());
         if !tools_prompt.is_empty() {
             blocks.push(tools_prompt);
@@ -584,6 +584,21 @@ async fn agent_loop(
     let _ = tapes
         .append_event(tape_name, "agent.run.start", step_event)
         .await;
+
+    // --- Decision resume banner: show active decisions on session start.
+    if let Ok(all_entries) = tapes
+        .store()
+        .fetch_all(&conduit::TapeQuery::new(tape_name))
+        .await
+    {
+        let decisions = conduit::collect_active_decisions(&all_entries);
+        if !decisions.is_empty() {
+            tracing::info!("Resuming session. Active decisions:");
+            for (i, d) in decisions.iter().enumerate() {
+                tracing::info!("  {}. {}", i + 1, d);
+            }
+        }
+    }
 
     // --- Grace period: if an auto-handoff anchor was placed recently, keep
     // using the previous anchor so the model still sees the full context.
@@ -775,7 +790,7 @@ async fn run_tools_once(
 ) -> Result<ToolAutoResult, ConduitError> {
     // Build tools list from registry.
     let tools: Vec<Tool> = {
-        let reg = REGISTRY.lock().unwrap();
+        let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(allowed) = allowed_tools {
             reg.values()
                 .filter(|t| allowed.contains(&t.name.to_lowercase()))

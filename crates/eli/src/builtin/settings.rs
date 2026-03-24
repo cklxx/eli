@@ -163,6 +163,72 @@ fn api_format_from_str_lossy(s: &str) -> ApiFormat {
 }
 
 // ---------------------------------------------------------------------------
+// Centralized env-var resolution
+// ---------------------------------------------------------------------------
+
+/// Centralized environment variable resolution for eli configuration.
+///
+/// Provides a single source of truth for how each `ELI_*` env var is resolved
+/// and what its precedence is.  Call sites should prefer these helpers over
+/// raw `std::env::var` so that precedence rules are documented in one place.
+///
+/// # Recognized environment variables
+///
+/// | Variable                       | Purpose                                       |
+/// |--------------------------------|-----------------------------------------------|
+/// | `ELI_HOME`                     | Override the eli home directory (`~/.eli`)     |
+/// | `ELI_MODEL`                    | Model identifier (`provider:model`)            |
+/// | `ELI_FALLBACK_MODELS`          | Comma-separated fallback model list            |
+/// | `ELI_API_KEY`                  | Single API key for all providers               |
+/// | `ELI_API_BASE`                 | Single API base URL for all providers          |
+/// | `ELI_<PROVIDER>_API_KEY`       | Per-provider API key                           |
+/// | `ELI_<PROVIDER>_API_BASE`      | Per-provider API base URL                      |
+/// | `ELI_API_FORMAT`               | API wire format (`auto`/`messages`/`responses`/`completion`) |
+/// | `ELI_MAX_STEPS`                | Maximum agent steps per turn (default 50)      |
+/// | `ELI_MAX_TOKENS`               | Max output tokens (auto-detected from model)   |
+/// | `ELI_MODEL_TIMEOUT_SECONDS`    | HTTP timeout for model calls                   |
+/// | `ELI_CONTEXT_WINDOW`           | Context window override (auto-detected)        |
+/// | `ELI_VERBOSE`                  | Verbosity level (0–2)                          |
+/// | `ELI_TELEGRAM_TOKEN`           | Telegram bot token (gateway mode)              |
+pub struct EnvConfig;
+
+impl EnvConfig {
+    /// Resolve the model identifier.
+    ///
+    /// Precedence: `ELI_MODEL` env > config file active profile > [`DEFAULT_MODEL`].
+    pub fn model(config: &crate::builtin::config::EliConfig) -> String {
+        env::var("ELI_MODEL")
+            .ok()
+            .or_else(|| config.resolve_model())
+            .unwrap_or_else(|| DEFAULT_MODEL.to_owned())
+    }
+
+    /// Resolve the API key configuration (single or per-provider).
+    ///
+    /// Precedence: `ELI_API_KEY` (single) or `ELI_<PROVIDER>_API_KEY` (per-provider).
+    /// See [`resolve_api_credentials`] for the full algorithm.
+    pub fn api_credentials() -> (ApiKeyConfig, ApiBaseConfig) {
+        resolve_api_credentials()
+    }
+
+    /// Resolve the API key as a single optional string.
+    ///
+    /// Precedence: explicit parameter > `ELI_API_KEY` env.
+    pub fn api_key(explicit: Option<&str>) -> Option<String> {
+        explicit
+            .map(String::from)
+            .or_else(|| env::var("ELI_API_KEY").ok())
+    }
+
+    /// Read `ELI_MODEL` from the environment, if set.
+    ///
+    /// Useful for CLI display (e.g. "ELI_MODEL overrides your profile").
+    pub fn model_override() -> Option<String> {
+        env::var("ELI_MODEL").ok()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // API credential resolution
 // ---------------------------------------------------------------------------
 
@@ -205,8 +271,18 @@ fn resolve_api_credentials() -> (ApiKeyConfig, ApiBaseConfig) {
         }
     }
 
-    let api_key = collapse_config_map(key_map, ApiKeyConfig::None, ApiKeyConfig::Single, ApiKeyConfig::PerProvider);
-    let api_base = collapse_config_map(base_map, ApiBaseConfig::None, ApiBaseConfig::Single, ApiBaseConfig::PerProvider);
+    let api_key = collapse_config_map(
+        key_map,
+        ApiKeyConfig::None,
+        ApiKeyConfig::Single,
+        ApiKeyConfig::PerProvider,
+    );
+    let api_base = collapse_config_map(
+        base_map,
+        ApiBaseConfig::None,
+        ApiBaseConfig::Single,
+        ApiBaseConfig::PerProvider,
+    );
     (api_key, api_base)
 }
 
@@ -264,13 +340,8 @@ impl AgentSettings {
             .map(PathBuf::from)
             .unwrap_or_else(default_home);
 
-        let model = env::var("ELI_MODEL").unwrap_or_else(|_| {
-            // Try loading model from ~/.eli/config.toml active profile.
-            let config = crate::builtin::config::EliConfig::load();
-            config
-                .resolve_model()
-                .unwrap_or_else(|| DEFAULT_MODEL.to_owned())
-        });
+        let config = crate::builtin::config::EliConfig::load();
+        let model = EnvConfig::model(&config);
 
         let fallback_models = env::var("ELI_FALLBACK_MODELS").ok().map(|v| {
             v.split(',')
@@ -307,7 +378,7 @@ impl AgentSettings {
             .unwrap_or_else(|| infer_context_window(&model));
 
         // Resolve API key / base — single value or per-provider map.
-        let (api_key, api_base) = resolve_api_credentials();
+        let (api_key, api_base) = EnvConfig::api_credentials();
 
         Self {
             home,

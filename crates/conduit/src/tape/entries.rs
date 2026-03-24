@@ -132,6 +132,37 @@ impl TapeEntry {
         }
     }
 
+    /// Create a decision entry.
+    ///
+    /// Decisions are persistent commitments that survive anchor slicing and
+    /// context trimming. They are injected into the system prompt on every turn.
+    pub fn decision(text: &str, meta: Value) -> Self {
+        let payload = serde_json::json!({ "text": text });
+        Self {
+            id: 0,
+            kind: "decision".into(),
+            payload,
+            meta,
+            date: utc_now(),
+        }
+    }
+
+    /// Create a decision revocation (tombstone) entry.
+    ///
+    /// Marks a prior decision as revoked by matching its text content.
+    /// The original decision entry remains in the tape (append-only);
+    /// this tombstone causes it to be excluded from context building.
+    pub fn decision_revoked(text: &str, meta: Value) -> Self {
+        let payload = serde_json::json!({ "text": text });
+        Self {
+            id: 0,
+            kind: "decision_revoked".into(),
+            payload,
+            meta,
+            date: utc_now(),
+        }
+    }
+
     /// Create an event entry.
     pub fn event(name: &str, data: Option<Value>, meta: Value) -> Self {
         let mut map = Map::new();
@@ -146,5 +177,55 @@ impl TapeEntry {
             meta,
             date: utc_now(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decision_entry_creation() {
+        let meta = serde_json::json!({ "turn": 42 });
+        let entry = TapeEntry::decision("Use PostgreSQL for storage", meta);
+        assert_eq!(entry.kind, "decision");
+        assert_eq!(
+            entry.payload.get("text").and_then(|v| v.as_str()),
+            Some("Use PostgreSQL for storage")
+        );
+        assert_eq!(entry.id, 0);
+        assert!(!entry.date.is_empty());
+    }
+
+    #[test]
+    fn test_decision_revoked_entry() {
+        let meta = serde_json::json!({});
+        let entry = TapeEntry::decision_revoked("Use PostgreSQL for storage", meta);
+        assert_eq!(entry.kind, "decision_revoked");
+        assert_eq!(
+            entry.payload.get("text").and_then(|v| v.as_str()),
+            Some("Use PostgreSQL for storage")
+        );
+    }
+
+    #[test]
+    fn test_decision_empty_and_long_text() {
+        let meta = serde_json::json!({});
+        let empty = TapeEntry::decision("", meta.clone());
+        assert_eq!(
+            empty.payload.get("text").and_then(|v| v.as_str()),
+            Some("")
+        );
+
+        let long_text = "x".repeat(5000);
+        let long_entry = TapeEntry::decision(&long_text, meta);
+        assert_eq!(
+            long_entry
+                .payload
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(|s| s.len()),
+            Some(5000)
+        );
     }
 }

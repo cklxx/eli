@@ -77,6 +77,64 @@ pub fn unpack_batch_vec(batches: Vec<Vec<Envelope>>) -> Vec<Envelope> {
     out
 }
 
+/// A validated outbound message extracted from a raw Envelope.
+#[derive(Debug, Clone)]
+pub struct OutboundMessage {
+    pub channel: String,
+    pub session_id: String,
+    pub chat_id: String,
+    pub content: String,
+    pub context: serde_json::Map<String, Value>,
+    pub raw: Value,
+}
+
+impl OutboundMessage {
+    /// Extract and validate an outbound message from a raw envelope.
+    /// Returns the validated message, logging warnings for any missing fields that fall back to defaults.
+    pub fn from_envelope(envelope: &Value, default_channel: &str, default_session: &str) -> Self {
+        let channel = envelope
+            .get("output_channel")
+            .and_then(|v| v.as_str())
+            .or_else(|| envelope.get("channel").and_then(|v| v.as_str()))
+            .unwrap_or(default_channel);
+
+        let session_id = envelope
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(default_session);
+
+        let chat_id = envelope
+            .get("chat_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let content = content_of(envelope);
+
+        let context = envelope
+            .get("context")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+
+        // Log warnings for missing routing fields
+        if envelope.get("output_channel").is_none() && envelope.get("channel").is_none() {
+            tracing::debug!(
+                default = default_channel,
+                "outbound envelope missing 'output_channel' / 'channel', using default"
+            );
+        }
+
+        Self {
+            channel: channel.to_string(),
+            session_id: session_id.to_string(),
+            chat_id: chat_id.to_string(),
+            content,
+            context,
+            raw: envelope.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +324,59 @@ mod tests {
     fn test_unpack_batch_vec_empty() {
         let out = unpack_batch_vec(Vec::new());
         assert!(out.is_empty());
+    }
+
+    // -- OutboundMessage tests ------------------------------------------------
+
+    #[test]
+    fn test_outbound_message_full_envelope() {
+        let env = json!({
+            "output_channel": "telegram",
+            "session_id": "tg:123",
+            "chat_id": "456",
+            "content": "hello",
+            "context": {"reply_to": 789}
+        });
+        let msg = OutboundMessage::from_envelope(&env, "cli", "cli:default");
+        assert_eq!(msg.channel, "telegram");
+        assert_eq!(msg.session_id, "tg:123");
+        assert_eq!(msg.chat_id, "456");
+        assert_eq!(msg.content, "hello");
+        assert_eq!(msg.context.get("reply_to").unwrap(), &json!(789));
+    }
+
+    #[test]
+    fn test_outbound_message_falls_back_to_channel_field() {
+        let env = json!({"channel": "cli", "content": "hi"});
+        let msg = OutboundMessage::from_envelope(&env, "default_ch", "default_sess");
+        assert_eq!(msg.channel, "cli");
+    }
+
+    #[test]
+    fn test_outbound_message_defaults_on_missing_fields() {
+        let env = json!({"content": "hi"});
+        let msg = OutboundMessage::from_envelope(&env, "fallback_ch", "fallback_sess");
+        assert_eq!(msg.channel, "fallback_ch");
+        assert_eq!(msg.session_id, "fallback_sess");
+        assert_eq!(msg.chat_id, "default");
+        assert_eq!(msg.content, "hi");
+        assert!(msg.context.is_empty());
+    }
+
+    #[test]
+    fn test_outbound_message_empty_envelope() {
+        let env = json!({});
+        let msg = OutboundMessage::from_envelope(&env, "", "");
+        assert_eq!(msg.channel, "");
+        assert_eq!(msg.session_id, "");
+        assert_eq!(msg.chat_id, "default");
+        assert_eq!(msg.content, "");
+    }
+
+    #[test]
+    fn test_outbound_message_preserves_raw() {
+        let env = json!({"output_channel": "tg", "content": "x", "extra": true});
+        let msg = OutboundMessage::from_envelope(&env, "", "");
+        assert_eq!(msg.raw, env);
     }
 }

@@ -20,7 +20,10 @@ impl ToolExecutor {
 
     /// Execute tool calls synchronously by blocking on the async runtime.
     ///
-    /// Panics if called from within an async context. Prefer `execute_async` instead.
+    /// Prefer `execute_async` instead.
+    ///
+    /// # Panics
+    /// Panics if called from within an async runtime context.
     pub fn execute(
         &self,
         response: ToolCallResponse,

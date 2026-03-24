@@ -18,6 +18,9 @@ use crate::tools::{REGISTRY, shorten_text};
 const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 
+static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(reqwest::Client::new);
+
 tokio::task_local! {
     static CURRENT_TAPE_SERVICE: TapeService;
 }
@@ -29,7 +32,7 @@ tokio::task_local! {
 /// Register all builtin tools into the global `REGISTRY`.
 pub fn register_builtin_tools() {
     let tools = builtin_tools();
-    let mut reg = REGISTRY.lock().expect("tool registry lock poisoned");
+    let mut reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     for tool in tools {
         reg.insert(tool.name.clone(), tool);
     }
@@ -58,13 +61,16 @@ fn builtin_tools() -> Vec<Tool> {
         tool_tape_reset(),
         tool_tape_handoff(),
         tool_tape_anchors(),
+        tool_decision_set(),
+        tool_decision_list(),
+        tool_decision_remove(),
         tool_web_fetch(),
         tool_subagent(),
         tool_help(),
         tool_quit(),
     ];
     // Only register the sidecar bridge tool if a sidecar URL is configured.
-    if crate::tools::SIDECAR_URL.lock().unwrap().is_some() {
+    if crate::tools::SIDECAR_URL.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
         tools.push(tool_sidecar());
     }
     tools
@@ -95,12 +101,34 @@ fn get_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(|v| v.as_str())
 }
 
+/// Extract a required string argument, returning a [`ConduitError`] if missing or wrong type.
+fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ConduitError> {
+    match args.get(key) {
+        Some(v) => v.as_str().ok_or_else(|| {
+            ConduitError::new(
+                ErrorKind::InvalidInput,
+                format!("argument '{}' must be a string, got {}", key, v),
+            )
+        }),
+        None => Err(ConduitError::new(
+            ErrorKind::InvalidInput,
+            format!("missing required argument '{}'", key),
+        )),
+    }
+}
+
 fn get_i64(args: &Value, key: &str) -> Option<i64> {
     args.get(key).and_then(|v| v.as_i64())
 }
 
 fn get_bool(args: &Value, key: &str) -> Option<bool> {
     args.get(key).and_then(|v| v.as_bool())
+}
+
+fn get_notice_description(args: &Value) -> Option<&str> {
+    get_str(args, "description")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 fn ok_val(s: impl Into<String>) -> ToolResult {
@@ -123,6 +151,44 @@ fn tape_name_from_context(ctx: Option<&ToolContext>) -> Result<String, ConduitEr
             "tool requires an active tape name in context",
         )
     })
+}
+
+async fn maybe_send_user_facing_notice(ctx: Option<&ToolContext>, args: &Value) {
+    let Some(description) = get_notice_description(args) else {
+        return;
+    };
+    let Some(ctx) = ctx else {
+        return;
+    };
+    let Some(output_channel) = ctx.state.get("output_channel").and_then(|v| v.as_str()) else {
+        return;
+    };
+    if output_channel != "webhook" {
+        return;
+    }
+    let Some(session_id) = ctx.state.get("session_id").and_then(|v| v.as_str()) else {
+        return;
+    };
+    if session_id.trim().is_empty() {
+        return;
+    }
+    let Some(url) = crate::tools::SIDECAR_URL.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+        return;
+    };
+
+    let payload = serde_json::json!({
+        "session_id": session_id,
+        "text": description,
+    });
+    let notify_url = format!("{url}/notify");
+    if let Err(err) = HTTP_CLIENT
+        .post(&notify_url)
+        .json(&payload)
+        .send()
+        .await
+    {
+        tracing::debug!(error = %err, session_id, notify_url, "tool.notice request failed");
+    }
 }
 
 fn format_tape_info(info: &crate::builtin::tape::TapeInfo) -> String {
@@ -215,11 +281,8 @@ fn tool_bash() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let cmd = args
-                    .get("cmd")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned();
+                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+                let cmd = require_str(&args, "cmd")?.to_owned();
                 let cwd_arg = args
                     .get("cwd")
                     .and_then(|v| v.as_str())
@@ -302,7 +365,7 @@ fn tool_bash_output() -> Tool {
         }),
         |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let shell_id = get_str(&args, "shell_id").unwrap_or("").to_owned();
+                let shell_id = require_str(&args, "shell_id")?.to_owned();
                 let offset = get_i64(&args, "offset").unwrap_or(0).max(0) as usize;
                 let limit = get_i64(&args, "limit").map(|v| v.max(0) as usize);
 
@@ -357,7 +420,7 @@ fn tool_bash_kill() -> Tool {
         }),
         |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let shell_id = get_str(&args, "shell_id").unwrap_or("").to_owned();
+                let shell_id = require_str(&args, "shell_id")?.to_owned();
                 let mgr = shell_manager();
                 let (_output, returncode, status) = mgr
                     .terminate(&shell_id)
@@ -386,6 +449,7 @@ fn tool_fs_read() -> Tool {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path (absolute or relative to workspace)."},
+                "description": {"type": "string", "description": "Brief user-facing status text to send before reading when the channel supports it."},
                 "offset": {"type": "integer", "description": "Line number to start reading from (0-based)."},
                 "limit": {"type": "integer", "description": "Max number of lines to return."}
             },
@@ -393,7 +457,8 @@ fn tool_fs_read() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let raw_path = get_str(&args, "path").unwrap_or("").to_owned();
+                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+                let raw_path = require_str(&args, "path")?.to_owned();
                 let offset = get_i64(&args, "offset").unwrap_or(0).max(0) as usize;
                 let limit = get_i64(&args, "limit").map(|v| v.max(0) as usize);
 
@@ -426,14 +491,16 @@ fn tool_fs_write() -> Tool {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path (absolute or relative to workspace)."},
+                "description": {"type": "string", "description": "Brief user-facing status text to send before writing when the channel supports it."},
                 "content": {"type": "string", "description": "Full file content to write."}
             },
             "required": ["path", "content"]
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let raw_path = get_str(&args, "path").unwrap_or("").to_owned();
-                let content = get_str(&args, "content").unwrap_or("").to_owned();
+                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+                let raw_path = require_str(&args, "path")?.to_owned();
+                let content = require_str(&args, "content")?.to_owned();
 
                 let state = ctx.map(|c| c.state).unwrap_or_default();
                 let resolved = resolve_path(&state, &raw_path)?;
@@ -462,6 +529,7 @@ fn tool_fs_edit() -> Tool {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path (absolute or relative to workspace)."},
+                "description": {"type": "string", "description": "Brief user-facing status text to send before editing when the channel supports it."},
                 "old": {"type": "string", "description": "Exact text to find and replace (first occurrence only)."},
                 "new": {"type": "string", "description": "Replacement text."},
                 "start": {"type": "integer", "description": "Line number to start searching from (0-based, optional)."}
@@ -470,9 +538,10 @@ fn tool_fs_edit() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let raw_path = get_str(&args, "path").unwrap_or("").to_owned();
-                let old = get_str(&args, "old").unwrap_or("").to_owned();
-                let new = get_str(&args, "new").unwrap_or("").to_owned();
+                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+                let raw_path = require_str(&args, "path")?.to_owned();
+                let old = require_str(&args, "old")?.to_owned();
+                let new = require_str(&args, "new")?.to_owned();
                 let start = get_i64(&args, "start").unwrap_or(0).max(0) as usize;
 
                 let state = ctx.map(|c| c.state).unwrap_or_default();
@@ -529,7 +598,7 @@ fn tool_skill() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let name = get_str(&args, "name").unwrap_or("").to_owned();
+                let name = require_str(&args, "name")?.to_owned();
                 let state = ctx.map(|c| c.state).unwrap_or_default();
 
                 // Check allowed skills.
@@ -586,10 +655,13 @@ fn tool_tape_info() -> Tool {
         "Get tape metadata: entry count, anchors, token usage.\n\nExamples: check context size before a handoff, decide whether a reset is needed, monitor token consumption.",
         serde_json::json!({
             "type": "object",
-            "properties": {}
+            "properties": {
+                "description": {"type": "string", "description": "Brief user-facing status text to send before reading tape info when the channel supports it."}
+            }
         }),
-        |_args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
+                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
                 let tape_name = tape_name_from_context(ctx.as_ref())?;
                 let service = current_tape_service()?;
                 let info = service.info(&tape_name).await?;
@@ -611,6 +683,7 @@ fn tool_tape_search() -> Tool {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Keyword to search for in tape entries."},
+                "description": {"type": "string", "description": "Brief user-facing status text to send before searching tape when the channel supports it."},
                 "limit": {"type": "integer", "description": "Max results (default 20)."},
                 "start": {"type": "string", "description": "Optional start date (ISO)."},
                 "end": {"type": "string", "description": "Optional end date (ISO)."},
@@ -624,11 +697,12 @@ fn tool_tape_search() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let query_text = get_str(&args, "query").unwrap_or("").to_owned();
+                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+                let query_text = require_str(&args, "query")?.to_owned();
                 if query_text.trim().is_empty() {
                     return Err(ConduitError::new(
                         ErrorKind::InvalidInput,
-                        "query is required",
+                        "query must not be empty",
                     ));
                 }
                 let limit = get_i64(&args, "limit").unwrap_or(20) as usize;
@@ -682,11 +756,13 @@ fn tool_tape_reset() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "description": {"type": "string", "description": "Brief user-facing status text to send before resetting tape when the channel supports it."},
                 "archive": {"type": "boolean", "description": "Save a tape snapshot before wiping (default false)."}
             }
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
+                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
                 let archive = get_bool(&args, "archive").unwrap_or(false);
                 let tape_name = tape_name_from_context(ctx.as_ref())?;
                 let service = current_tape_service()?;
@@ -708,12 +784,14 @@ fn tool_tape_handoff() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "description": {"type": "string", "description": "Brief user-facing status text to send before creating a handoff when the channel supports it."},
                 "name": {"type": "string", "description": "Anchor name (default: handoff)."},
                 "summary": {"type": "string", "description": "What was accomplished — used for context when resuming later."}
             }
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
+                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
                 let name = get_str(&args, "name").unwrap_or("handoff").to_owned();
                 let summary = get_str(&args, "summary").unwrap_or("").to_owned();
                 let tape_name = tape_name_from_context(ctx.as_ref())?;
@@ -741,11 +819,13 @@ fn tool_tape_anchors() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "description": {"type": "string", "description": "Brief user-facing status text to send before listing anchors when the channel supports it."},
                 "limit": {"type": "integer", "description": "Max anchors to return (default 20)."}
             }
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
+                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
                 let limit = get_i64(&args, "limit").unwrap_or(20) as usize;
                 let tape_name = tape_name_from_context(ctx.as_ref())?;
                 let service = current_tape_service()?;
@@ -757,25 +837,147 @@ fn tool_tape_anchors() -> Tool {
 }
 
 // ---------------------------------------------------------------------------
+// decision.set / decision.list / decision.remove
+// ---------------------------------------------------------------------------
+
+/// Maximum decision text length before truncation.
+const MAX_DECISION_TEXT_LEN: usize = 500;
+
+fn tool_decision_set() -> Tool {
+    Tool::with_context(
+        "decision.set",
+        "Pin a decision so it persists across turns and anchor boundaries.\n\nExamples: lock in a tech choice after discussion, record an agreed architecture constraint before moving on, capture a deployment target once confirmed by the user.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "The decision to record."}
+            },
+            "required": ["text"]
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move {
+                let text = require_str(&args, "text")?.to_owned();
+                if text.trim().is_empty() {
+                    return Err(ConduitError::new(
+                        ErrorKind::InvalidInput,
+                        "decision text must not be empty",
+                    ));
+                }
+                let text = if text.len() > MAX_DECISION_TEXT_LEN {
+                    let truncated = &text[..text.floor_char_boundary(MAX_DECISION_TEXT_LEN)];
+                    format!("{}...", truncated)
+                } else {
+                    text
+                };
+                let tape_name = tape_name_from_context(ctx.as_ref())?;
+                let service = current_tape_service()?;
+                let meta = serde_json::json!({});
+                let entry = TapeEntry::decision(&text, meta);
+                service.store().append(&tape_name, &entry).await?;
+                tracing::info!(decision = %text, tape = %tape_name, "decision.set");
+                ok_val(format!("Decision recorded: {text}"))
+            })
+        },
+    )
+}
+
+fn tool_decision_list() -> Tool {
+    Tool::with_context(
+        "decision.list",
+        "Show active decisions for this session.\n\nExamples: verify assumptions before starting a new task, check for stale decisions after scope changes, recap context when resuming after a break.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        }),
+        |_args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move {
+                let tape_name = tape_name_from_context(ctx.as_ref())?;
+                let service = current_tape_service()?;
+                let query = TapeQuery::new(&tape_name);
+                let entries = service.store().fetch_all(&query).await?;
+                let decisions = conduit::collect_active_decisions(&entries);
+                if decisions.is_empty() {
+                    return ok_val("No active decisions.");
+                }
+                let mut output = format!("Active decisions ({}):\n", decisions.len());
+                for (i, d) in decisions.iter().enumerate() {
+                    output.push_str(&format!("  {}. {}\n", i + 1, d));
+                }
+                ok_val(output.trim_end())
+            })
+        },
+    )
+}
+
+fn tool_decision_remove() -> Tool {
+    Tool::with_context(
+        "decision.remove",
+        "Revoke a decision by its number (from decision.list).\n\nExamples: drop a tech choice after pivoting, clear a constraint the user overruled, remove a duplicate created by mistake.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "index": {"type": "integer", "description": "The decision number to remove (1-based, from decision.list)."}
+            },
+            "required": ["index"]
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move {
+                let index = get_i64(&args, "index").ok_or_else(|| {
+                    ConduitError::new(ErrorKind::InvalidInput, "missing required argument 'index'")
+                })? as usize;
+                if index == 0 {
+                    return Err(ConduitError::new(
+                        ErrorKind::InvalidInput,
+                        "index must be 1 or greater",
+                    ));
+                }
+                let tape_name = tape_name_from_context(ctx.as_ref())?;
+                let service = current_tape_service()?;
+                let query = TapeQuery::new(&tape_name);
+                let entries = service.store().fetch_all(&query).await?;
+                let decisions = conduit::collect_active_decisions(&entries);
+                if index > decisions.len() {
+                    return Err(ConduitError::new(
+                        ErrorKind::InvalidInput,
+                        format!(
+                            "no decision #{index}. There are {} active decisions.",
+                            decisions.len()
+                        ),
+                    ));
+                }
+                let text = &decisions[index - 1];
+                let meta = serde_json::json!({});
+                let tombstone = TapeEntry::decision_revoked(text, meta);
+                service.store().append(&tape_name, &tombstone).await?;
+                tracing::info!(decision = %text, tape = %tape_name, "decision.remove");
+                ok_val(format!("Removed decision: {text}"))
+            })
+        },
+    )
+}
+
+// ---------------------------------------------------------------------------
 // web.fetch
 // ---------------------------------------------------------------------------
 
 fn tool_web_fetch() -> Tool {
-    Tool::new(
+    Tool::with_context(
         "web.fetch",
         "Fetch a URL (HTTP GET) and return content as markdown.\n\nExamples: read documentation, check a REST API response, pull a raw GitHub file, retrieve release notes. Supports custom headers and timeout. Static content only — no JS rendering.",
         serde_json::json!({
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "The URL to fetch."},
+                "description": {"type": "string", "description": "Brief user-facing status text to send before fetching when the channel supports it."},
                 "headers": {"type": "object", "description": "Custom HTTP headers as key-value pairs."},
                 "timeout": {"type": "integer", "description": "Request timeout in seconds (default 10)."}
             },
             "required": ["url"]
         }),
-        |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let url = get_str(&args, "url").unwrap_or("").to_owned();
+                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+                let url = require_str(&args, "url")?.to_owned();
                 let timeout_secs = get_i64(&args, "timeout")
                     .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECONDS as i64)
                     as u64;
@@ -830,6 +1032,7 @@ fn tool_subagent() -> Tool {
             "type": "object",
             "properties": {
                 "prompt": {"type": "string", "description": "Task description for the sub-agent."},
+                "description": {"type": "string", "description": "Brief user-facing status text to send before delegating when the channel supports it."},
                 "model": {"type": "string", "description": "Model to use (optional)."},
                 "session": {"type": "string", "description": "Session strategy: inherit, temp, or custom id."},
                 "allowed_tools": {
@@ -845,17 +1048,21 @@ fn tool_subagent() -> Tool {
             },
             "required": ["prompt"]
         }),
-        |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
+                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
                 // The subagent tool requires the full agent runtime in state.
                 // In the initial Rust port we return the prompt as acknowledgement.
-                let prompt = args
-                    .get("prompt")
-                    .map(|v| match v {
-                        Value::String(s) => s.clone(),
-                        other => serde_json::to_string(other).unwrap_or_default(),
-                    })
-                    .unwrap_or_default();
+                let prompt = match args.get("prompt") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => serde_json::to_string(other).unwrap_or_default(),
+                    None => {
+                        return Err(ConduitError::new(
+                            ErrorKind::InvalidInput,
+                            "missing required argument 'prompt'",
+                        ))
+                    }
+                };
                 ok_val(format!("(subagent invoked with prompt: {prompt})"))
             })
         },
@@ -945,22 +1152,15 @@ fn tool_sidecar() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let tool_name = get_str(&args, "tool").unwrap_or("").to_owned();
+                let tool_name = require_str(&args, "tool")?.to_owned();
                 let description = get_str(&args, "description")
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(ToOwned::to_owned);
                 let params = args.get("params").cloned().unwrap_or(serde_json::json!({}));
 
-                if tool_name.is_empty() {
-                    return Err(ConduitError::new(
-                        ErrorKind::Tool,
-                        "missing required parameter: tool",
-                    ));
-                }
-
                 let url = {
-                    let u = crate::tools::SIDECAR_URL.lock().unwrap();
+                    let u = crate::tools::SIDECAR_URL.lock().unwrap_or_else(|e| e.into_inner());
                     u.clone().unwrap_or_default()
                 };
                 if url.is_empty() {
@@ -976,10 +1176,9 @@ fn tool_sidecar() -> Tool {
                     .unwrap_or("");
 
                 let tool_url = format!("{url}/tools/{tool_name}");
-                let client = reqwest::Client::new();
                 let payload =
                     build_sidecar_request_payload(params, description.as_deref(), session_id);
-                let resp = client
+                let resp = HTTP_CLIENT
                     .post(&tool_url)
                     .json(&payload)
                     .send()
@@ -1117,5 +1316,32 @@ mod tests {
             payload["params"],
             json!({"action": "create", "description": "domain field"})
         );
+    }
+
+    #[test]
+    fn test_user_facing_tools_expose_description_field() {
+        let tools = [
+            tool_bash(),
+            tool_fs_read(),
+            tool_fs_write(),
+            tool_fs_edit(),
+            tool_tape_info(),
+            tool_tape_search(),
+            tool_tape_reset(),
+            tool_tape_handoff(),
+            tool_tape_anchors(),
+            tool_web_fetch(),
+            tool_subagent(),
+            tool_sidecar(),
+        ];
+
+        for tool in tools {
+            assert_eq!(
+                tool.parameters["properties"]["description"]["type"],
+                json!("string"),
+                "tool {} should expose a description field",
+                tool.name
+            );
+        }
     }
 }

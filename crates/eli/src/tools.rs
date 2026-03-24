@@ -147,10 +147,10 @@ mod tests {
     fn test_registry_insert_and_lookup() {
         let tool = make_tool("test.registry_tool", "a tool");
         {
-            let mut reg = REGISTRY.lock().unwrap();
+            let mut reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
             reg.insert("test.registry_tool".into(), tool.clone());
         }
-        let reg = REGISTRY.lock().unwrap();
+        let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
         assert!(reg.contains_key("test.registry_tool"));
         assert_eq!(reg["test.registry_tool"].name, "test.registry_tool");
     }

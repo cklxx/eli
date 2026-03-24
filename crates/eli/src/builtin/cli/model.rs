@@ -1,6 +1,7 @@
 //! Model management: show, list, switch.
 
 use crate::builtin::config::EliConfig;
+use crate::builtin::settings::EnvConfig;
 
 /// Manage model selection: show, list, or switch.
 pub(crate) async fn model_command(name: Option<String>) -> anyhow::Result<()> {
@@ -29,7 +30,7 @@ fn model_show() -> anyhow::Result<()> {
     }
 
     // Show env var override if set.
-    if let Ok(env_model) = std::env::var("ELI_MODEL") {
+    if let Some(env_model) = EnvConfig::model_override() {
         println!();
         println!("Note: ELI_MODEL environment variable is set to: {env_model}");
         println!("  This overrides the configured model at runtime.");
@@ -41,7 +42,7 @@ fn model_show() -> anyhow::Result<()> {
 /// Resolve an API key for the given provider for model listing purposes.
 fn resolve_api_key_for_provider(provider: &str) -> anyhow::Result<String> {
     // 1. Check ELI_API_KEY env var.
-    if let Ok(key) = std::env::var("ELI_API_KEY")
+    if let Some(key) = EnvConfig::api_key(None)
         && !key.is_empty()
     {
         return Ok(key);

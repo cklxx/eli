@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 use super::base::Channel;
 use super::handler::BufferedMessageHandler;
 use super::message::{ChannelMessage, MessageKind};
+use crate::envelope::OutboundMessage;
 
 // ---------------------------------------------------------------------------
 // ChannelSettings
@@ -200,36 +201,27 @@ impl ChannelManager {
 
     /// Dispatch an outbound envelope to the correct channel.
     pub async fn dispatch(&self, message: &Envelope) -> bool {
-        let output_channel = message
-            .get("output_channel")
-            .and_then(|v| v.as_str())
-            .or_else(|| message.get("channel").and_then(|v| v.as_str()));
+        // Use OutboundMessage for validated field extraction with logging.
+        // We pass empty defaults; if neither output_channel nor channel is
+        // present, the validated message's channel field will be empty and
+        // the lookup below will fail gracefully (returning false).
+        let validated = OutboundMessage::from_envelope(message, "", "");
 
-        let channel_key = match output_channel {
-            Some(k) => k.to_owned(),
-            None => return false,
-        };
+        if validated.channel.is_empty() {
+            return false;
+        }
 
-        let channel = match self.channels.get(&channel_key) {
+        let channel = match self.channels.get(&validated.channel) {
             Some(c) => Arc::clone(c),
             None => return false,
         };
 
-        let default_session = format!("{channel_key}:default");
-        let session_id = message
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&default_session);
-
-        let chat_id = message
-            .get("chat_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("default");
-
-        let content = message
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        // Resolve session_id default that depends on the channel name.
+        let session_id = if validated.session_id.is_empty() {
+            format!("{}:default", validated.channel)
+        } else {
+            validated.session_id
+        };
 
         let kind_str = message
             .get("kind")
@@ -242,20 +234,14 @@ impl ChannelManager {
             _ => MessageKind::Normal,
         };
 
-        let context_val = message.get("context").cloned().unwrap_or_default();
-        let context = match context_val.as_object() {
-            Some(m) => m.clone(),
-            None => serde_json::Map::new(),
-        };
-
         let outbound = ChannelMessage {
-            session_id: session_id.to_owned(),
-            channel: channel_key,
-            chat_id: chat_id.to_owned(),
-            content: content.to_owned(),
+            session_id,
+            channel: validated.channel,
+            chat_id: validated.chat_id,
+            content: validated.content,
             is_active: false,
             kind,
-            context,
+            context: validated.context,
             media: Vec::new(),
             output_channel: String::new(),
         };

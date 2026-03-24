@@ -84,11 +84,11 @@ struct ArcMutexWriter(std::sync::Arc<std::sync::Mutex<std::fs::File>>);
 
 impl std::io::Write for ArcMutexWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut f = self.0.lock().unwrap();
+        let mut f = self.0.lock().unwrap_or_else(|e| e.into_inner());
         f.write(buf)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        let mut f = self.0.lock().unwrap();
+        let mut f = self.0.lock().unwrap_or_else(|e| e.into_inner());
         f.flush()
     }
 }

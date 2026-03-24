@@ -248,7 +248,7 @@ impl InMemoryTapeStore {
 
     /// Read all entries for a tape, returning cloned copies.
     pub fn read(&self, tape: &str) -> Option<Vec<TapeEntry>> {
-        let tapes = self.tapes.read().unwrap();
+        let tapes = self.tapes.read().unwrap_or_else(|e| e.into_inner());
         tapes
             .get(tape)
             .map(|entries| entries.iter().map(|e| e.copy()).collect())
@@ -263,16 +263,16 @@ impl Default for InMemoryTapeStore {
 
 impl TapeStore for InMemoryTapeStore {
     fn list_tapes(&self) -> Result<Vec<String>, ConduitError> {
-        let tapes = self.tapes.read().unwrap();
+        let tapes = self.tapes.read().unwrap_or_else(|e| e.into_inner());
         let mut keys: Vec<String> = tapes.keys().cloned().collect();
         keys.sort();
         Ok(keys)
     }
 
     fn reset(&self, tape: &str) -> Result<(), ConduitError> {
-        let mut tapes = self.tapes.write().unwrap();
+        let mut tapes = self.tapes.write().unwrap_or_else(|e| e.into_inner());
         tapes.remove(tape);
-        let mut ids = self.next_ids.write().unwrap();
+        let mut ids = self.next_ids.write().unwrap_or_else(|e| e.into_inner());
         ids.remove(tape);
         Ok(())
     }
@@ -283,7 +283,7 @@ impl TapeStore for InMemoryTapeStore {
     }
 
     fn append(&self, tape: &str, entry: &TapeEntry) -> Result<(), ConduitError> {
-        let mut ids = self.next_ids.write().unwrap();
+        let mut ids = self.next_ids.write().unwrap_or_else(|e| e.into_inner());
         let next_id = ids.get(tape).copied().unwrap_or(1);
         ids.insert(tape.into(), next_id + 1);
 
@@ -295,7 +295,7 @@ impl TapeStore for InMemoryTapeStore {
             entry.date.clone(),
         );
 
-        let mut tapes = self.tapes.write().unwrap();
+        let mut tapes = self.tapes.write().unwrap_or_else(|e| e.into_inner());
         tapes.entry(tape.into()).or_default().push(stored);
         Ok(())
     }
@@ -328,7 +328,9 @@ impl<S: TapeStore + 'static> AsyncTapeStore for AsyncTapeStoreAdapter<S> {
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || store.list_tapes())
             .await
-            .unwrap()
+            .map_err(|e| {
+                ConduitError::new(ErrorKind::Unknown, format!("blocking task failed: {e}"))
+            })?
     }
 
     async fn reset(&self, tape: &str) -> Result<(), ConduitError> {
@@ -336,7 +338,9 @@ impl<S: TapeStore + 'static> AsyncTapeStore for AsyncTapeStoreAdapter<S> {
         let tape = tape.to_string();
         tokio::task::spawn_blocking(move || store.reset(&tape))
             .await
-            .unwrap()
+            .map_err(|e| {
+                ConduitError::new(ErrorKind::Unknown, format!("blocking task failed: {e}"))
+            })?
     }
 
     async fn fetch_all(&self, query: &TapeQuery) -> Result<Vec<TapeEntry>, ConduitError> {
@@ -344,7 +348,9 @@ impl<S: TapeStore + 'static> AsyncTapeStore for AsyncTapeStoreAdapter<S> {
         let query = query.clone();
         tokio::task::spawn_blocking(move || store.fetch_all(&query))
             .await
-            .unwrap()
+            .map_err(|e| {
+                ConduitError::new(ErrorKind::Unknown, format!("blocking task failed: {e}"))
+            })?
     }
 
     async fn append(&self, tape: &str, entry: &TapeEntry) -> Result<(), ConduitError> {
@@ -353,7 +359,9 @@ impl<S: TapeStore + 'static> AsyncTapeStore for AsyncTapeStoreAdapter<S> {
         let entry = entry.clone();
         tokio::task::spawn_blocking(move || store.append(&tape, &entry))
             .await
-            .unwrap()
+            .map_err(|e| {
+                ConduitError::new(ErrorKind::Unknown, format!("blocking task failed: {e}"))
+            })?
     }
 }
 

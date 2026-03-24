@@ -210,7 +210,7 @@ impl FileTapeStore {
     where
         F: FnOnce(&mut TapeFile) -> R,
     {
-        let mut files = self.tape_files.lock().unwrap();
+        let mut files = self.tape_files.lock().unwrap_or_else(|e| e.into_inner());
         let tf = files
             .entry(tape.to_owned())
             .or_insert_with(|| TapeFile::new(self.tape_file_path(tape)));

@@ -246,18 +246,25 @@ impl EliHookSpec for BuiltinImpl {
         "builtin"
     }
 
-    async fn resolve_session(&self, message: &Envelope) -> Option<String> {
-        Some(self.resolve_session(&envelope_to_channel_message(message)))
+    async fn resolve_session(
+        &self,
+        message: &Envelope,
+    ) -> Result<Option<String>, crate::hooks::HookError> {
+        Ok(Some(self.resolve_session(&envelope_to_channel_message(message))))
     }
 
-    async fn load_state(&self, message: &Envelope, session_id: &str) -> Option<State> {
+    async fn load_state(
+        &self,
+        message: &Envelope,
+        session_id: &str,
+    ) -> Result<Option<State>, crate::hooks::HookError> {
         let mut state = self.load_state(session_id);
         for field in ["sender_id", "chat_id", "channel", "output_channel"] {
             if let Some(value) = message.get(field).cloned() {
                 state.insert(field.to_owned(), value);
             }
         }
-        Some(state)
+        Ok(Some(state))
     }
 
     async fn build_prompt(
@@ -278,15 +285,19 @@ impl EliHookSpec for BuiltinImpl {
         prompt: &PromptValue,
         session_id: &str,
         state: &State,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, crate::hooks::HookError> {
         match self
             .run_model(prompt_value_to_input(prompt), session_id, state)
             .await
         {
-            Ok(output) => Some(output),
+            Ok(output) => Ok(Some(output)),
             Err(e) => {
                 tracing::error!(error = %e, session_id = %session_id, "run_model failed");
-                Some(format!("[Error: {e}]"))
+                Err(crate::hooks::HookError::Plugin {
+                    plugin: self.plugin_name().to_owned(),
+                    hook_point: "run_model",
+                    source: e.into(),
+                })
             }
         }
     }

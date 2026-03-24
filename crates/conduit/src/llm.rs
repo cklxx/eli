@@ -18,8 +18,8 @@ use crate::core::results::{
 use crate::core::tool_calls::{normalize_message_tool_calls, normalize_tool_calls};
 use crate::tape::entries::TapeEntry;
 use crate::tape::{
-    AsyncTapeManager, AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore, TapeContext,
-    TapeManager,
+    AnchorSelector, AsyncTapeManager, AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore,
+    TapeContext, TapeManager, build_messages as tape_build_messages,
 };
 use crate::tools::context::ToolContext;
 use crate::tools::executor::{ToolCallResponse, ToolExecutor};
@@ -438,6 +438,9 @@ impl LLM {
     /// Synchronous wrapper for [`chat_async`](Self::chat_async).
     ///
     /// Creates a single-threaded tokio runtime and blocks the current thread.
+    ///
+    /// # Panics
+    /// Panics if called from within an async runtime context.
     pub fn chat_sync(&mut self, req: ChatRequest<'_>) -> Result<String, ConduitError> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -451,6 +454,9 @@ impl LLM {
     /// Synchronous wrapper for [`run_tools`](Self::run_tools).
     ///
     /// Creates a single-threaded tokio runtime and blocks the current thread.
+    ///
+    /// # Panics
+    /// Panics if called from within an async runtime context.
     pub fn run_tools_sync(&mut self, req: ChatRequest<'_>) -> Result<ToolAutoResult, ConduitError> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -464,6 +470,9 @@ impl LLM {
     // -- Chat ----------------------------------------------------------------
 
     /// Synchronous chat (blocks the current thread).
+    ///
+    /// # Panics
+    /// Panics if called from within an async runtime context.
     pub fn chat(&mut self, req: ChatRequest<'_>) -> Result<String, ConduitError> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -487,15 +496,9 @@ impl LLM {
             ..
         } = req;
 
-        // Read existing tape messages if a tape name is provided.
+        // Read existing tape context if a tape name is provided.
         let tape_messages = if let Some(tape_name) = tape {
-            match self.async_tape.read_messages(tape_name, None).await {
-                Ok(messages) => messages,
-                Err(e) => {
-                    tracing::error!(error = %e, tape = %tape_name, "failed to read tape messages");
-                    Vec::new()
-                }
-            }
+            self.build_tape_messages(tape_name, None).await
         } else {
             Vec::new()
         };
@@ -721,6 +724,51 @@ impl LLM {
         }
     }
 
+    // -- Tape context helper -------------------------------------------------
+
+    /// Build conversation messages from a tape, including decision injection.
+    ///
+    /// Reads the full tape once, applies anchor slicing in memory for context,
+    /// then injects active decisions from the full tape into the system prompt.
+    /// Respects custom `TapeContext.select` when set.
+    async fn build_tape_messages(
+        &self,
+        tape_name: &str,
+        tape_context: Option<&TapeContext>,
+    ) -> Vec<Value> {
+        // Read the full tape ONCE (no anchor slicing in the query).
+        let full_query = self.async_tape.query_tape(tape_name);
+        let all_entries = match self.async_tape.fetch_entries(&full_query).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::error!(error = %e, tape = %tape_name, "failed to read tape entries");
+                return Vec::new();
+            }
+        };
+
+        // Determine the anchor selector.
+        let default_ctx = self.async_tape.default_context().clone();
+        let ctx = tape_context.unwrap_or(&default_ctx);
+
+        // Apply anchor slicing in memory.
+        let sliced = slice_entries_by_anchor(&all_entries, &ctx.anchor);
+
+        // Build messages: use custom select when set, otherwise full context builder.
+        let mut tape_msgs = if ctx.select.is_some() {
+            tape_build_messages(&sliced, ctx)
+        } else {
+            build_full_context_from_entries(&sliced)
+        };
+
+        // Collect decisions from the FULL (unsliced) entries and inject.
+        let decisions = collect_active_decisions(&all_entries);
+        inject_decisions_into_system_prompt(&mut tape_msgs, &decisions);
+
+        // Apply context budget: truncate large tool results, trim if over budget.
+        crate::tape::context::apply_context_budget(&mut tape_msgs);
+        tape_msgs
+    }
+
     // -- run_tools helpers ---------------------------------------------------
 
     /// Build the message list for a single tool round.
@@ -742,43 +790,7 @@ impl LLM {
                     .await?;
             }
 
-            // Read full context from tape (includes system, messages, tool_call, tool_result)
-            let default_ctx = self.async_tape.default_context().clone();
-            let ctx = tape_context.unwrap_or(&default_ctx);
-            let query = ctx.build_query(self.async_tape.query_tape(tape_name));
-            let entries = match self.async_tape.fetch_entries(&query).await {
-                Ok(entries) => entries,
-                Err(e) if e.kind == ErrorKind::NotFound && query.after_last => {
-                    tracing::warn!(
-                        error = %e,
-                        tape = %tape_name,
-                        "anchored tape context unavailable; falling back to full tape"
-                    );
-                    match self
-                        .async_tape
-                        .fetch_entries(&self.async_tape.query_tape(tape_name))
-                        .await
-                    {
-                        Ok(entries) => entries,
-                        Err(fallback) => {
-                            tracing::error!(
-                                error = %fallback,
-                                tape = %tape_name,
-                                "failed to fetch fallback tape entries"
-                            );
-                            Vec::new()
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, tape = %tape_name, "failed to fetch tape entries");
-                    Vec::new()
-                }
-            };
-            let mut tape_msgs = build_full_context_from_entries(&entries);
-            // Apply context budget: truncate large tool results, trim if over budget
-            crate::tape::context::apply_context_budget(&mut tape_msgs);
-            Ok(tape_msgs)
+            Ok(self.build_tape_messages(tape_name, tape_context).await)
         } else {
             Ok(in_memory_msgs.to_vec())
         }
@@ -961,15 +973,9 @@ impl LLM {
         } = req;
         use futures::StreamExt;
 
-        // Read existing tape messages if a tape name is provided.
+        // Read existing tape context if a tape name is provided.
         let tape_messages = if let Some(tape_name) = tape {
-            match self.async_tape.read_messages(tape_name, None).await {
-                Ok(messages) => messages,
-                Err(e) => {
-                    tracing::error!(error = %e, tape = %tape_name, "failed to read tape messages");
-                    Vec::new()
-                }
-            }
+            self.build_tape_messages(tape_name, None).await
         } else {
             Vec::new()
         };
@@ -1385,6 +1391,38 @@ fn build_messages(
     msgs
 }
 
+/// Filter tape entries by anchor selector in memory.
+///
+/// Replicates the anchor-slicing logic that `TapeQuery` applies at the store
+/// level, but operates on an already-fetched entry list so that the full tape
+/// only needs to be read once.
+fn slice_entries_by_anchor(entries: &[TapeEntry], anchor: &AnchorSelector) -> Vec<TapeEntry> {
+    match anchor {
+        AnchorSelector::None => entries.to_vec(),
+        AnchorSelector::LastAnchor => {
+            // Find the last entry with kind == "anchor"
+            let pos = entries
+                .iter()
+                .rposition(|e| e.kind == "anchor");
+            match pos {
+                Some(idx) => entries[idx + 1..].to_vec(),
+                None => entries.to_vec(), // no anchors → return all
+            }
+        }
+        AnchorSelector::Named(name) => {
+            // Find the last entry with kind == "anchor" and matching name
+            let pos = entries.iter().rposition(|e| {
+                e.kind == "anchor"
+                    && e.payload.get("name").and_then(|v| v.as_str()) == Some(name.as_str())
+            });
+            match pos {
+                Some(idx) => entries[idx + 1..].to_vec(),
+                None => entries.to_vec(), // named anchor not found → return all
+            }
+        }
+    }
+}
+
 /// Build full conversation context from tape entries, including tool calls and results.
 /// This is needed because the default `build_messages` only extracts "message" entries.
 fn build_full_context_from_entries(entries: &[TapeEntry]) -> Vec<Value> {
@@ -1459,6 +1497,79 @@ fn build_full_context_from_entries(entries: &[TapeEntry]) -> Vec<Value> {
     }
 
     messages
+}
+
+/// Collect active (non-revoked) decisions from tape entries.
+///
+/// Scans ALL entries regardless of anchor slicing. Decisions revoked by a
+/// matching `decision_revoked` tombstone are excluded. Returns the text of
+/// each active decision in chronological order.
+pub fn collect_active_decisions(entries: &[TapeEntry]) -> Vec<String> {
+    let mut decisions: Vec<String> = Vec::new();
+    let mut revoked: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // First pass: collect all revocations
+    for entry in entries {
+        if entry.kind == "decision_revoked"
+            && let Some(text) = entry.payload.get("text").and_then(|v| v.as_str())
+        {
+            revoked.insert(text.to_string());
+        }
+    }
+
+    // Second pass: collect decisions not revoked
+    for entry in entries {
+        if entry.kind == "decision"
+            && let Some(text) = entry.payload.get("text").and_then(|v| v.as_str())
+            && !revoked.contains(text)
+            && !text.is_empty()
+        {
+            decisions.push(text.to_string());
+        }
+    }
+
+    decisions
+}
+
+/// Inject active decisions into the system prompt of a message list.
+///
+/// Finds the last system message and appends a decision block to its content.
+/// If no system message exists, creates one. The decision block is formatted as
+/// a numbered list under an "Active decisions:" header.
+pub fn inject_decisions_into_system_prompt(messages: &mut Vec<Value>, decisions: &[String]) {
+    if decisions.is_empty() {
+        return;
+    }
+
+    let mut block = String::from("\n\nActive decisions:");
+    for (i, decision) in decisions.iter().enumerate() {
+        block.push_str(&format!("\n{}. {}", i + 1, decision));
+    }
+
+    // Find the last system message and append to it
+    let mut last_system_idx = None;
+    for (i, msg) in messages.iter().enumerate() {
+        if msg.get("role").and_then(|r| r.as_str()) == Some("system") {
+            last_system_idx = Some(i);
+        }
+    }
+
+    if let Some(idx) = last_system_idx {
+        if let Some(obj) = messages[idx].as_object_mut() {
+            let existing = obj
+                .get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            let new_content = format!("{}{}", existing, block);
+            obj.insert("content".to_owned(), Value::String(new_content));
+        }
+    } else {
+        // No system message exists — create one
+        messages.insert(
+            0,
+            serde_json::json!({"role": "system", "content": block.trim_start()}),
+        );
+    }
 }
 
 fn extract_content(response: &Value) -> Result<String, ConduitError> {
@@ -2368,5 +2479,113 @@ mod tests {
         });
         assert!(body["input"].is_array());
         assert_eq!(body["input"].as_array().unwrap().len(), 2);
+    }
+
+    // ----- Decision functions -----
+
+    #[test]
+    fn test_collect_active_decisions_basic() {
+        let meta = json!({});
+        let entries = vec![
+            TapeEntry::decision("Use PostgreSQL", meta.clone()),
+            TapeEntry::decision("API-first design", meta.clone()),
+        ];
+        let decisions = collect_active_decisions(&entries);
+        assert_eq!(decisions, vec!["Use PostgreSQL", "API-first design"]);
+    }
+
+    #[test]
+    fn test_collect_active_decisions_with_revocation() {
+        let meta = json!({});
+        let entries = vec![
+            TapeEntry::decision("Use PostgreSQL", meta.clone()),
+            TapeEntry::decision("API-first design", meta.clone()),
+            TapeEntry::decision_revoked("Use PostgreSQL", meta.clone()),
+        ];
+        let decisions = collect_active_decisions(&entries);
+        assert_eq!(decisions, vec!["API-first design"]);
+    }
+
+    #[test]
+    fn test_collect_active_decisions_empty() {
+        let decisions = collect_active_decisions(&[]);
+        assert!(decisions.is_empty());
+    }
+
+    #[test]
+    fn test_collect_active_decisions_skips_empty_text() {
+        let meta = json!({});
+        let entries = vec![
+            TapeEntry::decision("", meta.clone()),
+            TapeEntry::decision("Real decision", meta.clone()),
+        ];
+        let decisions = collect_active_decisions(&entries);
+        assert_eq!(decisions, vec!["Real decision"]);
+    }
+
+    #[test]
+    fn test_collect_active_decisions_duplicate_text() {
+        let meta = json!({});
+        let entries = vec![
+            TapeEntry::decision("Use PostgreSQL", meta.clone()),
+            TapeEntry::decision("Use PostgreSQL", meta.clone()),
+        ];
+        let decisions = collect_active_decisions(&entries);
+        // Both kept — dedup is caller's concern
+        assert_eq!(decisions.len(), 2);
+    }
+
+    #[test]
+    fn test_inject_decisions_into_system_prompt() {
+        let mut messages = vec![
+            json!({"role": "system", "content": "You are helpful."}),
+            json!({"role": "user", "content": "Hello"}),
+        ];
+        inject_decisions_into_system_prompt(
+            &mut messages,
+            &["Use PostgreSQL".to_string(), "API-first".to_string()],
+        );
+        let system_content = messages[0]["content"].as_str().unwrap();
+        assert!(system_content.contains("Active decisions:"));
+        assert!(system_content.contains("1. Use PostgreSQL"));
+        assert!(system_content.contains("2. API-first"));
+        assert!(system_content.starts_with("You are helpful."));
+    }
+
+    #[test]
+    fn test_inject_decisions_no_system_message() {
+        let mut messages = vec![json!({"role": "user", "content": "Hello"})];
+        inject_decisions_into_system_prompt(&mut messages, &["Use PostgreSQL".to_string()]);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert!(messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("1. Use PostgreSQL"));
+    }
+
+    #[test]
+    fn test_inject_decisions_empty_list() {
+        let mut messages = vec![json!({"role": "system", "content": "Original"})];
+        inject_decisions_into_system_prompt(&mut messages, &[]);
+        assert_eq!(messages[0]["content"], "Original");
+    }
+
+    #[test]
+    fn test_decisions_survive_full_context_build() {
+        // Decisions should NOT appear in build_full_context_from_entries output
+        // (they are injected separately via full-tape scan)
+        let meta = json!({});
+        let entries = vec![
+            TapeEntry::decision("Use PostgreSQL", meta.clone()),
+            TapeEntry::message(
+                json!({"role": "user", "content": "Hello"}),
+                meta.clone(),
+            ),
+        ];
+        let messages = build_full_context_from_entries(&entries);
+        // Decision entries are skipped by build_full_context (kind is not message/system/tool_*)
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["content"], "Hello");
     }
 }

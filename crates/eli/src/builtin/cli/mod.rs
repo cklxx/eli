@@ -1,6 +1,7 @@
-//! CLI commands: run, chat, login, use, status, hooks, gateway, model, tape.
+//! CLI commands: run, chat, login, use, status, hooks, gateway, model, tape, decisions.
 
 mod chat;
+mod decisions;
 mod gateway;
 mod login;
 mod model;
@@ -97,6 +98,25 @@ pub enum CliCommand {
         #[arg(long)]
         dir: Option<std::path::PathBuf>,
     },
+    /// Manage persistent decisions.
+    Decisions {
+        #[command(subcommand)]
+        action: DecisionAction,
+    },
+}
+
+/// Decision management actions.
+#[derive(Debug, Subcommand)]
+pub enum DecisionAction {
+    /// List active decisions.
+    List,
+    /// Remove a decision by number.
+    Remove {
+        /// Decision number (1-based, from `eli decisions list`).
+        index: usize,
+    },
+    /// Export decisions as markdown.
+    Export,
 }
 
 /// Execute a CLI command.
@@ -130,6 +150,11 @@ pub async fn execute(cmd: CliCommand) -> anyhow::Result<()> {
         }
         CliCommand::Gateway { enable_channels } => gateway::gateway_command(enable_channels).await,
         CliCommand::Tape { port, dir } => tape::tape_command(port, dir).await,
+        CliCommand::Decisions { action } => match action {
+            DecisionAction::List => decisions::list_command().await,
+            DecisionAction::Remove { index } => decisions::remove_command(index).await,
+            DecisionAction::Export => decisions::export_command().await,
+        },
     }
 }
 

@@ -505,6 +505,9 @@ pub fn codex_cli_api_key_resolver(codex_home: Option<PathBuf>) -> APIKeyResolver
 }
 
 /// Build a resolver that auto-refreshes Codex OAuth tokens when they are near expiry.
+///
+/// # Panics
+/// The returned resolver panics if called from within an async runtime context.
 pub fn openai_codex_oauth_resolver(
     codex_home: Option<PathBuf>,
     refresh_skew_seconds: i64,

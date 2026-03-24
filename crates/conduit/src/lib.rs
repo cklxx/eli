@@ -22,7 +22,10 @@ pub use crate::core::results::{
     AsyncStreamEvents, AsyncTextStream, ErrorPayload, StreamEvent, StreamEvents, StreamState,
     TextStream, ToolAutoResult, ToolExecution,
 };
-pub use crate::llm::{ApiFormat, ChatRequest, EmbedInput, LLM, LLMBuilder, StreamEventFilter};
+pub use crate::llm::{
+    ApiFormat, ChatRequest, EmbedInput, LLM, LLMBuilder, StreamEventFilter,
+    collect_active_decisions, inject_decisions_into_system_prompt,
+};
 pub use crate::tape::{
     AnchorSelector, TapeContext, TapeEntry, TapeManager, TapeQuery, TapeSession,
 };
