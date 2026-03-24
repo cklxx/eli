@@ -12,6 +12,7 @@ use futures::FutureExt;
 
 use conduit::tape::{AsyncTapeStore, TapeStore};
 
+use crate::smart_router::RouteDecision;
 use crate::types::{Envelope, MessageHandler, PromptValue, State};
 
 // ---------------------------------------------------------------------------
@@ -44,55 +45,6 @@ impl HookError {
             source,
         }
     }
-}
-
-/// Iterate plugins in the given order, call an async method that returns
-/// `Result<Option<T>, HookError>`, and return the first `Some` value.
-/// On error or panic, propagate immediately.
-macro_rules! call_first_upgraded {
-    ($iter:expr, $hook_name:literal, |$p:ident| $call:expr) => {{
-        for $p in $iter {
-            let name = $p.plugin_name().to_owned();
-            let result = std::panic::AssertUnwindSafe($call).catch_unwind().await;
-            match result {
-                Ok(Ok(Some(val))) => return Ok(Some(val)),
-                Ok(Ok(None)) => continue,
-                Ok(Err(e)) => {
-                    tracing::warn!(plugin = %name, error = %e, concat!("hook.", $hook_name, " failed"));
-                    return Err(HookError::wrap(name, $hook_name, e));
-                }
-                Err(_) => {
-                    tracing::warn!(plugin = %name, concat!("hook.", $hook_name, " panicked"));
-                    return Err(HookError::Panic(name));
-                }
-            }
-        }
-        Ok(None)
-    }};
-}
-
-/// Iterate plugins, call an async method that returns `Result<T, HookError>`,
-/// and collect all `Ok` results. On error or panic, propagate immediately.
-macro_rules! call_collect_upgraded {
-    ($iter:expr, $hook_name:literal, |$p:ident| $call:expr) => {{
-        let mut results = Vec::new();
-        for $p in $iter {
-            let name = $p.plugin_name().to_owned();
-            let result = std::panic::AssertUnwindSafe($call).catch_unwind().await;
-            match result {
-                Ok(Ok(val)) => results.push(val),
-                Ok(Err(e)) => {
-                    tracing::warn!(plugin = %name, error = %e, concat!("hook.", $hook_name, " failed"));
-                    return Err(HookError::wrap(name, $hook_name, e));
-                }
-                Err(_) => {
-                    tracing::warn!(plugin = %name, concat!("hook.", $hook_name, " panicked"));
-                    return Err(HookError::Panic(name));
-                }
-            }
-        }
-        Ok(results)
-    }};
 }
 
 /// Iterate plugins, call an async method, and swallow any panics.
@@ -204,6 +156,12 @@ pub trait EliHookSpec: Send + Sync {
         "unnamed"
     }
 
+    /// Classify an inbound message to determine its processing route.
+    /// Returns `None` to defer to the next plugin, or `Some(RouteDecision)`.
+    fn classify_inbound(&self, message: &Envelope) -> Option<RouteDecision> {
+        None
+    }
+
     /// Resolve session id for one inbound message.
     async fn resolve_session(&self, message: &Envelope) -> Result<Option<String>, HookError> {
         Ok(None)
@@ -220,7 +178,7 @@ pub trait EliHookSpec: Send + Sync {
 
     /// Build model prompt for this turn.
     /// Returns either plain text or a list of content parts (multimodal).
-    async fn build_prompt(
+    async fn build_user_prompt(
         &self,
         message: &Envelope,
         session_id: &str,
@@ -272,8 +230,20 @@ pub trait EliHookSpec: Send + Sync {
     /// Observe framework errors from any stage.
     async fn on_error(&self, stage: &str, error: &anyhow::Error, message: Option<&Envelope>) {}
 
-    /// Provide a system prompt fragment to be prepended to model prompts.
-    fn system_prompt(&self, prompt: &PromptValue, state: &State) -> Option<String> {
+    /// Build the full system prompt for the agent loop.
+    /// Returns `None` to defer to the next plugin, or `Some(String)` with the assembled prompt.
+    fn build_system_prompt(
+        &self,
+        prompt_text: &str,
+        state: &State,
+        route: Option<&RouteDecision>,
+    ) -> Option<String> {
+        None
+    }
+
+    /// Wrap a tool before execution. Returns a modified tool with middleware applied,
+    /// or `None` to leave the tool unchanged.
+    fn wrap_tool(&self, tool: &conduit::Tool) -> Option<conduit::Tool> {
         None
     }
 
@@ -300,7 +270,7 @@ pub trait EliHookSpec: Send + Sync {
 ///   A panic aborts the hook chain and returns `Err(HookError::Panic)`.
 ///   No further plugins are consulted.
 ///
-/// - **Non-upgraded hooks** (`build_prompt`, `save_state`, `render_outbound`,
+/// - **Non-upgraded hooks** (`build_user_prompt`, `save_state`, `render_outbound`,
 ///   `dispatch_outbound`, `on_error`, `register_cli_commands`):
 ///   A panic is caught and logged; execution continues to the next plugin.
 pub struct HookRuntime {
@@ -323,6 +293,79 @@ impl HookRuntime {
         self.plugins.iter().rev()
     }
 
+    // -- classify inbound (sync, first-result) --------------------------------
+
+    /// Classify inbound message: return the first non-None result.
+    pub fn call_classify_inbound(&self, message: &Envelope) -> Option<RouteDecision> {
+        for plugin in self.reversed() {
+            let name = plugin.plugin_name().to_owned();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                plugin.classify_inbound(message)
+            })) {
+                Ok(Some(decision)) => {
+                    tracing::info!(
+                        target: "eli_trace",
+                        plugin = %name,
+                        decision = ?decision,
+                        "hook.classify_inbound"
+                    );
+                    return Some(decision);
+                }
+                Ok(None) => {}
+                Err(_) => tracing::error!(plugin = %name, "hook.classify_inbound panicked"),
+            }
+        }
+        None
+    }
+
+    // -- build system prompt (sync, first-result) -----------------------------
+
+    /// Build system prompt: return the first non-None result.
+    pub fn call_build_system_prompt(
+        &self,
+        prompt_text: &str,
+        state: &State,
+        route: Option<&RouteDecision>,
+    ) -> Option<String> {
+        for plugin in self.reversed() {
+            let name = plugin.plugin_name().to_owned();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                plugin.build_system_prompt(prompt_text, state, route)
+            })) {
+                Ok(Some(prompt)) => return Some(prompt),
+                Ok(None) => {}
+                Err(_) => tracing::error!(plugin = %name, "hook.build_system_prompt panicked"),
+            }
+        }
+        None
+    }
+
+    // -- wrap tool (sync, all plugins) ----------------------------------------
+
+    /// Wrap tools through all plugins. Each plugin can modify/wrap a tool.
+    pub fn call_wrap_tools(&self, tools: Vec<conduit::Tool>) -> Vec<conduit::Tool> {
+        let mut result = tools;
+        for plugin in self.plugins.iter() {
+            let name = plugin.plugin_name().to_owned();
+            result = result
+                .into_iter()
+                .map(|tool| {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        plugin.wrap_tool(&tool)
+                    })) {
+                        Ok(Some(wrapped)) => wrapped,
+                        Ok(None) => tool,
+                        Err(_) => {
+                            tracing::error!(plugin = %name, "hook.wrap_tool panicked");
+                            tool
+                        }
+                    }
+                })
+                .collect();
+        }
+        result
+    }
+
     // -- firstresult hooks (async) ------------------------------------------
 
     /// Resolve session: return the first non-None result.
@@ -330,8 +373,33 @@ impl HookRuntime {
         &self,
         message: &Envelope,
     ) -> Result<Option<String>, HookError> {
-        call_first_upgraded!(self.reversed(), "resolve_session", |p| p
-            .resolve_session(message))
+        let session_id = "<resolving>";
+        for p in self.reversed() {
+            let name = p.plugin_name().to_owned();
+            trace_hook_call(&name, session_id, "resolve_session", &preview_json(message));
+            let result = std::panic::AssertUnwindSafe(p.resolve_session(message))
+                .catch_unwind()
+                .await;
+            match result {
+                Ok(Ok(Some(val))) => {
+                    trace_hook_return(&name, &val, "resolve_session", &preview_text(&val));
+                    return Ok(Some(val));
+                }
+                Ok(Ok(None)) => {
+                    trace_hook_none(&name, session_id, "resolve_session");
+                    continue;
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(plugin = %name, error = %e, "hook.resolve_session failed");
+                    return Err(HookError::wrap(name, "resolve_session", e));
+                }
+                Err(_) => {
+                    tracing::warn!(plugin = %name, "hook.resolve_session panicked");
+                    return Err(HookError::Panic(name));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Load state: collect all results and merge.
@@ -340,12 +408,34 @@ impl HookRuntime {
         message: &Envelope,
         session_id: &str,
     ) -> Result<Vec<Option<State>>, HookError> {
-        call_collect_upgraded!(self.plugins.iter(), "load_state", |p| p
-            .load_state(message, session_id))
+        let mut results = Vec::new();
+        for p in self.plugins.iter() {
+            let name = p.plugin_name().to_owned();
+            trace_hook_call(&name, session_id, "load_state", &preview_json(message));
+            let result = std::panic::AssertUnwindSafe(p.load_state(message, session_id))
+                .catch_unwind()
+                .await;
+            match result {
+                Ok(Ok(val)) => {
+                    let preview = format!("{} keys", val.as_ref().map_or(0, |s| s.len()));
+                    trace_hook_return(&name, session_id, "load_state", &preview);
+                    results.push(val);
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(plugin = %name, error = %e, "hook.load_state failed");
+                    return Err(HookError::wrap(name, "load_state", e));
+                }
+                Err(_) => {
+                    tracing::warn!(plugin = %name, "hook.load_state panicked");
+                    return Err(HookError::Panic(name));
+                }
+            }
+        }
+        Ok(results)
     }
 
     /// Build prompt: return the first non-None result (non-upgraded — panics skip).
-    pub async fn call_build_prompt(
+    pub async fn call_build_user_prompt(
         &self,
         message: &Envelope,
         session_id: &str,
@@ -353,9 +443,14 @@ impl HookRuntime {
     ) -> Option<PromptValue> {
         for plugin in self.reversed() {
             let name = plugin.plugin_name().to_owned();
-            trace_hook_call(&name, session_id, "build_prompt", &preview_json(message));
+            trace_hook_call(
+                &name,
+                session_id,
+                "build_user_prompt",
+                &preview_json(message),
+            );
             let result =
-                std::panic::AssertUnwindSafe(plugin.build_prompt(message, session_id, state))
+                std::panic::AssertUnwindSafe(plugin.build_user_prompt(message, session_id, state))
                     .catch_unwind()
                     .await;
             match result {
@@ -363,17 +458,17 @@ impl HookRuntime {
                     trace_hook_return(
                         &name,
                         session_id,
-                        "build_prompt",
+                        "build_user_prompt",
                         &preview_text(&val.as_text()),
                     );
                     return Some(val);
                 }
                 Ok(None) => {
-                    trace_hook_none(&name, session_id, "build_prompt");
+                    trace_hook_none(&name, session_id, "build_user_prompt");
                     continue;
                 }
                 Err(_) => {
-                    tracing::error!(plugin = %name, session_id = %session_id, "hook.build_prompt panicked");
+                    tracing::error!(plugin = %name, session_id = %session_id, "hook.build_user_prompt panicked");
                     continue;
                 }
             }
@@ -429,12 +524,24 @@ impl HookRuntime {
         message: &Envelope,
         model_output: &str,
     ) {
-        call_notify_all!(self.plugins.iter(), "save_state", |p| p.save_state(
-            session_id,
-            state,
-            message,
-            model_output
-        ));
+        for p in self.plugins.iter() {
+            let name = p.plugin_name().to_owned();
+            trace_hook_call(&name, session_id, "save_state", &preview_text(model_output));
+            let result = std::panic::AssertUnwindSafe(p.save_state(
+                session_id,
+                state,
+                message,
+                model_output,
+            ))
+            .catch_unwind()
+            .await;
+            match result {
+                Ok(()) => trace_hook_return(&name, session_id, "save_state", "ok"),
+                Err(_) => {
+                    tracing::error!(plugin = %name, "hook.save_state panicked");
+                }
+            }
+        }
     }
 
     /// Render outbound: collect results from all implementations.
@@ -479,8 +586,40 @@ impl HookRuntime {
 
     /// Dispatch outbound: call all implementations.
     pub async fn call_dispatch_outbound(&self, message: &Envelope) {
-        call_notify_all!(self.plugins.iter(), "dispatch_outbound", |p| p
-            .dispatch_outbound(message));
+        let session_id = message
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unknown>");
+        for p in self.plugins.iter() {
+            let name = p.plugin_name().to_owned();
+            trace_hook_call(
+                &name,
+                session_id,
+                "dispatch_outbound",
+                &preview_json(message),
+            );
+            let result = std::panic::AssertUnwindSafe(p.dispatch_outbound(message))
+                .catch_unwind()
+                .await;
+            match result {
+                Ok(Some(delivered)) => {
+                    trace_hook_return(
+                        &name,
+                        session_id,
+                        "dispatch_outbound",
+                        if delivered {
+                            "delivered"
+                        } else {
+                            "not_delivered"
+                        },
+                    );
+                }
+                Ok(None) => trace_hook_none(&name, session_id, "dispatch_outbound"),
+                Err(_) => {
+                    tracing::error!(plugin = %name, "hook.dispatch_outbound panicked");
+                }
+            }
+        }
     }
 
     /// Register CLI commands on all plugins (synchronous).
@@ -498,22 +637,6 @@ impl HookRuntime {
     ) {
         call_notify_all!(self.plugins.iter(), "on_error", |p| p
             .on_error(stage, error, message));
-    }
-
-    /// Collect system prompt fragments from all plugins (reversed, joined).
-    pub fn call_system_prompt(&self, prompt: &PromptValue, state: &State) -> String {
-        let mut fragments: Vec<String> = Vec::new();
-        for plugin in self.reversed() {
-            let name = plugin.plugin_name().to_owned();
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                plugin.system_prompt(prompt, state)
-            })) {
-                Ok(Some(f)) if !f.is_empty() => fragments.push(f),
-                Ok(_) => {}
-                Err(_) => tracing::error!(plugin = %name, "hook.system_prompt panicked"),
-            }
-        }
-        fragments.join("\n\n")
     }
 
     /// Get the first provided tape store.
@@ -550,16 +673,18 @@ impl HookRuntime {
         // trait overrides in Rust the way pluggy can, we just list all
         // registered plugin names for each hook.
         let hook_names = [
+            "classify_inbound",
             "resolve_session",
             "load_state",
-            "build_prompt",
+            "build_user_prompt",
+            "build_system_prompt",
             "run_model",
             "save_state",
             "render_outbound",
             "dispatch_outbound",
             "register_cli_commands",
             "on_error",
-            "system_prompt",
+            "wrap_tool",
             "provide_tape_store",
             "provide_channels",
         ];
@@ -600,7 +725,12 @@ mod tests {
             Ok(Some("high-session".into()))
         }
 
-        fn system_prompt(&self, _prompt: &PromptValue, _state: &State) -> Option<String> {
+        fn build_system_prompt(
+            &self,
+            _prompt_text: &str,
+            _state: &State,
+            _route: Option<&RouteDecision>,
+        ) -> Option<String> {
             Some("high-prompt".into())
         }
 
@@ -627,7 +757,12 @@ mod tests {
             Ok(Some("low-session".into()))
         }
 
-        fn system_prompt(&self, _prompt: &PromptValue, _state: &State) -> Option<String> {
+        fn build_system_prompt(
+            &self,
+            _prompt_text: &str,
+            _state: &State,
+            _route: Option<&RouteDecision>,
+        ) -> Option<String> {
             Some("low-prompt".into())
         }
     }
@@ -739,31 +874,29 @@ mod tests {
         assert!(matches!(err, HookError::Panic(ref name) if name == "panic-session"));
     }
 
-    // -- call_system_prompt (call_many sync, joined) -------------------------
+    // -- call_build_system_prompt (first-result sync) -------------------------
 
     #[tokio::test]
-    async fn test_call_system_prompt_collects_and_joins_fragments() {
+    async fn test_call_build_system_prompt_returns_first_result() {
         let rt = HookRuntime::new(vec![
             Arc::new(LowPriorityPlugin) as Arc<dyn EliHookSpec>,
             Arc::new(HighPriorityPlugin),
         ]);
-        let prompt = PromptValue::Text("hello".into());
         let state = State::new();
-        let result = rt.call_system_prompt(&prompt, &state);
-        // reversed order: High first, Low second
-        assert_eq!(result, "high-prompt\n\nlow-prompt");
+        let result = rt.call_build_system_prompt("hello", &state, None);
+        // Last-registered (High) wins
+        assert_eq!(result, Some("high-prompt".into()));
     }
 
     #[tokio::test]
-    async fn test_call_system_prompt_skips_none_results() {
+    async fn test_call_build_system_prompt_skips_none_results() {
         let rt = HookRuntime::new(vec![
             Arc::new(LowPriorityPlugin) as Arc<dyn EliHookSpec>,
             Arc::new(ReturnsNonePlugin),
         ]);
-        let prompt = PromptValue::Text("hello".into());
         let state = State::new();
-        let result = rt.call_system_prompt(&prompt, &state);
-        assert_eq!(result, "low-prompt");
+        let result = rt.call_build_system_prompt("hello", &state, None);
+        assert_eq!(result, Some("low-prompt".into()));
     }
 
     // -- call_render_outbound (call_many async) ------------------------------
@@ -823,7 +956,7 @@ mod tests {
         let report = rt.hook_report();
         assert!(report.contains_key("resolve_session"));
         assert_eq!(report["resolve_session"], vec!["low", "high"]);
-        assert!(report.contains_key("system_prompt"));
+        assert!(report.contains_key("build_system_prompt"));
     }
 
     #[test]
@@ -972,7 +1105,7 @@ mod tests {
         );
     }
 
-    // -- call_build_prompt panic skipping ------------------------------------
+    // -- call_build_user_prompt panic skipping ------------------------------------
 
     struct PanicBuildPromptPlugin;
 
@@ -982,13 +1115,13 @@ mod tests {
             "panic-build-prompt"
         }
 
-        async fn build_prompt(
+        async fn build_user_prompt(
             &self,
             _message: &Envelope,
             _session_id: &str,
             _state: &State,
         ) -> Option<PromptValue> {
-            panic!("build_prompt panic");
+            panic!("build_user_prompt panic");
         }
     }
 
@@ -1000,7 +1133,7 @@ mod tests {
             "build-prompt-fallback"
         }
 
-        async fn build_prompt(
+        async fn build_user_prompt(
             &self,
             _message: &Envelope,
             _session_id: &str,
@@ -1011,7 +1144,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_call_build_prompt_skips_panicking_plugin() {
+    async fn test_call_build_user_prompt_skips_panicking_plugin() {
         // PanicBuildPromptPlugin registered last (highest priority, tried first in reversed).
         // It panics → skipped. BuildPromptFallbackPlugin tried next → returns Some.
         let rt = HookRuntime::new(vec![
@@ -1020,7 +1153,7 @@ mod tests {
         ]);
         let msg = json!({"content": "hello"});
         let state = State::new();
-        let result = rt.call_build_prompt(&msg, "s1", &state).await;
+        let result = rt.call_build_user_prompt(&msg, "s1", &state).await;
         assert!(result.is_some());
         assert_eq!(result.unwrap().as_text(), "fallback-prompt");
     }

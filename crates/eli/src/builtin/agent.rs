@@ -10,15 +10,18 @@ use conduit::llm::{ChatRequest, LLM};
 use conduit::{
     ConduitError, ErrorKind, TapeContext, TapeEntry, Tool, ToolAutoResult, ToolContext, ToolSet,
 };
-use regex::Regex;
 use serde_json::Value;
 
 use crate::builtin::settings::{AgentSettings, ApiBaseConfig, ApiKeyConfig};
 use crate::builtin::store::{FileTapeStore, ForkTapeStore};
 use crate::builtin::tape::TapeService;
 use crate::builtin::tools::with_tape_runtime;
-use crate::skills::{discover_skills, render_skills_prompt};
-use crate::tools::{REGISTRY, model_tools, render_tools_prompt};
+use crate::prompt_builder::{PromptBuilder, PromptMode};
+use crate::skill_matcher::{MatchContext, SkillMatcher};
+use crate::skills::discover_skills;
+use crate::smart_router::ROUTE_CONTEXT_KEY;
+use crate::tools::{REGISTRY, model_tools};
+use crate::types::PromptValue;
 
 /// Default HTTP headers sent with OpenRouter requests.
 #[allow(dead_code)]
@@ -26,11 +29,6 @@ const DEFAULT_ELI_HEADERS: [(&str, &str); 2] = [
     ("HTTP-Referer", "https://eliagent.github.io/"),
     ("X-Title", "Eli"),
 ];
-
-/// Regex for skill hints like `$skill_name` in prompts.
-fn hint_regex() -> Regex {
-    Regex::new(r"\$([A-Za-z0-9_.\-]+)").unwrap()
-}
 
 // ---------------------------------------------------------------------------
 // Agent
@@ -78,13 +76,13 @@ impl Agent {
     pub async fn run(
         &mut self,
         session_id: &str,
-        prompt: PromptInput,
+        prompt: PromptValue,
         state: &HashMap<String, Value>,
         model: Option<&str>,
         allowed_skills: Option<&HashSet<String>>,
         allowed_tools: Option<&HashSet<String>>,
     ) -> Result<String, ConduitError> {
-        if prompt.is_empty() {
+        if prompt.is_blank() {
             return Err(ConduitError::new(ErrorKind::InvalidInput, "empty prompt"));
         }
 
@@ -106,7 +104,7 @@ impl Agent {
         tapes.ensure_bootstrap_anchor(&tape_name).await?;
 
         // Check for slash-command.
-        if let PromptInput::Text(ref text) = prompt {
+        if let PromptValue::Text(ref text) = prompt {
             let trimmed = text.trim();
             if trimmed.starts_with('/') {
                 return run_command(tapes, &tape_name, trimmed, &tool_state).await;
@@ -136,85 +134,19 @@ impl Agent {
         state: &HashMap<String, Value>,
         allowed_skills: Option<&HashSet<String>>,
     ) -> String {
-        let mut blocks: Vec<String> = Vec::new();
-
-        // Default system prompt.
-        blocks.push(default_system_prompt().to_owned());
-
         let workspace = state
             .get("_runtime_workspace")
             .and_then(|v| v.as_str())
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-        // Tools prompt.
-        {
-            let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-            let tools_prompt = render_tools_prompt(reg.values());
-            if !tools_prompt.is_empty() {
-                blocks.push(tools_prompt);
-            }
-        }
-
-        // Skills prompt (filesystem — sidecar writes SKILL.md to .agents/skills/).
-        let skills = discover_skills(&workspace);
-        let filtered_skills: Vec<_> = if let Some(allowed) = allowed_skills {
-            skills
-                .into_iter()
-                .filter(|s| allowed.contains(&s.name.to_lowercase()))
-                .collect()
-        } else {
-            skills
-        };
-        let hint_re = hint_regex();
-        let expanded: HashSet<String> = hint_re
-            .captures_iter(prompt_text)
-            .filter_map(|c| c.get(1).map(|m| m.as_str().to_owned()))
-            .collect();
-        let skills_prompt = render_skills_prompt(&filtered_skills, &expanded);
-        if !skills_prompt.is_empty() {
-            blocks.push(skills_prompt);
-        }
-
-        blocks.join("\n\n")
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PromptInput
-// ---------------------------------------------------------------------------
-
-/// A prompt can be either plain text or multimodal content parts.
-#[derive(Debug, Clone)]
-pub enum PromptInput {
-    Text(String),
-    Parts(Vec<Value>),
-}
-
-impl PromptInput {
-    pub fn is_empty(&self) -> bool {
-        match self {
-            PromptInput::Text(s) => s.trim().is_empty(),
-            PromptInput::Parts(parts) => parts.is_empty(),
-        }
-    }
-
-    /// Extract text content (for system prompt building).
-    pub fn text(&self) -> String {
-        match self {
-            PromptInput::Text(s) => s.clone(),
-            PromptInput::Parts(parts) => parts
-                .iter()
-                .filter_map(|p| {
-                    if p.get("type").and_then(|v| v.as_str()) == Some("text") {
-                        p.get("text").and_then(|v| v.as_str()).map(|s| s.to_owned())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        }
+        build_system_prompt(
+            &self.settings,
+            prompt_text,
+            state,
+            allowed_skills,
+            &workspace,
+        )
     }
 }
 
@@ -479,90 +411,58 @@ fn create_llm(
     builder.build()
 }
 
-/// Load system prompt from md files with precedence:
-///
-/// 1. Built-in default (hardcoded fallback)
-/// 2. ~/.eli/PROMPT.md (global user-level override)
-/// 3. .agents/PROMPT.md (project-level override)
-///
-/// Later files override earlier ones (not append).
-fn load_system_prompt_base(settings: &AgentSettings, workspace: &Path) -> String {
-    // Try project-level first (highest priority)
-    let project_prompt = workspace.join(".agents").join("PROMPT.md");
-    if project_prompt.is_file()
-        && let Ok(content) = std::fs::read_to_string(&project_prompt)
-    {
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_owned();
-        }
-    }
-
-    // Try global user-level
-    let global_prompt = settings.home.join("PROMPT.md");
-    if global_prompt.is_file()
-        && let Ok(content) = std::fs::read_to_string(&global_prompt)
-    {
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_owned();
-        }
-    }
-
-    // Fall back to built-in default
-    default_system_prompt().to_owned()
-}
-
 /// Build the system prompt for the agent loop.
+///
+/// Delegates to [`PromptBuilder`] for sectioned composition with mode support.
+/// Uses [`SkillMatcher`] for multi-signal skill auto-activation alongside
+/// the existing `$hint` regex expansion.
 fn build_system_prompt(
     settings: &AgentSettings,
     prompt_text: &str,
-    _state: &HashMap<String, Value>,
+    state: &HashMap<String, Value>,
     allowed_skills: Option<&HashSet<String>>,
     workspace: &Path,
 ) -> String {
-    let mut blocks: Vec<String> = Vec::new();
+    // Determine prompt mode from route decision (set by smart_router).
+    let mode = state
+        .get(ROUTE_CONTEXT_KEY)
+        .and_then(|v| v.as_str())
+        .and_then(|s| match s {
+            "direct" => Some(PromptMode::Minimal),
+            "think" | "delegate" => Some(PromptMode::Full),
+            _ => None,
+        })
+        .unwrap_or(PromptMode::Full);
 
-    // Base system prompt (from md files or built-in default).
-    blocks.push(load_system_prompt_base(settings, workspace));
-
-    // Tools prompt.
-    {
-        let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-        let tools_prompt = render_tools_prompt(reg.values());
-        if !tools_prompt.is_empty() {
-            blocks.push(tools_prompt);
-        }
-    }
-
-    // Skills prompt (filesystem — sidecar writes SKILL.md to .agents/skills/).
+    // Auto-activate skills via multi-signal matching.
     let skills = discover_skills(workspace);
-    let filtered_skills: Vec<_> = if let Some(allowed) = allowed_skills {
-        skills
-            .into_iter()
-            .filter(|s| allowed.contains(&s.name.to_lowercase()))
-            .collect()
-    } else {
-        skills
+    let matcher = SkillMatcher::new();
+    let session_id = state
+        .get("_session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let match_ctx = MatchContext {
+        task_input: prompt_text,
+        recent_tools: &[], // TODO: wire recent tool history when available
+        session_id,
     };
-    let hint_re = hint_regex();
-    let expanded: HashSet<String> = hint_re
-        .captures_iter(prompt_text)
-        .filter_map(|c| c.get(1).map(|m| m.as_str().to_owned()))
-        .collect();
-    let skills_prompt = render_skills_prompt(&filtered_skills, &expanded);
-    if !skills_prompt.is_empty() {
-        blocks.push(skills_prompt);
-    }
+    let auto_expanded = matcher.match_skills(&skills, &match_ctx);
 
-    blocks.join("\n\n")
+    PromptBuilder::new(mode).build(
+        settings,
+        prompt_text,
+        state,
+        allowed_skills,
+        &auto_expanded,
+        workspace,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn agent_loop(
     tapes: &TapeService,
     tape_name: &str,
-    initial_prompt: PromptInput,
+    initial_prompt: PromptValue,
     settings: &AgentSettings,
     model: Option<&str>,
     state: &HashMap<String, Value>,
@@ -572,7 +472,7 @@ async fn agent_loop(
     workspace: &Path,
 ) -> Result<String, ConduitError> {
     let mut llm = create_llm(settings, model, tapes.store().clone())?;
-    let prompt_text = initial_prompt.text();
+    let prompt_text = initial_prompt.strict_text();
     let system_prompt =
         build_system_prompt(settings, &prompt_text, state, allowed_skills, workspace);
     let display_model = model.unwrap_or(&settings.model);
@@ -782,7 +682,7 @@ async fn run_tools_once(
     llm: &mut LLM,
     system_prompt: &str,
     tape_name: &str,
-    prompt: &PromptInput,
+    prompt: &PromptValue,
     tool_state: &HashMap<String, Value>,
     settings: &AgentSettings,
     allowed_tools: Option<&HashSet<String>>,
@@ -809,7 +709,7 @@ async fn run_tools_once(
         runnable: tools,
     };
 
-    let prompt_text = prompt.text();
+    let prompt_text = prompt.strict_text();
 
     // Create tool context for execution.
     let tool_ctx = build_tool_context("agent_loop", tape_name, tool_state);
@@ -922,39 +822,6 @@ fn args_to_json(args: &Args) -> Value {
         map.insert("value".to_owned(), Value::String(args.positional.join(" ")));
     }
     Value::Object(map)
-}
-
-// ---------------------------------------------------------------------------
-// Default system prompt
-// ---------------------------------------------------------------------------
-
-fn default_system_prompt() -> &'static str {
-    "You are Eli, a helpful AI coding assistant.\n\
-     \n\
-     Output quality (priority: Clear > Coherent > Concise > Concrete): \
-     Lead with result first, key evidence second, supporting detail only on demand. \
-     Avoid emojis unless the user explicitly requests them.\n\
-     \n\
-     Execution: Always execute first and exhaust safe deterministic attempts before asking questions. \
-     If intent is unclear, inspect context first (tape.search, then workspace files). \
-     For explicit low-risk read-only asks (view/check/list/inspect files, branches, project state), \
-     execute directly with tools and report findings — do not ask for reconfirmation. \
-     Ask a question only when requirements are genuinely missing or contradictory after all viable attempts fail. \
-     Treat explicit delegation signals (\"you decide\", \"anything works\", \"use your judgment\") \
-     as authorization for low-risk reversible actions: choose a sensible default, execute, and report.\n\
-     \n\
-     Tools: Use tools to accomplish tasks rather than explaining how to do them. \
-     When a tool fails, analyze the error and try an alternative approach before reporting failure. \
-     Use web_fetch when you have a URL; use other tools for local operations. \
-     Use /tmp as the default location for temporary files unless the user specifies another path.\n\
-     \n\
-     Response: Reply directly with your response text. \
-     Your text output will be delivered to the user automatically — the framework handles channel routing. \
-     Do NOT attempt to call channel-specific send functions or emit XML tool-call markup in your text output.\n\
-     \n\
-     Context: When context grows large, prefer concise responses. \
-     You may use tape.info to check token usage and tape.handoff to trim older history. \
-     Do not repeat information already visible in the conversation."
 }
 
 #[cfg(test)]

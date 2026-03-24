@@ -4,6 +4,7 @@ pub mod agent;
 pub mod cli;
 pub mod config;
 pub mod context;
+mod model_specs;
 pub mod settings;
 pub mod shell_manager;
 pub mod store;
@@ -21,10 +22,12 @@ use conduit::ConduitError;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::builtin::agent::{Agent, PromptInput};
+use crate::builtin::agent::Agent;
 use crate::builtin::store::FileTapeStore;
 use crate::channels::message::{ChannelMessage, MessageKind};
 use crate::hooks::{EliHookSpec, TapeStoreKind};
+use crate::smart_router::{RouteDecision, SmartRouter};
+use crate::tool_middleware::MiddlewareChain;
 use crate::types::{Envelope, PromptValue, State};
 
 pub(crate) const CLEANUP_ONLY_CONTEXT_KEY: &str = "_eli_cleanup_only";
@@ -37,6 +40,8 @@ pub(crate) const CLEANUP_ONLY_CONTEXT_KEY: &str = "_eli_cleanup_only";
 pub struct BuiltinImpl {
     agent: Mutex<Agent>,
     home: PathBuf,
+    router: SmartRouter,
+    middleware_chain: MiddlewareChain,
 }
 
 #[allow(clippy::new_without_default)]
@@ -49,6 +54,8 @@ impl BuiltinImpl {
         Self {
             agent: Mutex::new(agent),
             home,
+            router: SmartRouter::with_defaults(),
+            middleware_chain: MiddlewareChain::with_defaults(),
         }
     }
 
@@ -78,10 +85,10 @@ impl BuiltinImpl {
     }
 
     /// Build a prompt from an inbound message.
-    pub fn build_prompt(&self, message: &ChannelMessage) -> PromptInput {
+    pub fn build_prompt(&self, message: &ChannelMessage) -> PromptValue {
         let content = extract_message_text(&message.content);
         if content.starts_with('/') {
-            return PromptInput::Text(content);
+            return PromptValue::Text(content);
         }
         let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let context_str = message.context_str();
@@ -90,13 +97,13 @@ impl BuiltinImpl {
         } else {
             format!("{context_str}\n---Date: {now}---\n{content}")
         };
-        PromptInput::Text(text)
+        PromptValue::Text(text)
     }
 
     /// Run the model on a prompt within a session.
     pub async fn run_model(
         &self,
-        prompt: PromptInput,
+        prompt: PromptValue,
         session_id: &str,
         state: &HashMap<String, Value>,
     ) -> Result<String, ConduitError> {
@@ -105,11 +112,6 @@ impl BuiltinImpl {
             .await
             .run(session_id, prompt, state, None, None, None)
             .await
-    }
-
-    /// Build the system prompt for a model call.
-    pub fn system_prompt(&self, prompt_text: &str, state: &HashMap<String, Value>) -> String {
-        Agent::new().system_prompt(prompt_text, state, None)
     }
 
     /// Provide the tape store (FileTapeStore backed by the agent's home directory).
@@ -234,17 +236,18 @@ fn envelope_to_channel_message(message: &Envelope) -> ChannelMessage {
     }
 }
 
-fn prompt_value_to_input(prompt: &PromptValue) -> PromptInput {
-    match prompt {
-        PromptValue::Text(text) => PromptInput::Text(text.clone()),
-        PromptValue::Parts(parts) => PromptInput::Parts(parts.clone()),
-    }
-}
-
 #[async_trait]
 impl EliHookSpec for BuiltinImpl {
     fn plugin_name(&self) -> &str {
         "builtin"
+    }
+
+    fn classify_inbound(&self, message: &Envelope) -> Option<RouteDecision> {
+        let content = message
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        Some(self.router.classify(content)) // Always returns a decision
     }
 
     async fn resolve_session(
@@ -270,17 +273,13 @@ impl EliHookSpec for BuiltinImpl {
         Ok(Some(state))
     }
 
-    async fn build_prompt(
+    async fn build_user_prompt(
         &self,
         message: &Envelope,
         _session_id: &str,
         _state: &State,
     ) -> Option<PromptValue> {
-        let prompt = self.build_prompt(&envelope_to_channel_message(message));
-        Some(match prompt {
-            PromptInput::Text(text) => PromptValue::Text(text),
-            PromptInput::Parts(parts) => PromptValue::Parts(parts),
-        })
+        Some(self.build_prompt(&envelope_to_channel_message(message)))
     }
 
     async fn run_model(
@@ -289,10 +288,7 @@ impl EliHookSpec for BuiltinImpl {
         session_id: &str,
         state: &State,
     ) -> Result<Option<String>, crate::hooks::HookError> {
-        match self
-            .run_model(prompt_value_to_input(prompt), session_id, state)
-            .await
-        {
+        match self.run_model(prompt.clone(), session_id, state).await {
             Ok(output) => Ok(Some(output)),
             Err(e) => {
                 tracing::error!(error = %e, session_id = %session_id, "run_model failed");
@@ -331,8 +327,18 @@ impl EliHookSpec for BuiltinImpl {
             .await;
     }
 
-    fn system_prompt(&self, prompt: &PromptValue, state: &State) -> Option<String> {
-        Some(self.system_prompt(&prompt.as_text(), state))
+    fn build_system_prompt(
+        &self,
+        prompt_text: &str,
+        state: &State,
+        _route: Option<&RouteDecision>,
+    ) -> Option<String> {
+        Some(Agent::new().system_prompt(prompt_text, state, None))
+    }
+
+    fn wrap_tool(&self, tool: &conduit::Tool) -> Option<conduit::Tool> {
+        let wrapped = self.middleware_chain.wrap_tools(std::slice::from_ref(tool));
+        wrapped.into_iter().next()
     }
 
     fn provide_tape_store(&self) -> Option<TapeStoreKind> {

@@ -76,6 +76,33 @@ impl PromptValue {
             PromptValue::Parts(parts) => parts.is_empty(),
         }
     }
+
+    /// Return `true` if the prompt is empty after trimming whitespace.
+    pub fn is_blank(&self) -> bool {
+        match self {
+            PromptValue::Text(s) => s.trim().is_empty(),
+            PromptValue::Parts(parts) => parts.is_empty(),
+        }
+    }
+
+    /// Extract text content strictly — only parts with `"type": "text"` are
+    /// included. For the Text variant, returns the string as-is.
+    pub fn strict_text(&self) -> String {
+        match self {
+            PromptValue::Text(s) => s.clone(),
+            PromptValue::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| {
+                    if p.get("type").and_then(|v| v.as_str()) == Some("text") {
+                        p.get("text").and_then(|v| v.as_str()).map(|s| s.to_owned())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
 }
 
 #[cfg(test)]

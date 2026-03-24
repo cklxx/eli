@@ -8,10 +8,6 @@ use tracing::{info, warn};
 
 use super::message::ChannelMessage;
 
-/// Async callback that processes a single [`ChannelMessage`].
-pub type MessageHandler =
-    Arc<dyn Fn(ChannelMessage) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
-
 /// A message handler that buffers incoming messages and processes them in batch
 /// with debounce and active-time-window semantics.
 ///
