@@ -54,7 +54,7 @@ impl BuiltinImpl {
         Self {
             agent: Mutex::new(agent),
             home,
-            router: SmartRouter::with_defaults(),
+            router: SmartRouter::new(),
             middleware_chain: MiddlewareChain::with_defaults(),
         }
     }
@@ -247,7 +247,7 @@ impl EliHookSpec for BuiltinImpl {
             .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        Some(self.router.classify(content)) // Always returns a decision
+        self.router.classify(content)
     }
 
     async fn resolve_session(
@@ -327,12 +327,7 @@ impl EliHookSpec for BuiltinImpl {
             .await;
     }
 
-    fn build_system_prompt(
-        &self,
-        prompt_text: &str,
-        state: &State,
-        _route: Option<&RouteDecision>,
-    ) -> Option<String> {
+    fn build_system_prompt(&self, prompt_text: &str, state: &State) -> Option<String> {
         Some(Agent::new().system_prompt(prompt_text, state, None))
     }
 

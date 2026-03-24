@@ -232,12 +232,7 @@ pub trait EliHookSpec: Send + Sync {
 
     /// Build the full system prompt for the agent loop.
     /// Returns `None` to defer to the next plugin, or `Some(String)` with the assembled prompt.
-    fn build_system_prompt(
-        &self,
-        prompt_text: &str,
-        state: &State,
-        route: Option<&RouteDecision>,
-    ) -> Option<String> {
+    fn build_system_prompt(&self, prompt_text: &str, state: &State) -> Option<String> {
         None
     }
 
@@ -321,16 +316,11 @@ impl HookRuntime {
     // -- build system prompt (sync, first-result) -----------------------------
 
     /// Build system prompt: return the first non-None result.
-    pub fn call_build_system_prompt(
-        &self,
-        prompt_text: &str,
-        state: &State,
-        route: Option<&RouteDecision>,
-    ) -> Option<String> {
+    pub fn call_build_system_prompt(&self, prompt_text: &str, state: &State) -> Option<String> {
         for plugin in self.reversed() {
             let name = plugin.plugin_name().to_owned();
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                plugin.build_system_prompt(prompt_text, state, route)
+                plugin.build_system_prompt(prompt_text, state)
             })) {
                 Ok(Some(prompt)) => return Some(prompt),
                 Ok(None) => {}
@@ -725,12 +715,7 @@ mod tests {
             Ok(Some("high-session".into()))
         }
 
-        fn build_system_prompt(
-            &self,
-            _prompt_text: &str,
-            _state: &State,
-            _route: Option<&RouteDecision>,
-        ) -> Option<String> {
+        fn build_system_prompt(&self, _prompt_text: &str, _state: &State) -> Option<String> {
             Some("high-prompt".into())
         }
 
@@ -757,12 +742,7 @@ mod tests {
             Ok(Some("low-session".into()))
         }
 
-        fn build_system_prompt(
-            &self,
-            _prompt_text: &str,
-            _state: &State,
-            _route: Option<&RouteDecision>,
-        ) -> Option<String> {
+        fn build_system_prompt(&self, _prompt_text: &str, _state: &State) -> Option<String> {
             Some("low-prompt".into())
         }
     }
@@ -883,7 +863,7 @@ mod tests {
             Arc::new(HighPriorityPlugin),
         ]);
         let state = State::new();
-        let result = rt.call_build_system_prompt("hello", &state, None);
+        let result = rt.call_build_system_prompt("hello", &state);
         // Last-registered (High) wins
         assert_eq!(result, Some("high-prompt".into()));
     }
@@ -895,7 +875,7 @@ mod tests {
             Arc::new(ReturnsNonePlugin),
         ]);
         let state = State::new();
-        let result = rt.call_build_system_prompt("hello", &state, None);
+        let result = rt.call_build_system_prompt("hello", &state);
         assert_eq!(result, Some("low-prompt".into()));
     }
 

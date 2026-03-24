@@ -110,6 +110,41 @@ impl EliFramework {
         let rt = self.hook_runtime.read().await;
         let workspace = self.workspace.read().await.clone();
 
+        // 0. Classify inbound — Greet messages short-circuit the pipeline
+        if let Some(crate::smart_router::RouteDecision::Greet(reply)) =
+            rt.call_classify_inbound(&inbound)
+        {
+            let session_id = Self::default_session_id(&inbound);
+            let channel = inbound
+                .get("channel")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let chat_id = inbound
+                .get("chat_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let output_channel = inbound
+                .get("output_channel")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&channel)
+                .to_owned();
+            let outbound = serde_json::json!({
+                "content": reply,
+                "session_id": session_id,
+                "channel": channel,
+                "chat_id": chat_id,
+                "output_channel": output_channel,
+            });
+            return Ok(TurnResult {
+                session_id,
+                prompt: PromptValue::Text(String::new()),
+                model_output: reply.clone(),
+                outbounds: vec![outbound],
+            });
+        }
+
         // 1. Resolve session
         let session_id = match rt.call_resolve_session(&inbound).await {
             Ok(Some(id)) => id,
@@ -150,7 +185,10 @@ impl EliFramework {
         }
 
         // 3. Build prompt
-        let prompt = match rt.call_build_prompt(&inbound, &session_id, &state).await {
+        let prompt = match rt
+            .call_build_user_prompt(&inbound, &session_id, &state)
+            .await
+        {
             Some(p) => p,
             None => PromptValue::Text(content_of(&inbound)),
         };
@@ -259,10 +297,11 @@ impl EliFramework {
         rt.call_provide_tape_store()
     }
 
-    /// Collect and join system prompt fragments from all plugins.
+    /// Build the system prompt via the hook chain.
     pub async fn get_system_prompt(&self, prompt: &PromptValue, state: &State) -> String {
         let rt = self.hook_runtime.read().await;
-        rt.call_system_prompt(prompt, state)
+        rt.call_build_system_prompt(&prompt.as_text(), state)
+            .unwrap_or_default()
     }
 
     // -- Internal helpers ---------------------------------------------------
@@ -360,7 +399,7 @@ mod tests {
             "prompt-plugin"
         }
 
-        fn system_prompt(&self, _prompt: &PromptValue, _state: &State) -> Option<String> {
+        fn build_system_prompt(&self, _prompt_text: &str, _state: &State) -> Option<String> {
             Some(self.fragment.clone())
         }
     }
@@ -443,7 +482,7 @@ mod tests {
     // -- get_system_prompt ----------------------------------------------------
 
     #[tokio::test]
-    async fn test_get_system_prompt_joins_fragments() {
+    async fn test_get_system_prompt_returns_first_result() {
         let fw = EliFramework::new();
         fw.register_plugin(
             "low",
@@ -462,8 +501,8 @@ mod tests {
         let prompt = PromptValue::Text("hello".into());
         let state = State::new();
         let result = fw.get_system_prompt(&prompt, &state).await;
-        // Reversed: high first, then low
-        assert_eq!(result, "high\n\nlow");
+        // Last-registered (high) wins
+        assert_eq!(result, "high");
     }
 
     // -- process_inbound (full pipeline) --------------------------------------

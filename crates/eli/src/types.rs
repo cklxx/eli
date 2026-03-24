@@ -225,8 +225,8 @@ mod tests {
     fn test_prompt_value_strict_text_no_text_type() {
         // Parts without "type": "text" should be excluded
         let pv = PromptValue::Parts(vec![
-            json!({"text": "bare"}),           // no type field
-            json!("plain string"),              // not an object
+            json!({"text": "bare"}), // no type field
+            json!("plain string"),   // not an object
             json!({"type": "image", "url": "x"}),
         ]);
         assert_eq!(pv.strict_text(), "");

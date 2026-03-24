@@ -19,7 +19,6 @@ use crate::builtin::tools::with_tape_runtime;
 use crate::prompt_builder::{PromptBuilder, PromptMode};
 use crate::skill_matcher::{MatchContext, SkillMatcher};
 use crate::skills::discover_skills;
-use crate::smart_router::ROUTE_CONTEXT_KEY;
 use crate::tools::{REGISTRY, model_tools};
 use crate::types::PromptValue;
 
@@ -423,16 +422,8 @@ fn build_system_prompt(
     allowed_skills: Option<&HashSet<String>>,
     workspace: &Path,
 ) -> String {
-    // Determine prompt mode from route decision (set by smart_router).
-    let mode = state
-        .get(ROUTE_CONTEXT_KEY)
-        .and_then(|v| v.as_str())
-        .and_then(|s| match s {
-            "direct" => Some(PromptMode::Minimal),
-            "think" | "delegate" => Some(PromptMode::Full),
-            _ => None,
-        })
-        .unwrap_or(PromptMode::Full);
+    // All messages that reach here go through the full pipeline.
+    // Greet messages are short-circuited in framework.rs and never arrive here.
 
     // Auto-activate skills via multi-signal matching.
     let skills = discover_skills(workspace);
@@ -448,7 +439,7 @@ fn build_system_prompt(
     };
     let auto_expanded = matcher.match_skills(&skills, &match_ctx);
 
-    PromptBuilder::new(mode).build(
+    PromptBuilder::new(PromptMode::Full).build(
         settings,
         prompt_text,
         state,
@@ -909,7 +900,7 @@ mod tests {
         let home = tmp.path().join("home");
         std::fs::create_dir_all(workspace.join(".agents")).unwrap();
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(workspace.join(".agents").join("PROMPT.md"), "base prompt").unwrap();
+        std::fs::write(workspace.join(".agents").join("SOUL.md"), "base prompt").unwrap();
         std::fs::write(workspace.join("AGENTS.md"), "workspace agents guidance").unwrap();
 
         let prompt = build_system_prompt(
