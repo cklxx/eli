@@ -1,66 +1,109 @@
-# Repository Guidelines
+# Eli — Agent Contract
 
-## Project Structure & Module Organization
+Minimize mandatory reading. Expand context only when triggered.
 
-Core Rust code lives under `crates/`:
+## 0. Read Policy
 
-- `crates/eli/src/main.rs`: CLI entrypoint.
-- `crates/eli/src/framework.rs`: inbound turn orchestration and outbound dispatch.
-- `crates/eli/src/hooks.rs`: hook traits, runtime ordering, and hook reports.
-- `crates/eli/src/builtin/`: builtin agent runtime, CLI commands, channels, config, tape services, and tools.
-- `crates/eli/src/channels/`: CLI, Telegram, and webhook channel adapters.
-- `crates/eli/src/skills.rs` / `crates/eli/src/tools.rs`: skill discovery/rendering and tool registry.
-- `crates/conduit/src/`: provider-agnostic LLM clients, execution, auth, and tape storage.
+1. Read **§1** on every task.
+2. Read **§2** only when a trigger matches.
+3. No trigger? Follow **§3** and stop expanding context.
 
-Supporting code lives in:
+---
 
-- `sidecar/src/`: Node/TypeScript OpenClaw bridge used by webhook channels.
-- `docs/`: architecture, channel, deployment, and extension docs.
-- `.github/workflows/`: CI for `check`, `test`, `fmt`, and `clippy`.
+## 1. Mandatory Core
 
-## Build, Test, and Development Commands
+### 1.1 Identity and priority
+- Greet **ckl** at conversation start.
+- Priority: **safety > correctness > maintainability > speed**.
+- User: senior Rust/backend engineer; values deep reasoning, clean architecture.
 
-- `cargo build --workspace`: build all Rust crates.
-- `cargo run -p eli -- chat`: run the interactive CLI.
-- `cargo run -p eli -- run "hello"`: run one inbound message through the framework pipeline.
-- `cargo run -p eli -- gateway`: start the channel listener mode.
-- `cargo test --workspace`: run the Rust test suite.
-- `cargo fmt --all`: format all Rust code.
-- `cargo clippy --workspace -- -D warnings`: lint Rust code with warnings denied.
-- `just build` / `just install` / `just test`: convenience wrappers for common cargo workflows.
-- `cd sidecar && npm start`: run the sidecar locally.
-- `cd sidecar && bun test`: run sidecar tests when touching bridge code.
+### 1.2 Code style (non-negotiable)
+- Max function body: **15 lines**. Extract or redesign if exceeded.
+- No comments that restate code. Only "why" comments for non-obvious decisions.
+- Prefer composition over inheritance. Prefer data transforms over mutation.
+- Every abstraction must justify itself: if used <2 places, inline it.
+- Delete dead code immediately. No TODOs in committed code.
+- Type signatures are documentation. Verbose names > comments.
+- Between two correct approaches, pick the one with fewer moving parts.
+- Trust type/caller invariants; no unnecessary defensive code.
+- No compatibility shims when requirements change; redesign cleanly.
+- Modify only relevant files.
+- Rust edition `2024`, 4-space indentation. `snake_case` for modules/functions/variables, `PascalCase` for types, `UPPER_SNAKE_CASE` for constants.
 
-## Coding Style & Naming Conventions
+Reference density:
+```rust
+fn authenticate(token: &str, secret: &str) -> Result<Claims, AuthError> {
+    decode(token)
+        .and_then(|t| verify(t, secret))
+        .map_err(AuthError::from)
+}
+```
+No wrapper structs for one field. No builders unless >4 params. Transform pipeline.
 
-- Rust edition `2024`, 4-space indentation, and explicit types where they improve clarity.
-- Use `snake_case` for modules/functions/variables, `PascalCase` for types, and `UPPER_SNAKE_CASE` for constants.
-- Keep hook ordering, prompt assembly, and tool execution deterministic; avoid hidden side effects.
-- Prefer cohesive refactors when the current runtime shape is the source of the bug instead of layering narrow patches on top.
-- Format with `cargo fmt` and keep `cargo clippy -- -D warnings` clean.
-- In `sidecar/`, preserve the existing TypeScript ESM style and keep runtime contracts aligned with the Rust side.
+### 1.3 Branch safety
+- Use worktree for code changes; never edit directly on `main`.
+- On `main`, run before any edit:
+  1. `git diff --stat` + `git log --oneline -10`
+  2. If suspicious diffs: report to ckl before continuing.
 
-## Testing Guidelines
+### 1.4 Prior art
+- Before implementing non-trivial logic, WebSearch for how the world solves it. Prior art > invention. Skip for trivial or project-specific changes.
+
+### 1.5 Delivery
+- Prefer TDD for logic changes; cover edge cases.
+- Run lint + tests before delivery: `cargo fmt --all -- --check && cargo clippy --workspace -- -D warnings && cargo test --workspace`.
+- Fix P0/P1 before commit; follow-up for P2.
+- Small, scoped commits. Warn before destructive ops.
+- Follow Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`.
+
+---
+
+## 2. Progressive Disclosure (trigger-gated)
+
+| Trigger | Load |
+|---|---|
+| Non-trivial staged execution | CLAUDE.md Execution Workflow; create `docs/plans/*` |
+| Architecture boundaries (`crates/**`) | Architecture section in CLAUDE.md + key references |
+| Hook/trait changes | List all implementors, mark blast radius before editing |
+| Memory/history retrieval | Auto memory + `docs/experience/` summaries first |
+| Large mechanical edits | Agent tool: explore → plan → execute → review, max 2 retries |
+| User correction | Codify preventive feedback memory before resuming |
+| Sidecar changes (`sidecar/`) | Preserve TypeScript ESM style, keep contracts aligned with Rust side |
+
+No trigger → do not load.
+
+---
+
+## 3. Default Route
+
+1. Read §1 only.
+2. Inspect target files and neighboring patterns.
+3. Implement minimal correct change.
+4. Proportionate verification (scoped tests/lint).
+5. Commit and report.
+
+---
+
+## 4. Project Snapshot
+
+- Product: hook-first AI agent framework (CLI, Telegram, Webhook).
+- Two-crate workspace: `conduit` (LLM toolkit) → `eli` (agent framework).
+- Turn pipeline: `resolve_session → load_state → build_prompt → run_model → save_state → render_outbound → dispatch_outbound`.
+- Key dirs: `crates/eli/src/` (framework, hooks, builtins, channels, skills, tools), `crates/conduit/src/` (LLM, auth, tape), `sidecar/` (OpenClaw bridge).
+- Config: `ELI_*` env vars, `.env` for secrets, `~/.eli/config.toml` for profiles.
+
+---
+
+## 5. Testing Guidelines
 
 - Add or update Rust unit tests close to the changed code with `#[cfg(test)]`.
-- Prefer behavior-oriented test names such as `test_build_system_prompt_appends_workspace_agents_guidance`.
-- Use `tempfile` workspaces for tests that depend on filesystem state, tapes, prompts, or `AGENTS.md`.
-- Cover prompt composition, hook precedence, channel routing, tape persistence, and tool wiring when changing runtime behavior.
+- Prefer behavior-oriented test names: `test_build_system_prompt_appends_workspace_agents_guidance`.
+- Use `tempfile` workspaces for tests that depend on filesystem state.
+- Cover prompt composition, hook precedence, channel routing, tape persistence, and tool wiring.
 - If sidecar behavior changes, add or update tests under `sidecar/test/`.
 
-## Commit & Pull Request Guidelines
+---
 
-- Follow Conventional Commits such as `feat:`, `fix:`, `docs:`, and `chore:`.
-- Keep commits focused; separate runtime, sidecar, and docs changes when they can stand alone.
-- For PRs, include:
-  - what changed and why
-  - impacted crates, commands, or channels
-  - verification performed (`cargo test`, `cargo fmt --check`, `cargo clippy`, sidecar tests if relevant)
-  - docs updates when CLI behavior, configuration, or architecture changed
+## 6. Detail Sources (trigger-gated only)
 
-## Security & Configuration Tips
-
-- Use `.env` for local secrets; never commit credentials.
-- Eli runtime settings are driven by `ELI_*` variables such as `ELI_MODEL`, `ELI_API_KEY`, `ELI_API_BASE`, and `ELI_MAX_STEPS`.
-- Provider-specific credentials may also be resolved from local auth stores handled by `conduit`.
-- Webhook/sidecar deployments use `sidecar/sidecar.json`; Telegram deployments require `ELI_TELEGRAM_TOKEN`.
+`CLAUDE.md` · `docs/plans/` · `docs/experience/errors/` · `docs/experience/wins/`

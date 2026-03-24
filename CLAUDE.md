@@ -32,6 +32,7 @@ Non-trivial tasks follow phases. **Each phase runs in its own Agent context** to
 
 **Posture**: Contractor. Build to spec. Spec wrong → fix spec first.
 
+- Before writing code → WebSearch for how others solved this. Prior art > invention. Skip for trivial/project-specific changes
 - Want to change something outside the plan → stop. Update plan or note it for later
 - Completed a logical unit → `cargo check` immediately
 - Writing new code → match adjacent code style (error handling, logging, naming)
