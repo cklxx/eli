@@ -157,6 +157,12 @@ impl TapeManager {
                 .append(tape, &TapeEntry::tool_call(tc.to_vec(), meta.clone()))?;
         }
 
+        if let Some(rt) = response_text {
+            let msg = serde_json::json!({ "role": "assistant", "content": rt });
+            self.store
+                .append(tape, &TapeEntry::message(msg, meta.clone()))?;
+        }
+
         if let Some(tr) = tool_results {
             self.store
                 .append(tape, &TapeEntry::tool_result(tr.to_vec(), meta.clone()))?;
@@ -169,12 +175,6 @@ impl TapeManager {
                 self.store
                     .append(tape, &TapeEntry::error(err, meta.clone()))?;
             }
-        }
-
-        if let Some(rt) = response_text {
-            let msg = serde_json::json!({ "role": "assistant", "content": rt });
-            self.store
-                .append(tape, &TapeEntry::message(msg, meta.clone()))?;
         }
 
         let mut data = serde_json::Map::new();
@@ -380,6 +380,13 @@ impl AsyncTapeManager {
                 .await?;
         }
 
+        if let Some(rt) = response_text {
+            let msg = serde_json::json!({ "role": "assistant", "content": rt });
+            self.store
+                .append(tape, &TapeEntry::message(msg, meta.clone()))
+                .await?;
+        }
+
         if let Some(tr) = tool_results {
             self.store
                 .append(tape, &TapeEntry::tool_result(tr.to_vec(), meta.clone()))
@@ -393,13 +400,6 @@ impl AsyncTapeManager {
                     .append(tape, &TapeEntry::error(err, meta.clone()))
                     .await?;
             }
-        }
-
-        if let Some(rt) = response_text {
-            let msg = serde_json::json!({ "role": "assistant", "content": rt });
-            self.store
-                .append(tape, &TapeEntry::message(msg, meta.clone()))
-                .await?;
         }
 
         let mut data = serde_json::Map::new();
@@ -856,6 +856,54 @@ mod tests {
     }
 
     #[test]
+    fn test_record_chat_response_text_before_tool_results() {
+        let store = InMemoryTapeStore::new();
+        let manager = TapeManager::new(Some(Box::new(store.clone())), None);
+
+        let tool_calls = vec![json!({"id": "c1", "type": "function", "function": {"name": "greet", "arguments": "{}"}})];
+        let tool_results = vec![json!({"tool_call_id": "c1", "content": "hello"})];
+
+        manager
+            .record_chat(
+                "t",
+                "r1",
+                None,
+                None,
+                &[json!({"role": "user", "content": "hi"})],
+                Some("thinking aloud"),
+                Some(&tool_calls),
+                Some(&tool_results),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let entries = store.read("t").unwrap();
+        let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
+
+        // Find the assistant response message (has role=assistant in payload)
+        let response_pos = entries
+            .iter()
+            .position(|e| {
+                e.kind == "message"
+                    && e.payload.get("role").and_then(|v| v.as_str()) == Some("assistant")
+            });
+        let tool_result_pos = kinds.iter().position(|k| *k == "tool_result");
+
+        assert!(response_pos.is_some(), "expected an assistant message entry");
+        assert!(tool_result_pos.is_some(), "expected a tool_result entry");
+        assert!(
+            response_pos.unwrap() < tool_result_pos.unwrap(),
+            "response_text (pos {}) must appear before tool_result (pos {}), got kinds: {:?}",
+            response_pos.unwrap(),
+            tool_result_pos.unwrap(),
+            kinds,
+        );
+    }
+
+    #[test]
     fn test_record_chat_three_calls_same_prompt_only_one_system() {
         let store = InMemoryTapeStore::new();
         let manager = TapeManager::new(Some(Box::new(store.clone())), None);
@@ -881,4 +929,5 @@ mod tests {
         assert_eq!(entries.iter().filter(|e| e.kind == "system").count(), 1);
         assert_eq!(entries.iter().filter(|e| e.kind == "message").count(), 6); // 3 user + 3 assistant
     }
+
 }
