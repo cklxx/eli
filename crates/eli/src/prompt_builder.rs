@@ -255,6 +255,10 @@ fn load_system_prompt_base(settings: &AgentSettings, workspace: &Path) -> String
     default_system_prompt().to_owned()
 }
 
+/// Fallback system prompt used only when no SOUL.md is found in the project
+/// (`.agents/SOUL.md`) or user home (`~/.eli/SOUL.md`). In practice most
+/// deployments have a SOUL.md, so edits here rarely take effect — update the
+/// SOUL.md file instead.
 fn default_system_prompt() -> &'static str {
     "You are Eli, a helpful AI coding assistant.\n\
      \n\
