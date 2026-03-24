@@ -10,6 +10,83 @@ use crate::tape::query::TapeQuery;
 use crate::tape::store::{AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore, TapeStore};
 
 // ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Build the run-event data object for a chat turn.
+fn run_event_data(
+    error: Option<&ErrorPayload>,
+    usage: Option<Value>,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Value {
+    let mut data = serde_json::Map::new();
+    let status = if error.is_some() { "error" } else { "ok" };
+    data.insert("status".into(), Value::String(status.into()));
+    if let Some(u) = usage {
+        data.insert("usage".into(), u);
+    }
+    if let Some(p) = provider
+        && !p.is_empty()
+    {
+        data.insert("provider".into(), Value::String(p.into()));
+    }
+    if let Some(m) = model
+        && !m.is_empty()
+    {
+        data.insert("model".into(), Value::String(m.into()));
+    }
+    Value::Object(data)
+}
+
+/// Build all non-system entries for a chat turn in correct order:
+/// context_error → messages → tool_calls → response_text → tool_results → error → run event.
+#[allow(clippy::too_many_arguments)]
+fn build_chat_entries(
+    meta: &Value,
+    context_error: Option<&ErrorPayload>,
+    new_messages: &[Value],
+    tool_calls: Option<&[Value]>,
+    response_text: Option<&str>,
+    tool_results: Option<&[Value]>,
+    error: Option<&ErrorPayload>,
+    usage: Option<Value>,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Vec<TapeEntry> {
+    let mut entries = Vec::new();
+    if let Some(ce) = context_error {
+        entries.push(TapeEntry::error(ce, meta.clone()));
+    }
+    for msg in new_messages {
+        entries.push(TapeEntry::message(msg.clone(), meta.clone()));
+    }
+    if let Some(tc) = tool_calls
+        && !tc.is_empty()
+    {
+        entries.push(TapeEntry::tool_call(tc.to_vec(), meta.clone()));
+    }
+    if let Some(rt) = response_text {
+        let msg = serde_json::json!({ "role": "assistant", "content": rt });
+        entries.push(TapeEntry::message(msg, meta.clone()));
+    }
+    if let Some(tr) = tool_results {
+        entries.push(TapeEntry::tool_result(tr.to_vec(), meta.clone()));
+    }
+    if let Some(err) = error
+        && !context_error.is_some_and(|ce| ce == err)
+    {
+        entries.push(TapeEntry::error(err, meta.clone()));
+    }
+    entries.push(TapeEntry::event(
+        "run",
+        Some(run_event_data(error, usage, provider, model)),
+        meta.clone(),
+    ));
+    entries
+}
+
+// ---------------------------------------------------------------------------
 // TapeManager (sync)
 // ---------------------------------------------------------------------------
 
@@ -113,9 +190,6 @@ impl TapeManager {
     }
 
     /// Record a complete chat turn to the tape.
-    ///
-    /// The system prompt is only written when the tape has no existing system
-    /// entry or when the content has changed.
     #[allow(clippy::too_many_arguments)]
     pub fn record_chat(
         &self,
@@ -133,73 +207,25 @@ impl TapeManager {
         model: Option<&str>,
     ) -> Result<(), ConduitError> {
         let meta = serde_json::json!({ "run_id": run_id });
-
         if let Some(sp) = system_prompt
             && !sp.is_empty()
         {
             self.append_system_if_changed(tape, sp, meta.clone())?;
         }
-
-        if let Some(ce) = context_error {
-            self.store
-                .append(tape, &TapeEntry::error(ce, meta.clone()))?;
+        for entry in build_chat_entries(
+            &meta,
+            context_error,
+            new_messages,
+            tool_calls,
+            response_text,
+            tool_results,
+            error,
+            usage,
+            provider,
+            model,
+        ) {
+            self.store.append(tape, &entry)?;
         }
-
-        for message in new_messages {
-            self.store
-                .append(tape, &TapeEntry::message(message.clone(), meta.clone()))?;
-        }
-
-        if let Some(tc) = tool_calls
-            && !tc.is_empty()
-        {
-            self.store
-                .append(tape, &TapeEntry::tool_call(tc.to_vec(), meta.clone()))?;
-        }
-
-        if let Some(rt) = response_text {
-            let msg = serde_json::json!({ "role": "assistant", "content": rt });
-            self.store
-                .append(tape, &TapeEntry::message(msg, meta.clone()))?;
-        }
-
-        if let Some(tr) = tool_results {
-            self.store
-                .append(tape, &TapeEntry::tool_result(tr.to_vec(), meta.clone()))?;
-        }
-
-        // Only append error if it is different from context_error
-        if let Some(err) = error {
-            let is_duplicate = context_error.is_some_and(|ce| ce == err);
-            if !is_duplicate {
-                self.store
-                    .append(tape, &TapeEntry::error(err, meta.clone()))?;
-            }
-        }
-
-        let mut data = serde_json::Map::new();
-        data.insert(
-            "status".into(),
-            Value::String(if error.is_some() { "error" } else { "ok" }.into()),
-        );
-        if let Some(u) = usage {
-            data.insert("usage".into(), u);
-        }
-        if let Some(p) = provider
-            && !p.is_empty()
-        {
-            data.insert("provider".into(), Value::String(p.into()));
-        }
-        if let Some(m) = model
-            && !m.is_empty()
-        {
-            data.insert("model".into(), Value::String(m.into()));
-        }
-        self.store.append(
-            tape,
-            &TapeEntry::event("run", Some(Value::Object(data)), meta),
-        )?;
-
         Ok(())
     }
 }
@@ -332,9 +358,6 @@ impl AsyncTapeManager {
     }
 
     /// Record a complete chat turn to the tape.
-    ///
-    /// The system prompt is only written when the tape has no existing system
-    /// entry or when the content has changed.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_chat(
         &self,
@@ -352,81 +375,26 @@ impl AsyncTapeManager {
         model: Option<&str>,
     ) -> Result<(), ConduitError> {
         let meta = serde_json::json!({ "run_id": run_id });
-
         if let Some(sp) = system_prompt
             && !sp.is_empty()
         {
             self.append_system_if_changed(tape, sp, meta.clone())
                 .await?;
         }
-
-        if let Some(ce) = context_error {
-            self.store
-                .append(tape, &TapeEntry::error(ce, meta.clone()))
-                .await?;
+        for entry in build_chat_entries(
+            &meta,
+            context_error,
+            new_messages,
+            tool_calls,
+            response_text,
+            tool_results,
+            error,
+            usage,
+            provider,
+            model,
+        ) {
+            self.store.append(tape, &entry).await?;
         }
-
-        for message in new_messages {
-            self.store
-                .append(tape, &TapeEntry::message(message.clone(), meta.clone()))
-                .await?;
-        }
-
-        if let Some(tc) = tool_calls
-            && !tc.is_empty()
-        {
-            self.store
-                .append(tape, &TapeEntry::tool_call(tc.to_vec(), meta.clone()))
-                .await?;
-        }
-
-        if let Some(rt) = response_text {
-            let msg = serde_json::json!({ "role": "assistant", "content": rt });
-            self.store
-                .append(tape, &TapeEntry::message(msg, meta.clone()))
-                .await?;
-        }
-
-        if let Some(tr) = tool_results {
-            self.store
-                .append(tape, &TapeEntry::tool_result(tr.to_vec(), meta.clone()))
-                .await?;
-        }
-
-        if let Some(err) = error {
-            let is_duplicate = context_error.is_some_and(|ce| ce == err);
-            if !is_duplicate {
-                self.store
-                    .append(tape, &TapeEntry::error(err, meta.clone()))
-                    .await?;
-            }
-        }
-
-        let mut data = serde_json::Map::new();
-        data.insert(
-            "status".into(),
-            Value::String(if error.is_some() { "error" } else { "ok" }.into()),
-        );
-        if let Some(u) = usage {
-            data.insert("usage".into(), u);
-        }
-        if let Some(p) = provider
-            && !p.is_empty()
-        {
-            data.insert("provider".into(), Value::String(p.into()));
-        }
-        if let Some(m) = model
-            && !m.is_empty()
-        {
-            data.insert("model".into(), Value::String(m.into()));
-        }
-        self.store
-            .append(
-                tape,
-                &TapeEntry::event("run", Some(Value::Object(data)), meta),
-            )
-            .await?;
-
         Ok(())
     }
 }
