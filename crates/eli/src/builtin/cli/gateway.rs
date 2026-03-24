@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use crate::channels::message::ChannelMessage;
+use base64::Engine;
+use serde_json::Value;
+
+use crate::channels::message::{ChannelMessage, MediaItem, MediaType};
 
 /// Resolve the sidecar directory. Search order:
 ///   1. `ELI_SIDECAR_DIR` env var
@@ -296,7 +299,12 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
                 };
 
                 let inbound_context = msg.context.clone();
-                let inbound = serde_json::json!({
+
+                // Resolve image media into base64 content blocks before
+                // converting to the JSON envelope (which cannot carry DataFetcher).
+                let media_parts = resolve_image_media(&msg.media).await;
+
+                let mut inbound = serde_json::json!({
                     "session_id": msg.session_id,
                     "channel": msg.channel,
                     "chat_id": msg.chat_id,
@@ -305,6 +313,9 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
                     "kind": msg.kind,
                     "output_channel": output_channel,
                 });
+                if !media_parts.is_empty() {
+                    inbound["media_parts"] = serde_json::json!(media_parts);
+                }
 
                 // Spawn processing so the main loop stays responsive to cancel.
                 let fw = framework.clone();
@@ -407,4 +418,44 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     }
     println!("Gateway stopped.");
     Ok(())
+}
+
+/// Maximum raw image size to embed (20 MB).
+const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
+/// Resolve image `MediaItem`s into provider-agnostic base64 content blocks.
+///
+/// Returns blocks of the form `{"type": "image_base64", "mime_type": "…", "data": "…"}`.
+/// Conduit's `normalize_image_content_blocks` rewrites these to the correct
+/// provider format (Anthropic or OpenAI) before the API call.
+async fn resolve_image_media(media: &[MediaItem]) -> Vec<Value> {
+    let mut parts = Vec::new();
+    for item in media {
+        if item.media_type != MediaType::Image {
+            continue;
+        }
+        let Some(ref fetcher) = item.data_fetcher else {
+            continue;
+        };
+        let bytes = fetcher().await;
+        if bytes.is_empty() {
+            tracing::warn!(mime = %item.mime_type, "image fetch returned empty bytes, skipping");
+            continue;
+        }
+        if bytes.len() > MAX_IMAGE_BYTES {
+            tracing::warn!(
+                size = bytes.len(),
+                limit = MAX_IMAGE_BYTES,
+                "image exceeds size limit, skipping"
+            );
+            continue;
+        }
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        parts.push(serde_json::json!({
+            "type": "image_base64",
+            "mime_type": item.mime_type,
+            "data": b64,
+        }));
+    }
+    parts
 }

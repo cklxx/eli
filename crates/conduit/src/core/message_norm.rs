@@ -16,7 +16,10 @@ pub fn normalize_messages_for_api(messages: Vec<Value>, transport: TransportKind
         .into_iter()
         .map(|message| normalize_message_tool_calls(&message))
         .collect();
-    let result = prune_orphan_tool_messages(normalized_messages);
+    let mut result = prune_orphan_tool_messages(normalized_messages);
+
+    // Rewrite provider-agnostic image_base64 blocks to transport-specific format.
+    normalize_image_content_blocks(&mut result, transport);
 
     // Anthropic-specific role merging is intentionally deferred to
     // `build_messages_body`, where tool results have already been converted into
@@ -27,6 +30,51 @@ pub fn normalize_messages_for_api(messages: Vec<Value>, transport: TransportKind
     }
 
     result
+}
+
+/// Rewrite `image_base64` content blocks into the provider-specific format.
+///
+/// - **Anthropic Messages**: `{"type": "image", "source": {"type": "base64", "media_type": m, "data": d}}`
+/// - **OpenAI Completion/Responses**: `{"type": "image_url", "image_url": {"url": "data:{m};base64,{d}"}}`
+fn normalize_image_content_blocks(messages: &mut [Value], transport: TransportKind) {
+    for msg in messages.iter_mut() {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
+            continue;
+        }
+        let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) else {
+            continue;
+        };
+        for block in content.iter_mut() {
+            if block.get("type").and_then(|t| t.as_str()) != Some("image_base64") {
+                continue;
+            }
+            let mime = block
+                .get("mime_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("image/jpeg");
+            let data = block.get("data").and_then(|v| v.as_str()).unwrap_or("");
+            *block = match transport {
+                TransportKind::Messages => {
+                    serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime,
+                            "data": data,
+                        }
+                    })
+                }
+                TransportKind::Completion | TransportKind::Responses => {
+                    serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{mime};base64,{data}"),
+                        }
+                    })
+                }
+            };
+        }
+    }
 }
 
 /// Remove orphan tool_use assistant messages and orphan tool_result messages.
@@ -165,4 +213,70 @@ pub(crate) fn enforce_anthropic_message_rules(messages: Vec<Value>) -> Vec<Value
     }
 
     result
+}
+
+#[cfg(test)]
+mod image_norm_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn anthropic_format() {
+        let mut msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is this?"},
+                {"type": "image_base64", "mime_type": "image/png", "data": "iVBOR"}
+            ]
+        })];
+        normalize_image_content_blocks(&mut msgs, TransportKind::Messages);
+
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "iVBOR");
+    }
+
+    #[test]
+    fn openai_format() {
+        let mut msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe"},
+                {"type": "image_base64", "mime_type": "image/jpeg", "data": "/9j/4A"}
+            ]
+        })];
+        normalize_image_content_blocks(&mut msgs, TransportKind::Completion);
+
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/jpeg;base64,/9j/4A"
+        );
+    }
+
+    #[test]
+    fn skips_non_user_messages() {
+        let mut msgs = vec![json!({
+            "role": "assistant",
+            "content": [
+                {"type": "image_base64", "mime_type": "image/png", "data": "abc"}
+            ]
+        })];
+        normalize_image_content_blocks(&mut msgs, TransportKind::Messages);
+        assert_eq!(msgs[0]["content"][0]["type"], "image_base64");
+    }
+
+    #[test]
+    fn skips_string_content() {
+        let mut msgs = vec![json!({
+            "role": "user",
+            "content": "just text"
+        })];
+        normalize_image_content_blocks(&mut msgs, TransportKind::Messages);
+        assert_eq!(msgs[0]["content"], "just text");
+    }
 }

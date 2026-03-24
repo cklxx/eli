@@ -304,8 +304,14 @@ impl UsageEvent {
         let usage = raw.as_object()?;
         Some(Self {
             model: model.to_owned(),
-            input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            input_tokens: usage
+                .get("input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            output_tokens: usage
+                .get("output_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
             attempt,
             success,
             timestamp: chrono::Utc::now().to_rfc3339(),

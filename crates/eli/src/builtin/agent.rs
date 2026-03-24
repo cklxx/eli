@@ -580,11 +580,8 @@ async fn agent_loop(
                         }
                     } else if !output.usage.is_empty() {
                         // No active grace — check whether to trigger.
-                        let input_tokens = output
-                            .usage
-                            .last()
-                            .map(|u| u.input_tokens)
-                            .unwrap_or(0) as usize;
+                        let input_tokens =
+                            output.usage.last().map(|u| u.input_tokens).unwrap_or(0) as usize;
                         let threshold = settings.context_window * 70 / 100;
                         if input_tokens >= threshold {
                             // 1. Remember the current (soon-to-be-previous) anchor.
@@ -706,7 +703,13 @@ async fn run_tools_once(
         runnable: tools,
     };
 
-    let prompt_text = prompt.strict_text();
+    // For multimodal prompts (Parts), pass content blocks via user_content
+    // so the LLM receives image data. For plain text, use the string path.
+    let (prompt_str, user_content) = match prompt {
+        PromptValue::Parts(parts) => (None, Some(parts.clone())),
+        _ => (Some(prompt.strict_text()), None),
+    };
+    let prompt_ref = prompt_str.as_deref();
 
     // Create tool context for execution.
     let tool_ctx = build_tool_context("agent_loop", tape_name, tool_state);
@@ -714,7 +717,8 @@ async fn run_tools_once(
     // Call run_tools — it handles tape reading/writing internally.
     let result = llm
         .run_tools(ChatRequest {
-            prompt: Some(&prompt_text),
+            prompt: prompt_ref,
+            user_content,
             system_prompt: Some(system_prompt),
             max_tokens: Some(settings.max_tokens as u32),
             tools: Some(&tool_set),

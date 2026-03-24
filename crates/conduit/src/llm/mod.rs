@@ -53,6 +53,9 @@ pub type StreamEventFilter = Arc<dyn Fn(StreamEvent) -> Option<StreamEvent> + Se
 #[derive(Default)]
 pub struct ChatRequest<'a> {
     pub prompt: Option<&'a str>,
+    /// Multimodal content blocks for the user message (text + image).
+    /// When set, takes precedence over `prompt`.
+    pub user_content: Option<Vec<Value>>,
     pub system_prompt: Option<&'a str>,
     pub model: Option<&'a str>,
     pub provider: Option<&'a str>,
@@ -493,6 +496,7 @@ impl LLM {
     pub async fn chat_async(&mut self, req: ChatRequest<'_>) -> Result<String, ConduitError> {
         let ChatRequest {
             prompt,
+            user_content,
             system_prompt,
             model,
             provider,
@@ -509,7 +513,12 @@ impl LLM {
             Vec::new()
         };
 
-        let mut msgs = build_messages(prompt, system_prompt, messages.as_deref());
+        let mut msgs = build_messages(
+            prompt,
+            user_content.as_deref(),
+            system_prompt,
+            messages.as_deref(),
+        );
         if !tape_messages.is_empty() {
             // Prepend tape history before the new messages (after system prompt).
             let system_count = msgs
@@ -581,6 +590,7 @@ impl LLM {
     pub async fn tool_calls(&mut self, req: ChatRequest<'_>) -> Result<Vec<Value>, ConduitError> {
         let ChatRequest {
             prompt,
+            user_content,
             system_prompt,
             model,
             provider,
@@ -592,7 +602,12 @@ impl LLM {
         let tools = tools.ok_or_else(|| {
             ConduitError::new(ErrorKind::InvalidInput, "tool_calls requires tools")
         })?;
-        let msgs = build_messages(prompt, system_prompt, messages.as_deref());
+        let msgs = build_messages(
+            prompt,
+            user_content.as_deref(),
+            system_prompt,
+            messages.as_deref(),
+        );
         let schemas = tools.payload().map(|s| s.to_vec());
         let response =
             self.core
@@ -621,6 +636,7 @@ impl LLM {
     ) -> Result<ToolAutoResult, ConduitError> {
         let ChatRequest {
             prompt,
+            user_content,
             system_prompt,
             model,
             provider,
@@ -643,7 +659,12 @@ impl LLM {
         // Accumulate usage events from all API rounds.
         let mut usage_events: Vec<UsageEvent> = Vec::new();
 
-        let initial_round_msgs = build_messages(prompt, system_prompt, messages.as_deref());
+        let initial_round_msgs = build_messages(
+            prompt,
+            user_content.as_deref(),
+            system_prompt,
+            messages.as_deref(),
+        );
         let mut in_memory_msgs = initial_round_msgs.clone();
 
         if let Some(tape_name) = tape
@@ -967,6 +988,7 @@ impl LLM {
     pub async fn stream(&mut self, req: ChatRequest<'_>) -> Result<AsyncTextStream, ConduitError> {
         let ChatRequest {
             prompt,
+            user_content,
             system_prompt,
             model,
             provider,
@@ -984,7 +1006,12 @@ impl LLM {
             Vec::new()
         };
 
-        let mut msgs = build_messages(prompt, system_prompt, messages.as_deref());
+        let mut msgs = build_messages(
+            prompt,
+            user_content.as_deref(),
+            system_prompt,
+            messages.as_deref(),
+        );
         if !tape_messages.is_empty() {
             let system_count = msgs
                 .iter()
@@ -1367,6 +1394,7 @@ pub(crate) fn default_api_base(provider: &str) -> String {
 
 fn build_messages(
     prompt: Option<&str>,
+    user_content: Option<&[Value]>,
     system_prompt: Option<&str>,
     messages: Option<&[Value]>,
 ) -> Vec<Value> {
@@ -1377,7 +1405,10 @@ fn build_messages(
     if let Some(existing) = messages {
         msgs.extend_from_slice(existing);
     }
-    if let Some(p) = prompt {
+    // Prefer multimodal content blocks over plain text prompt.
+    if let Some(parts) = user_content {
+        msgs.push(serde_json::json!({"role": "user", "content": parts}));
+    } else if let Some(p) = prompt {
         msgs.push(serde_json::json!({"role": "user", "content": p}));
     }
     msgs

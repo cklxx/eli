@@ -279,7 +279,20 @@ impl EliHookSpec for BuiltinImpl {
         _session_id: &str,
         _state: &State,
     ) -> Option<PromptValue> {
-        Some(self.build_prompt(&envelope_to_channel_message(message)))
+        let text_prompt = self.build_prompt(&envelope_to_channel_message(message));
+
+        // If the envelope carries resolved image content blocks, return a
+        // multimodal Parts prompt so the LLM receives them as vision input.
+        if let Some(parts) = message.get("media_parts").and_then(|v| v.as_array())
+            && !parts.is_empty()
+        {
+            let mut content =
+                vec![serde_json::json!({"type": "text", "text": text_prompt.as_text()})];
+            content.extend(parts.iter().cloned());
+            return Some(PromptValue::Parts(content));
+        }
+
+        Some(text_prompt)
     }
 
     async fn run_model(

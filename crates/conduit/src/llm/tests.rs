@@ -227,7 +227,7 @@ fn test_embed_input_from_slice() {
 
 #[test]
 fn test_build_messages_with_prompt_only() {
-    let msgs = build_messages(Some("hello"), None, None);
+    let msgs = build_messages(Some("hello"), None, None, None);
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0]["role"], "user");
     assert_eq!(msgs[0]["content"], "hello");
@@ -235,7 +235,7 @@ fn test_build_messages_with_prompt_only() {
 
 #[test]
 fn test_build_messages_with_system_and_prompt() {
-    let msgs = build_messages(Some("hello"), Some("you are helpful"), None);
+    let msgs = build_messages(Some("hello"), None, Some("you are helpful"), None);
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0]["role"], "system");
     assert_eq!(msgs[0]["content"], "you are helpful");
@@ -245,7 +245,7 @@ fn test_build_messages_with_system_and_prompt() {
 #[test]
 fn test_build_messages_with_existing_messages() {
     let existing = vec![json!({"role": "assistant", "content": "hi"})];
-    let msgs = build_messages(Some("follow up"), None, Some(&existing));
+    let msgs = build_messages(Some("follow up"), None, None, Some(&existing));
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0]["role"], "assistant");
     assert_eq!(msgs[1]["role"], "user");
@@ -253,7 +253,7 @@ fn test_build_messages_with_existing_messages() {
 
 #[test]
 fn test_build_messages_empty() {
-    let msgs = build_messages(None, None, None);
+    let msgs = build_messages(None, None, None, None);
     assert!(msgs.is_empty());
 }
 
@@ -317,7 +317,7 @@ async fn test_prepare_messages_with_tape_persists_initial_prompt_and_system_prom
         .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
         .build()
         .unwrap();
-    let initial_round_msgs = build_messages(Some("hello"), Some("system"), None);
+    let initial_round_msgs = build_messages(Some("hello"), None, Some("system"), None);
     llm.persist_initial_messages("test-tape", &initial_round_msgs)
         .await
         .unwrap();
@@ -352,11 +352,11 @@ async fn test_persist_initial_messages_skips_duplicate_system_prompt() {
     let tape = "test-dedup";
 
     // First call writes system + user.
-    let msgs1 = build_messages(Some("hello"), Some("system prompt"), None);
+    let msgs1 = build_messages(Some("hello"), None, Some("system prompt"), None);
     llm.persist_initial_messages(tape, &msgs1).await.unwrap();
 
     // Second call with same system prompt should NOT duplicate it.
-    let msgs2 = build_messages(Some("world"), Some("system prompt"), None);
+    let msgs2 = build_messages(Some("world"), None, Some("system prompt"), None);
     llm.persist_initial_messages(tape, &msgs2).await.unwrap();
 
     let entries = llm
@@ -380,11 +380,11 @@ async fn test_persist_initial_messages_writes_changed_system_prompt() {
         .unwrap();
     let tape = "test-changed";
 
-    let msgs1 = build_messages(Some("hello"), Some("prompt v1"), None);
+    let msgs1 = build_messages(Some("hello"), None, Some("prompt v1"), None);
     llm.persist_initial_messages(tape, &msgs1).await.unwrap();
 
     // Different system prompt should be written.
-    let msgs2 = build_messages(Some("world"), Some("prompt v2"), None);
+    let msgs2 = build_messages(Some("world"), None, Some("prompt v2"), None);
     llm.persist_initial_messages(tape, &msgs2).await.unwrap();
 
     let entries = llm
@@ -406,7 +406,7 @@ async fn test_persist_initial_messages_no_system_in_msgs() {
     let tape = "test-no-system";
 
     // Messages with no system prompt — only user message.
-    let msgs = build_messages(Some("hello"), None, None);
+    let msgs = build_messages(Some("hello"), None, None, None);
     llm.persist_initial_messages(tape, &msgs).await.unwrap();
 
     let entries = llm
@@ -428,7 +428,7 @@ async fn test_persist_initial_messages_three_calls_same_prompt() {
     let tape = "test-triple";
 
     for i in 0..3 {
-        let msgs = build_messages(Some(&format!("msg {i}")), Some("stable system"), None);
+        let msgs = build_messages(Some(&format!("msg {i}")), None, Some("stable system"), None);
         llm.persist_initial_messages(tape, &msgs).await.unwrap();
     }
 
@@ -458,14 +458,14 @@ async fn test_persist_initial_messages_change_then_revert() {
         .unwrap();
     let tape = "test-revert";
 
-    let msgs_v1 = build_messages(Some("a"), Some("v1"), None);
+    let msgs_v1 = build_messages(Some("a"), None, Some("v1"), None);
     llm.persist_initial_messages(tape, &msgs_v1).await.unwrap();
 
-    let msgs_v2 = build_messages(Some("b"), Some("v2"), None);
+    let msgs_v2 = build_messages(Some("b"), None, Some("v2"), None);
     llm.persist_initial_messages(tape, &msgs_v2).await.unwrap();
 
     // Revert back to v1 — should write again since latest is v2.
-    let msgs_v1_again = build_messages(Some("c"), Some("v1"), None);
+    let msgs_v1_again = build_messages(Some("c"), None, Some("v1"), None);
     llm.persist_initial_messages(tape, &msgs_v1_again)
         .await
         .unwrap();
@@ -1048,4 +1048,74 @@ fn test_decisions_survive_full_context_build() {
     // Decision entries are skipped by build_full_context (kind is not message/system/tool_*)
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["content"], "Hello");
+}
+
+// ---------------------------------------------------------------------------
+// Multimodal / vision: end-to-end through build_messages + normalize
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_build_messages_with_user_content_parts() {
+    let parts = vec![
+        json!({"type": "text", "text": "What animal is this?"}),
+        json!({"type": "image_base64", "mime_type": "image/jpeg", "data": "AQID"}),
+    ];
+    let msgs = build_messages(None, Some(&parts), Some("You are helpful"), None);
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(msgs[0]["role"], "system");
+    assert_eq!(msgs[1]["role"], "user");
+    let content = msgs[1]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "image_base64");
+}
+
+#[test]
+fn test_build_messages_user_content_takes_precedence_over_prompt() {
+    let parts = vec![json!({"type": "text", "text": "from parts"})];
+    let msgs = build_messages(Some("from prompt"), Some(&parts), None, None);
+    // user_content should win — only one user message, with content array
+    assert_eq!(msgs.len(), 1);
+    assert!(msgs[0]["content"].is_array());
+    assert_eq!(msgs[0]["content"][0]["text"], "from parts");
+}
+
+#[test]
+fn test_e2e_image_normalized_to_anthropic() {
+    use crate::clients::parsing::TransportKind;
+    use crate::core::message_norm::normalize_messages_for_api;
+
+    let parts = vec![
+        json!({"type": "text", "text": "describe this photo"}),
+        json!({"type": "image_base64", "mime_type": "image/png", "data": "iVBOR"}),
+    ];
+    let msgs = build_messages(None, Some(&parts), None, None);
+    let normalized = normalize_messages_for_api(msgs, TransportKind::Messages);
+
+    let content = normalized[0]["content"].as_array().unwrap();
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["source"]["type"], "base64");
+    assert_eq!(content[1]["source"]["media_type"], "image/png");
+    assert_eq!(content[1]["source"]["data"], "iVBOR");
+}
+
+#[test]
+fn test_e2e_image_normalized_to_openai() {
+    use crate::clients::parsing::TransportKind;
+    use crate::core::message_norm::normalize_messages_for_api;
+
+    let parts = vec![
+        json!({"type": "text", "text": "describe"}),
+        json!({"type": "image_base64", "mime_type": "image/jpeg", "data": "/9j/4A"}),
+    ];
+    let msgs = build_messages(None, Some(&parts), None, None);
+    let normalized = normalize_messages_for_api(msgs, TransportKind::Completion);
+
+    let content = normalized[0]["content"].as_array().unwrap();
+    assert_eq!(content[1]["type"], "image_url");
+    assert_eq!(
+        content[1]["image_url"]["url"],
+        "data:image/jpeg;base64,/9j/4A"
+    );
 }
