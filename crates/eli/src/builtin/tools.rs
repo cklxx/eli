@@ -29,7 +29,7 @@ tokio::task_local! {
 /// Register all builtin tools into the global `REGISTRY`.
 pub fn register_builtin_tools() {
     let tools = builtin_tools();
-    let mut reg = REGISTRY.lock().unwrap();
+    let mut reg = REGISTRY.lock().expect("tool registry lock poisoned");
     for tool in tools {
         reg.insert(tool.name.clone(), tool);
     }
@@ -922,7 +922,7 @@ fn tool_quit() -> Tool {
 // ---------------------------------------------------------------------------
 
 fn tool_sidecar() -> Tool {
-    Tool::new(
+    Tool::with_context(
         "sidecar",
         "Call an external sidecar plugin by tool name.\n\nExamples: create a calendar event, read/write a Feishu doc, trigger a CI pipeline. Always load the skill first to discover the tool's required parameters.",
         serde_json::json!({
@@ -939,7 +939,7 @@ fn tool_sidecar() -> Tool {
             },
             "required": ["tool"]
         }),
-        |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 let tool_name = get_str(&args, "tool").unwrap_or("").to_owned();
                 let params = args.get("params").cloned().unwrap_or(serde_json::json!({}));
@@ -959,16 +959,37 @@ fn tool_sidecar() -> Tool {
                     return Err(ConduitError::new(ErrorKind::Tool, "sidecar not running"));
                 }
 
+                // Extract session_id from tool context so the sidecar bridge
+                // can look up auth / channel context for this session.
+                let session_id = ctx
+                    .as_ref()
+                    .and_then(|c| c.state.get("session_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
                 let tool_url = format!("{url}/tools/{tool_name}");
                 let client = reqwest::Client::new();
+                let mut payload = serde_json::json!({ "params": params });
+                if !session_id.is_empty() {
+                    payload["session_id"] = Value::String(session_id.to_owned());
+                }
                 let resp = client
                     .post(&tool_url)
-                    .json(&serde_json::json!({ "params": params }))
+                    .json(&payload)
                     .send()
                     .await
                     .map_err(|e| {
                         ConduitError::new(ErrorKind::Tool, format!("sidecar request failed: {e}"))
                     })?;
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(ConduitError::new(
+                        ErrorKind::Tool,
+                        format!("sidecar returned {status}: {body}"),
+                    ));
+                }
 
                 let body: serde_json::Value = resp.json().await.map_err(|e| {
                     ConduitError::new(
