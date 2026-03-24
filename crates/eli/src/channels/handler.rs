@@ -72,9 +72,16 @@ impl BufferedMessageHandler {
 
         // Commands bypass buffering entirely.
         if message.content.starts_with(',') {
+            let mut inner = self.inner.lock().await;
+            let dropped = inner.pending.len();
+            inner.pending.clear();
+            inner.last_active_time = None;
+            drop(inner);
+            self.notify.notify_waiters();
             info!(
                 session_id = %message.session_id,
                 content = %message.content,
+                dropped_pending = dropped,
                 "session.message received command"
             );
             let _ = self.handler.send(message);
@@ -186,6 +193,22 @@ mod tests {
 
         let received = rx.try_recv().unwrap();
         assert_eq!(received.content, ",help");
+    }
+
+    #[tokio::test]
+    async fn test_command_clears_pending_buffer() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handler = BufferedMessageHandler::new(tx, 10.0, 10.0, 0.05);
+
+        handler.handle(make_msg("buffered", true)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        handler.handle(make_msg(",reset", false)).await;
+
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received.content, ",reset");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

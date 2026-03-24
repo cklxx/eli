@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use conduit::tape::store::fetch_all_in_memory;
 use conduit::tape::{AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore, TapeStore};
-use conduit::{ConduitError, TapeEntry, TapeQuery};
+use conduit::{ConduitError, ErrorKind, TapeEntry, TapeQuery};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -237,8 +237,7 @@ impl TapeStore for FileTapeStore {
     }
 
     fn reset(&self, tape: &str) -> Result<(), ConduitError> {
-        self.with_tape_file(tape, |tf| tf.reset());
-        Ok(())
+        self.with_tape_file(tape, |tf| tf.reset())
     }
 
     fn fetch_all(&self, query: &TapeQuery) -> Result<Vec<TapeEntry>, ConduitError> {
@@ -251,8 +250,7 @@ impl TapeStore for FileTapeStore {
     }
 
     fn append(&self, tape: &str, entry: &TapeEntry) -> Result<(), ConduitError> {
-        self.with_tape_file(tape, |tf| tf.append(entry));
-        Ok(())
+        self.with_tape_file(tape, |tf| tf.append(entry))
     }
 }
 
@@ -321,7 +319,7 @@ impl TapeFile {
         self.read_offset = 0;
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self) -> Result<(), ConduitError> {
         if self.path.exists()
             && let Err(e) = fs::remove_file(&self.path)
         {
@@ -330,8 +328,13 @@ impl TapeFile {
                 path = %self.path.display(),
                 "failed to remove tape file"
             );
+            return Err(ConduitError::new(
+                ErrorKind::Unknown,
+                format!("failed to remove tape file {}: {e}", self.path.display()),
+            ));
         }
         self.reset_cache();
+        Ok(())
     }
 
     pub fn read(&mut self) -> Vec<TapeEntry> {
@@ -374,11 +377,16 @@ impl TapeFile {
         self.read_entries.clone()
     }
 
-    pub fn append(&mut self, entry: &TapeEntry) {
+    pub fn append(&mut self, entry: &TapeEntry) -> Result<(), ConduitError> {
         let _ = self.read();
 
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).ok();
+            fs::create_dir_all(parent).map_err(|e| {
+                ConduitError::new(
+                    ErrorKind::Unknown,
+                    format!("failed to create tape directory {}: {e}", parent.display()),
+                )
+            })?;
         }
 
         let next_id = self.next_id();
@@ -402,7 +410,13 @@ impl TapeFile {
                     path = %self.path.display(),
                     "failed to open tape file for append"
                 );
-                return;
+                return Err(ConduitError::new(
+                    ErrorKind::Unknown,
+                    format!(
+                        "failed to open tape file {} for append: {e}",
+                        self.path.display()
+                    ),
+                ));
             }
         };
 
@@ -414,7 +428,13 @@ impl TapeFile {
                     path = %self.path.display(),
                     "failed to serialize tape entry"
                 );
-                return;
+                return Err(ConduitError::new(
+                    ErrorKind::Unknown,
+                    format!(
+                        "failed to serialize tape entry for {}: {e}",
+                        self.path.display()
+                    ),
+                ));
             }
         };
 
@@ -425,11 +445,18 @@ impl TapeFile {
                 path = %self.path.display(),
                 "failed to append tape entry"
             );
-            return;
+            return Err(ConduitError::new(
+                ErrorKind::Unknown,
+                format!(
+                    "failed to append tape entry to {}: {e}",
+                    self.path.display()
+                ),
+            ));
         }
 
         self.read_entries.push(stored);
         self.read_offset += line.len() as u64;
+        Ok(())
     }
 }
 
@@ -578,6 +605,36 @@ mod tests {
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].payload["content"], "persisted");
         }
+    }
+
+    #[test]
+    fn test_file_tape_store_append_propagates_io_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked_root = tmp.path().join("blocked-root");
+        std::fs::write(&blocked_root, "not a directory").unwrap();
+        let store = FileTapeStore::new(blocked_root);
+
+        let entry = TapeEntry::new(
+            0,
+            "message".into(),
+            json!({"content": "will fail"}),
+            json!({}),
+            "2024-01-01T00:00:00Z".into(),
+        );
+
+        let err = store.append("bad__tape", &entry).unwrap_err();
+        assert!(err.message.contains("failed to create tape directory"));
+    }
+
+    #[test]
+    fn test_file_tape_store_reset_propagates_remove_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileTapeStore::new(tmp.path().to_path_buf());
+        let bad_path = store.tape_file_path("bad__tape");
+        std::fs::create_dir_all(&bad_path).unwrap();
+
+        let err = store.reset("bad__tape").unwrap_err();
+        assert!(err.message.contains("failed to remove tape file"));
     }
 
     // -- ForkTapeStore tests --------------------------------------------------
@@ -855,7 +912,7 @@ mod tests {
             json!({}),
             "2024-01-01T00:00:00Z".into(),
         );
-        tf.append(&entry);
+        tf.append(&entry).unwrap();
 
         let entries = tf.read();
         assert_eq!(entries.len(), 1);
@@ -875,8 +932,8 @@ mod tests {
             json!({}),
             "2024-01-01T00:00:00Z".into(),
         );
-        tf.append(&entry);
-        tf.reset();
+        tf.append(&entry).unwrap();
+        tf.reset().unwrap();
 
         let entries = tf.read();
         assert!(entries.is_empty());

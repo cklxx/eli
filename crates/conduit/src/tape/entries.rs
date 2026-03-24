@@ -86,11 +86,23 @@ impl TapeEntry {
 
     /// Create a tool_call entry.
     pub fn tool_call(calls: Vec<Value>, meta: Value) -> Self {
-        let payload = serde_json::json!({ "calls": normalize_tool_calls(&calls) });
+        Self::tool_call_with_content(calls, None, meta)
+    }
+
+    /// Create a tool_call entry, optionally preserving assistant text that
+    /// accompanied the tool call.
+    pub fn tool_call_with_content(calls: Vec<Value>, content: Option<String>, meta: Value) -> Self {
+        let mut payload = Map::new();
+        payload.insert("calls".into(), Value::Array(normalize_tool_calls(&calls)));
+        if let Some(text) = content
+            && !text.is_empty()
+        {
+            payload.insert("content".into(), Value::String(text));
+        }
         Self {
             id: 0,
             kind: "tool_call".into(),
-            payload,
+            payload: Value::Object(payload),
             meta,
             date: utc_now(),
         }

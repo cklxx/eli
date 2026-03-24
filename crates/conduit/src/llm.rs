@@ -634,12 +634,8 @@ impl LLM {
         // Track the latest usage from API responses.
         let mut last_usage: Option<Value> = None;
 
-        // For tape=None fallback, accumulate messages in memory
-        let mut in_memory_msgs: Vec<Value> = if tape.is_none() {
-            build_messages(prompt, system_prompt, messages.as_deref())
-        } else {
-            Vec::new()
-        };
+        let initial_round_msgs = build_messages(prompt, system_prompt, messages.as_deref());
+        let mut in_memory_msgs = initial_round_msgs.clone();
 
         // On the first round with tape, write the initial context (system + user prompt)
         // to tape so subsequent reads include it.
@@ -669,10 +665,10 @@ impl LLM {
             // Build msgs for this round
             let msgs = self
                 ._prepare_messages(
-                    messages.as_deref(),
                     tape,
                     tape_context,
                     first_round,
+                    &initial_round_msgs,
                     &in_memory_msgs,
                 )
                 .await?;
@@ -694,17 +690,9 @@ impl LLM {
                         let meta = serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
                         let assistant_msg =
                             serde_json::json!({"role": "assistant", "content": &content});
-                        if let Err(e) = self
-                            .async_tape
+                        self.async_tape
                             .append_entry(tape_name, &TapeEntry::message(assistant_msg, meta))
-                            .await
-                        {
-                            tracing::error!(
-                                error = %e,
-                                tape = %tape_name,
-                                "failed to append final assistant message"
-                            );
-                        }
+                            .await?;
                     }
 
                     return Ok(ToolAutoResult {
@@ -726,7 +714,7 @@ impl LLM {
 
                     // Persist round to tape or accumulate in memory
                     self._persist_round(tape, &response, &execution, &mut in_memory_msgs)
-                        .await;
+                        .await?;
                 }
             }
             // Loop continues - next iteration reads from tape (or in_memory_msgs)
@@ -742,34 +730,16 @@ impl LLM {
     /// in-memory accumulation.
     async fn _prepare_messages(
         &self,
-        messages: Option<&[Value]>,
         tape: Option<&str>,
         tape_context: Option<&TapeContext>,
         first_round: bool,
+        initial_round_msgs: &[Value],
         in_memory_msgs: &[Value],
     ) -> Result<Vec<Value>, ConduitError> {
         if let Some(tape_name) = tape {
-            if first_round {
-                // Write extra messages to tape (system prompt and user prompt
-                // are written by the caller before invoking run_tools).
-                let run_id = Uuid::new_v4().to_string();
-                let meta = serde_json::json!({ "run_id": &run_id });
-
-                if let Some(extra_msgs) = messages {
-                    for m in extra_msgs {
-                        if let Err(e) = self
-                            .async_tape
-                            .append_entry(tape_name, &TapeEntry::message(m.clone(), meta.clone()))
-                            .await
-                        {
-                            tracing::error!(
-                                error = %e,
-                                tape = %tape_name,
-                                "failed to append initial tape message"
-                            );
-                        }
-                    }
-                }
+            if first_round && !initial_round_msgs.is_empty() {
+                self.append_initial_round_messages(tape_name, initial_round_msgs)
+                    .await?;
             }
 
             // Read full context from tape (includes system, messages, tool_call, tool_result)
@@ -812,6 +782,35 @@ impl LLM {
         } else {
             Ok(in_memory_msgs.to_vec())
         }
+    }
+
+    async fn append_initial_round_messages(
+        &self,
+        tape_name: &str,
+        initial_round_msgs: &[Value],
+    ) -> Result<(), ConduitError> {
+        let run_id = Uuid::new_v4().to_string();
+        let meta = serde_json::json!({ "run_id": run_id });
+
+        for message in initial_round_msgs {
+            let role = message.get("role").and_then(|v| v.as_str());
+            if role == Some("system")
+                && let Some(content) = message.get("content").and_then(|v| v.as_str())
+            {
+                self.async_tape
+                    .append_entry(tape_name, &TapeEntry::system(content, meta.clone()))
+                    .await?;
+            } else {
+                self.async_tape
+                    .append_entry(
+                        tape_name,
+                        &TapeEntry::message(message.clone(), meta.clone()),
+                    )
+                    .await?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Execute a single model call and, if tool calls are returned, execute them.
@@ -886,24 +885,26 @@ impl LLM {
         response: &Value,
         execution: &ToolExecution,
         in_memory_msgs: &mut Vec<Value>,
-    ) {
+    ) -> Result<(), ConduitError> {
         if let Some(tape_name) = tape {
             // Write assistant tool_call entry to tape
             let meta = serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
-            if let Err(e) = self
-                .async_tape
+            let assistant_msg = build_assistant_tool_call_message(response);
+            let assistant_text = assistant_msg
+                .get("content")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            self.async_tape
                 .append_entry(
                     tape_name,
-                    &TapeEntry::tool_call(execution.tool_calls.clone(), meta.clone()),
+                    &TapeEntry::tool_call_with_content(
+                        execution.tool_calls.clone(),
+                        assistant_text,
+                        meta.clone(),
+                    ),
                 )
-                .await
-            {
-                tracing::error!(
-                    error = %e,
-                    tape = %tape_name,
-                    "failed to append assistant tool calls"
-                );
-            }
+                .await?;
 
             // Write tool_result entries to tape
             let paired: Vec<Value> = execution
@@ -915,17 +916,9 @@ impl LLM {
                     serde_json::json!({"call_id": call_id, "output": result})
                 })
                 .collect();
-            if let Err(e) = self
-                .async_tape
+            self.async_tape
                 .append_entry(tape_name, &TapeEntry::tool_result(paired, meta))
-                .await
-            {
-                tracing::error!(
-                    error = %e,
-                    tape = %tape_name,
-                    "failed to append assistant tool results"
-                );
-            }
+                .await?;
         } else {
             // tape=None fallback: accumulate in memory
             let assistant_msg = build_assistant_tool_call_message(response);
@@ -949,6 +942,7 @@ impl LLM {
                 }));
             }
         }
+        Ok(())
     }
 
     // -- Streaming -----------------------------------------------------------
@@ -1411,9 +1405,10 @@ fn build_full_context_from_entries(entries: &[TapeEntry]) -> Vec<Value> {
                 if let Some(calls) = entry.payload.get("calls").and_then(|c| c.as_array()) {
                     let normalized_calls = normalize_tool_calls(calls);
                     if !normalized_calls.is_empty() {
+                        let content = entry.payload.get("content").cloned().unwrap_or(Value::Null);
                         messages.push(serde_json::json!({
                             "role": "assistant",
-                            "content": serde_json::Value::Null,
+                            "content": content,
                             "tool_calls": normalized_calls
                         }));
                     }
@@ -1918,6 +1913,63 @@ mod tests {
             "tape_info"
         );
         assert_eq!(messages[1]["tool_call_id"], "call_123");
+    }
+
+    #[test]
+    fn test_build_full_context_from_entries_preserves_tool_call_content() {
+        let entries = vec![TapeEntry::tool_call_with_content(
+            vec![json!({
+                "type": "function",
+                "id": "call_123",
+                "function": {
+                    "name": "tape_info",
+                    "arguments": "{}"
+                }
+            })],
+            Some("Checking tape state".to_owned()),
+            json!({}),
+        )];
+
+        let messages = build_full_context_from_entries(&entries);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["content"], "Checking tape state");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_123");
+    }
+
+    #[tokio::test]
+    async fn test_prepare_messages_with_tape_persists_initial_prompt_and_system_prompt() {
+        let llm = LLM::builder()
+            .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+            .build()
+            .unwrap();
+        let initial_round_msgs = build_messages(Some("hello"), Some("system"), None);
+
+        let messages = llm
+            ._prepare_messages(
+                Some("test-tape"),
+                None,
+                true,
+                &initial_round_msgs,
+                &initial_round_msgs,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "system");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "hello");
+
+        let entries = llm
+            .async_tape
+            .fetch_entries(&llm.async_tape.query_tape("test-tape"))
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].kind, "system");
+        assert_eq!(entries[1].kind, "message");
     }
 
     // ----- extract_content -----

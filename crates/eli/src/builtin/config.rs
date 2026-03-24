@@ -204,12 +204,24 @@ pub fn load_anthropic_api_key() -> Option<String> {
 
 /// Synchronously refresh an Anthropic OAuth token using the refresh_token.
 fn refresh_anthropic_token_sync(refresh_token: &str) -> Option<String> {
-    // Build a small tokio runtime for the blocking refresh.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    rt.block_on(async { refresh_anthropic_token(refresh_token).await })
+    let refresh_token = refresh_token.to_owned();
+
+    let run_refresh = move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        rt.block_on(async { refresh_anthropic_token(&refresh_token).await })
+    };
+
+    // This helper can be reached from async request handling. Running a nested
+    // Tokio runtime on the current thread would panic, so hop to a dedicated
+    // OS thread when we're already inside a runtime.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::spawn(run_refresh).join().ok().flatten()
+    } else {
+        run_refresh()
+    }
 }
 
 /// Refresh an Anthropic OAuth token and save the new tokens.

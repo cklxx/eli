@@ -608,7 +608,6 @@ async fn agent_loop(
         run_tools_once(
             &mut llm,
             &system_prompt,
-            tapes,
             tape_name,
             &initial_prompt,
             tool_state,
@@ -767,7 +766,6 @@ async fn agent_loop(
 async fn run_tools_once(
     llm: &mut LLM,
     system_prompt: &str,
-    tapes: &TapeService,
     tape_name: &str,
     prompt: &PromptInput,
     tool_state: &HashMap<String, Value>,
@@ -796,18 +794,7 @@ async fn run_tools_once(
         runnable: tools,
     };
 
-    // Record the system prompt and user prompt as tape entries.
-    // (run_tools no longer writes these — the caller is responsible.)
     let prompt_text = prompt.text();
-
-    let system_entry = TapeEntry::system(system_prompt, Value::Object(Default::default()));
-    let _ = tapes.store().append(tape_name, &system_entry).await;
-
-    let user_message = TapeEntry::message(
-        serde_json::json!({"role": "user", "content": prompt_text}),
-        Value::Object(Default::default()),
-    );
-    let _ = tapes.store().append(tape_name, &user_message).await;
 
     // Create tool context for execution.
     let tool_ctx = build_tool_context("agent_loop", tape_name, tool_state);

@@ -63,7 +63,13 @@ fn append_tool_call_entry(
     if !calls.is_empty() {
         let mut msg: HashMap<String, Value> = HashMap::new();
         msg.insert("role".to_owned(), Value::String("assistant".to_owned()));
-        msg.insert("content".to_owned(), Value::String(String::new()));
+        let content = entry
+            .payload
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        msg.insert("content".to_owned(), Value::String(content));
         msg.insert("tool_calls".to_owned(), Value::Array(calls.clone()));
         messages.push(msg);
     }
