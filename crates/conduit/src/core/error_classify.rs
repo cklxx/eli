@@ -20,6 +20,18 @@ pub struct AttemptOutcome {
     pub decision: AttemptDecision,
 }
 
+/// Check for an HTTP status code in contextual patterns to avoid false
+/// positives on bare numbers (e.g. "Expected 404 items").
+fn has_http_status_pattern(lower: &str, code: &str) -> bool {
+    lower.contains(&format!("status {code}"))
+        || lower.contains(&format!("status: {code}"))
+        || lower.contains(&format!("http {code}"))
+        || lower.contains(&format!("http/{code}"))
+        || lower.contains(&format!("code {code}"))
+        || lower.contains(&format!("code: {code}"))
+        || lower.contains(&format!("error {code}"))
+}
+
 /// Classify an error by scanning the message text for common patterns.
 ///
 /// Returns `None` when no pattern matches, allowing the caller to fall
@@ -37,12 +49,15 @@ pub fn classify_by_text_signature(message: &str) -> Option<ErrorKind> {
     }
 
     // Rate-limit / quota errors
-    if lower.contains("rate limit") || lower.contains("429") || lower.contains("quota") {
+    if lower.contains("rate limit")
+        || has_http_status_pattern(&lower, "429")
+        || lower.contains("quota")
+    {
         return Some(ErrorKind::Temporary);
     }
 
     // Not-found errors
-    if lower.contains("not found") || lower.contains("404") {
+    if lower.contains("not found") || has_http_status_pattern(&lower, "404") {
         return Some(ErrorKind::NotFound);
     }
 
@@ -53,9 +68,9 @@ pub fn classify_by_text_signature(message: &str) -> Option<ErrorKind> {
 
     // Server errors
     if lower.contains("server error")
-        || lower.contains("500")
-        || lower.contains("502")
-        || lower.contains("503")
+        || has_http_status_pattern(&lower, "500")
+        || has_http_status_pattern(&lower, "502")
+        || has_http_status_pattern(&lower, "503")
     {
         return Some(ErrorKind::Temporary);
     }

@@ -155,6 +155,20 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
     const app = express();
     app.use(express.json());
 
+    // Auth middleware: validate ELI_SIDECAR_TOKEN when set
+    const sidecarToken = process.env.ELI_SIDECAR_TOKEN;
+    if (sidecarToken) {
+      app.use((req, res, next) => {
+        if (req.path === "/health") return next();
+        const auth = req.headers.authorization;
+        if (auth !== `Bearer ${sidecarToken}`) {
+          res.status(401).json({ error: "unauthorized" });
+          return;
+        }
+        next();
+      });
+    }
+
     app.post("/outbound", async (req, res) => {
       const msg = req.body as EliChannelMessage;
       const cleanupOnly = Boolean(msg.context?._eli_cleanup_only);

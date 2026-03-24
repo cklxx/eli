@@ -12,6 +12,15 @@ pub fn utc_now() -> String {
     Utc::now().to_rfc3339()
 }
 
+/// Return the content of the latest system entry, if any.
+pub fn latest_system_content(entries: &[TapeEntry]) -> Option<&str> {
+    entries
+        .iter()
+        .rev()
+        .find(|e| e.kind == "system")
+        .and_then(|e| e.payload.get("content").and_then(|c| c.as_str()))
+}
+
 /// A single append-only entry in a tape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TapeEntry {
@@ -209,13 +218,47 @@ mod tests {
     }
 
     #[test]
+    fn test_latest_system_content_empty_entries() {
+        assert_eq!(latest_system_content(&[]), None);
+    }
+
+    #[test]
+    fn test_latest_system_content_no_system_entries() {
+        let meta = serde_json::json!({});
+        let entries = vec![
+            TapeEntry::message(serde_json::json!({"role": "user", "content": "hi"}), meta.clone()),
+            TapeEntry::message(serde_json::json!({"role": "assistant", "content": "hello"}), meta),
+        ];
+        assert_eq!(latest_system_content(&entries), None);
+    }
+
+    #[test]
+    fn test_latest_system_content_single() {
+        let meta = serde_json::json!({});
+        let entries = vec![
+            TapeEntry::system("you are helpful", meta.clone()),
+            TapeEntry::message(serde_json::json!({"role": "user", "content": "hi"}), meta),
+        ];
+        assert_eq!(latest_system_content(&entries), Some("you are helpful"));
+    }
+
+    #[test]
+    fn test_latest_system_content_returns_last() {
+        let meta = serde_json::json!({});
+        let entries = vec![
+            TapeEntry::system("prompt v1", meta.clone()),
+            TapeEntry::message(serde_json::json!({"role": "user", "content": "hi"}), meta.clone()),
+            TapeEntry::system("prompt v2", meta.clone()),
+            TapeEntry::message(serde_json::json!({"role": "user", "content": "bye"}), meta),
+        ];
+        assert_eq!(latest_system_content(&entries), Some("prompt v2"));
+    }
+
+    #[test]
     fn test_decision_empty_and_long_text() {
         let meta = serde_json::json!({});
         let empty = TapeEntry::decision("", meta.clone());
-        assert_eq!(
-            empty.payload.get("text").and_then(|v| v.as_str()),
-            Some("")
-        );
+        assert_eq!(empty.payload.get("text").and_then(|v| v.as_str()), Some(""));
 
         let long_text = "x".repeat(5000);
         let long_entry = TapeEntry::decision(&long_text, meta);

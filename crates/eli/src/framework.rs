@@ -101,7 +101,12 @@ impl EliFramework {
     // -- Main orchestration loop --------------------------------------------
 
     /// Run one inbound message through all hooks and return the turn result.
-    pub async fn process_inbound(&self, inbound: Envelope) -> anyhow::Result<TurnResult> {
+    pub async fn process_inbound(&self, mut inbound: Envelope) -> anyhow::Result<TurnResult> {
+        // Strip internal-only context keys from inbound to prevent injection.
+        if let Some(ctx) = inbound.get_mut("context").and_then(|v| v.as_object_mut()) {
+            ctx.remove("_eli_cleanup_only");
+        }
+
         let rt = self.hook_runtime.read().await;
         let workspace = self.workspace.read().await.clone();
 

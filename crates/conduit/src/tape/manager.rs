@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::core::errors::ConduitError;
 use crate::core::results::ErrorPayload;
 use crate::tape::context::{TapeContext, build_messages};
-use crate::tape::entries::TapeEntry;
+use crate::tape::entries::{TapeEntry, latest_system_content};
 use crate::tape::query::TapeQuery;
 use crate::tape::store::{AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore, TapeStore};
 
@@ -90,7 +90,32 @@ impl TapeManager {
         Ok(vec![entry, event])
     }
 
+    /// Append a system entry only if the tape has no system entry or the content changed.
+    /// Returns true if the entry was written.
+    pub fn append_system_if_changed(
+        &self,
+        tape: &str,
+        content: &str,
+        meta: Value,
+    ) -> Result<bool, ConduitError> {
+        let query = self.query_tape(tape);
+        let dominated = self
+            .store
+            .fetch_all(&query)
+            .ok()
+            .and_then(|entries| latest_system_content(&entries).map(|s| s == content))
+            .unwrap_or(false);
+        if dominated {
+            return Ok(false);
+        }
+        self.store.append(tape, &TapeEntry::system(content, meta))?;
+        Ok(true)
+    }
+
     /// Record a complete chat turn to the tape.
+    ///
+    /// The system prompt is only written when the tape has no existing system
+    /// entry or when the content has changed.
     #[allow(clippy::too_many_arguments)]
     pub fn record_chat(
         &self,
@@ -112,8 +137,7 @@ impl TapeManager {
         if let Some(sp) = system_prompt
             && !sp.is_empty()
         {
-            self.store
-                .append(tape, &TapeEntry::system(sp, meta.clone()))?;
+            self.append_system_if_changed(tape, sp, meta.clone())?;
         }
 
         if let Some(ce) = context_error {
@@ -282,7 +306,35 @@ impl AsyncTapeManager {
         Ok(vec![entry, event])
     }
 
-    /// Record a complete chat turn to the tape (async).
+    /// Append a system entry only if the tape has no system entry or the content changed.
+    /// Returns true if the entry was written.
+    pub async fn append_system_if_changed(
+        &self,
+        tape: &str,
+        content: &str,
+        meta: Value,
+    ) -> Result<bool, ConduitError> {
+        let query = self.query_tape(tape);
+        let dominated = self
+            .store
+            .fetch_all(&query)
+            .await
+            .ok()
+            .and_then(|entries| latest_system_content(&entries).map(|s| s == content))
+            .unwrap_or(false);
+        if dominated {
+            return Ok(false);
+        }
+        self.store
+            .append(tape, &TapeEntry::system(content, meta))
+            .await?;
+        Ok(true)
+    }
+
+    /// Record a complete chat turn to the tape.
+    ///
+    /// The system prompt is only written when the tape has no existing system
+    /// entry or when the content has changed.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_chat(
         &self,
@@ -304,8 +356,7 @@ impl AsyncTapeManager {
         if let Some(sp) = system_prompt
             && !sp.is_empty()
         {
-            self.store
-                .append(tape, &TapeEntry::system(sp, meta.clone()))
+            self.append_system_if_changed(tape, sp, meta.clone())
                 .await?;
         }
 
@@ -377,5 +428,332 @@ impl AsyncTapeManager {
             .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tape::store::InMemoryTapeStore;
+    use serde_json::json;
+
+    #[test]
+    fn test_record_chat_skips_duplicate_system_prompt() {
+        let store = InMemoryTapeStore::new();
+        let manager = TapeManager::new(Some(Box::new(store.clone())), None);
+        let tape = "record-chat-dedup";
+
+        manager
+            .record_chat(
+                tape,
+                "run-1",
+                Some("system prompt"),
+                None,
+                &[json!({"role": "user", "content": "hello"})],
+                Some("hi"),
+                None,
+                None,
+                None,
+                None,
+                Some("openai"),
+                Some("gpt-4o"),
+            )
+            .unwrap();
+
+        manager
+            .record_chat(
+                tape,
+                "run-2",
+                Some("system prompt"),
+                None,
+                &[json!({"role": "user", "content": "again"})],
+                Some("there"),
+                None,
+                None,
+                None,
+                None,
+                Some("openai"),
+                Some("gpt-4o"),
+            )
+            .unwrap();
+
+        let entries = store.read(tape).unwrap();
+        let system_count = entries.iter().filter(|e| e.kind == "system").count();
+        let message_count = entries.iter().filter(|e| e.kind == "message").count();
+
+        assert_eq!(system_count, 1);
+        assert_eq!(latest_system_content(&entries), Some("system prompt"));
+        assert_eq!(message_count, 4);
+    }
+
+    #[tokio::test]
+    async fn test_async_record_chat_skips_duplicate_system_prompt() {
+        let store = InMemoryTapeStore::new();
+        let manager = AsyncTapeManager::new(
+            Some(Box::new(AsyncTapeStoreAdapter::new(store.clone()))),
+            None,
+        );
+        let tape = "async-record-chat-dedup";
+
+        manager
+            .record_chat(
+                tape,
+                "run-1",
+                Some("system prompt"),
+                None,
+                &[json!({"role": "user", "content": "hello"})],
+                Some("hi"),
+                None,
+                None,
+                None,
+                None,
+                Some("openai"),
+                Some("gpt-4o"),
+            )
+            .await
+            .unwrap();
+
+        manager
+            .record_chat(
+                tape,
+                "run-2",
+                Some("system prompt"),
+                None,
+                &[json!({"role": "user", "content": "again"})],
+                Some("there"),
+                None,
+                None,
+                None,
+                None,
+                Some("openai"),
+                Some("gpt-4o"),
+            )
+            .await
+            .unwrap();
+
+        let entries = store.read(tape).unwrap();
+        let system_count = entries.iter().filter(|e| e.kind == "system").count();
+        let message_count = entries.iter().filter(|e| e.kind == "message").count();
+
+        assert_eq!(system_count, 1);
+        assert_eq!(latest_system_content(&entries), Some("system prompt"));
+        assert_eq!(message_count, 4);
+    }
+
+    #[tokio::test]
+    async fn test_async_append_system_if_changed_first_write() {
+        let store = InMemoryTapeStore::new();
+        let manager = AsyncTapeManager::new(
+            Some(Box::new(AsyncTapeStoreAdapter::new(store))),
+            None,
+        );
+        assert!(manager.append_system_if_changed("t", "hello", json!({})).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_async_append_system_if_changed_duplicate() {
+        let store = InMemoryTapeStore::new();
+        let manager = AsyncTapeManager::new(
+            Some(Box::new(AsyncTapeStoreAdapter::new(store))),
+            None,
+        );
+        assert!(manager.append_system_if_changed("t", "hello", json!({})).await.unwrap());
+        assert!(!manager.append_system_if_changed("t", "hello", json!({})).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_async_append_system_if_changed_on_change() {
+        let store = InMemoryTapeStore::new();
+        let manager = AsyncTapeManager::new(
+            Some(Box::new(AsyncTapeStoreAdapter::new(store))),
+            None,
+        );
+        assert!(manager.append_system_if_changed("t", "v1", json!({})).await.unwrap());
+        assert!(manager.append_system_if_changed("t", "v2", json!({})).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_async_record_chat_with_none_system() {
+        let store = InMemoryTapeStore::new();
+        let manager = AsyncTapeManager::new(
+            Some(Box::new(AsyncTapeStoreAdapter::new(store.clone()))),
+            None,
+        );
+        manager
+            .record_chat(
+                "t", "r1", None, None,
+                &[json!({"role": "user", "content": "hi"})],
+                Some("hey"), None, None, None, None, None, None,
+            )
+            .await
+            .unwrap();
+        let entries = store.read("t").unwrap();
+        assert_eq!(entries.iter().filter(|e| e.kind == "system").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_async_record_chat_with_empty_system() {
+        let store = InMemoryTapeStore::new();
+        let manager = AsyncTapeManager::new(
+            Some(Box::new(AsyncTapeStoreAdapter::new(store.clone()))),
+            None,
+        );
+        manager
+            .record_chat(
+                "t", "r1", Some(""), None,
+                &[json!({"role": "user", "content": "hi"})],
+                Some("hey"), None, None, None, None, None, None,
+            )
+            .await
+            .unwrap();
+        let entries = store.read("t").unwrap();
+        assert_eq!(entries.iter().filter(|e| e.kind == "system").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_async_record_chat_writes_on_change() {
+        let store = InMemoryTapeStore::new();
+        let manager = AsyncTapeManager::new(
+            Some(Box::new(AsyncTapeStoreAdapter::new(store.clone()))),
+            None,
+        );
+        manager
+            .record_chat(
+                "t", "r1", Some("v1"), None,
+                &[json!({"role": "user", "content": "hi"})],
+                Some("hey"), None, None, None, None, None, None,
+            )
+            .await
+            .unwrap();
+        manager
+            .record_chat(
+                "t", "r2", Some("v2"), None,
+                &[json!({"role": "user", "content": "bye"})],
+                Some("cya"), None, None, None, None, None, None,
+            )
+            .await
+            .unwrap();
+        let entries = store.read("t").unwrap();
+        assert_eq!(entries.iter().filter(|e| e.kind == "system").count(), 2);
+        assert_eq!(latest_system_content(&entries), Some("v2"));
+    }
+
+    #[tokio::test]
+    async fn test_async_record_chat_three_calls_same_prompt() {
+        let store = InMemoryTapeStore::new();
+        let manager = AsyncTapeManager::new(
+            Some(Box::new(AsyncTapeStoreAdapter::new(store.clone()))),
+            None,
+        );
+        for i in 0..3 {
+            manager
+                .record_chat(
+                    "t", &format!("r{i}"), Some("stable"), None,
+                    &[json!({"role": "user", "content": format!("msg {i}")})],
+                    Some("ok"), None, None, None, None, None, None,
+                )
+                .await
+                .unwrap();
+        }
+        let entries = store.read("t").unwrap();
+        assert_eq!(entries.iter().filter(|e| e.kind == "system").count(), 1);
+        assert_eq!(entries.iter().filter(|e| e.kind == "message").count(), 6);
+    }
+
+    #[test]
+    fn test_append_system_if_changed_returns_true_on_first_write() {
+        let store = InMemoryTapeStore::new();
+        let manager = TapeManager::new(Some(Box::new(store)), None);
+        let wrote = manager
+            .append_system_if_changed("t", "hello", json!({}))
+            .unwrap();
+        assert!(wrote);
+    }
+
+    #[test]
+    fn test_append_system_if_changed_returns_false_on_duplicate() {
+        let store = InMemoryTapeStore::new();
+        let manager = TapeManager::new(Some(Box::new(store)), None);
+        assert!(manager.append_system_if_changed("t", "hello", json!({})).unwrap());
+        assert!(!manager.append_system_if_changed("t", "hello", json!({})).unwrap());
+    }
+
+    #[test]
+    fn test_append_system_if_changed_returns_true_on_changed_content() {
+        let store = InMemoryTapeStore::new();
+        let manager = TapeManager::new(Some(Box::new(store)), None);
+        assert!(manager.append_system_if_changed("t", "v1", json!({})).unwrap());
+        assert!(manager.append_system_if_changed("t", "v2", json!({})).unwrap());
+    }
+
+    #[test]
+    fn test_record_chat_with_none_system_prompt_skips_system_entry() {
+        let store = InMemoryTapeStore::new();
+        let manager = TapeManager::new(Some(Box::new(store.clone())), None);
+        manager
+            .record_chat(
+                "t", "r1", None, None,
+                &[json!({"role": "user", "content": "hi"})],
+                Some("hey"), None, None, None, None, None, None,
+            )
+            .unwrap();
+        let entries = store.read("t").unwrap();
+        assert_eq!(entries.iter().filter(|e| e.kind == "system").count(), 0);
+    }
+
+    #[test]
+    fn test_record_chat_with_empty_system_prompt_skips_system_entry() {
+        let store = InMemoryTapeStore::new();
+        let manager = TapeManager::new(Some(Box::new(store.clone())), None);
+        manager
+            .record_chat(
+                "t", "r1", Some(""), None,
+                &[json!({"role": "user", "content": "hi"})],
+                Some("hey"), None, None, None, None, None, None,
+            )
+            .unwrap();
+        let entries = store.read("t").unwrap();
+        assert_eq!(entries.iter().filter(|e| e.kind == "system").count(), 0);
+    }
+
+    #[test]
+    fn test_record_chat_writes_new_system_on_change() {
+        let store = InMemoryTapeStore::new();
+        let manager = TapeManager::new(Some(Box::new(store.clone())), None);
+        manager
+            .record_chat(
+                "t", "r1", Some("v1"), None,
+                &[json!({"role": "user", "content": "hi"})],
+                Some("hey"), None, None, None, None, None, None,
+            )
+            .unwrap();
+        manager
+            .record_chat(
+                "t", "r2", Some("v2"), None,
+                &[json!({"role": "user", "content": "bye"})],
+                Some("cya"), None, None, None, None, None, None,
+            )
+            .unwrap();
+        let entries = store.read("t").unwrap();
+        assert_eq!(entries.iter().filter(|e| e.kind == "system").count(), 2);
+        assert_eq!(latest_system_content(&entries), Some("v2"));
+    }
+
+    #[test]
+    fn test_record_chat_three_calls_same_prompt_only_one_system() {
+        let store = InMemoryTapeStore::new();
+        let manager = TapeManager::new(Some(Box::new(store.clone())), None);
+        for i in 0..3 {
+            manager
+                .record_chat(
+                    "t", &format!("r{i}"), Some("stable prompt"), None,
+                    &[json!({"role": "user", "content": format!("msg {i}")})],
+                    Some("ok"), None, None, None, None, None, None,
+                )
+                .unwrap();
+        }
+        let entries = store.read("t").unwrap();
+        assert_eq!(entries.iter().filter(|e| e.kind == "system").count(), 1);
+        assert_eq!(entries.iter().filter(|e| e.kind == "message").count(), 6); // 3 user + 3 assistant
     }
 }

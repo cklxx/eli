@@ -640,9 +640,12 @@ impl LLM {
         let initial_round_msgs = build_messages(prompt, system_prompt, messages.as_deref());
         let mut in_memory_msgs = initial_round_msgs.clone();
 
-        // On the first round with tape, write the initial context (system + user prompt)
-        // to tape so subsequent reads include it.
-        let mut first_round = true;
+        if let Some(tape_name) = tape
+            && !initial_round_msgs.is_empty()
+        {
+            self.persist_initial_messages(tape_name, &initial_round_msgs)
+                .await?;
+        }
 
         let round_params = RoundParams {
             schemas: &schemas,
@@ -667,16 +670,8 @@ impl LLM {
 
             // Build msgs for this round
             let msgs = self
-                ._prepare_messages(
-                    tape,
-                    tape_context,
-                    first_round,
-                    &initial_round_msgs,
-                    &in_memory_msgs,
-                )
+                ._prepare_messages(tape, tape_context, &in_memory_msgs)
                 .await?;
-
-            first_round = false;
 
             // Execute model call + tool round
             let round = self._execute_tool_round(&msgs, &round_params).await?;
@@ -773,30 +768,27 @@ impl LLM {
 
     /// Build the message list for a single tool round.
     ///
-    /// When a tape is active, writes initial messages on the first round and
-    /// then reads the full context back from tape. Otherwise returns the
-    /// in-memory accumulation.
+    /// When a tape is active, reads the full context back from tape. Otherwise
+    /// returns the in-memory accumulation.
     async fn _prepare_messages(
         &self,
         tape: Option<&str>,
         tape_context: Option<&TapeContext>,
-        first_round: bool,
-        initial_round_msgs: &[Value],
         in_memory_msgs: &[Value],
     ) -> Result<Vec<Value>, ConduitError> {
         if let Some(tape_name) = tape {
-            if first_round && !initial_round_msgs.is_empty() {
-                self.append_initial_round_messages(tape_name, initial_round_msgs)
-                    .await?;
-            }
-
             Ok(self.build_tape_messages(tape_name, tape_context).await)
         } else {
             Ok(in_memory_msgs.to_vec())
         }
     }
 
-    async fn append_initial_round_messages(
+    /// Persist initial messages (system + user prompt) to tape.
+    ///
+    /// The system prompt is only written when the tape has no existing system
+    /// entry or when the content has changed. Non-system messages (user prompt)
+    /// are always appended.
+    async fn persist_initial_messages(
         &self,
         tape_name: &str,
         initial_round_msgs: &[Value],
@@ -810,7 +802,7 @@ impl LLM {
                 && let Some(content) = message.get("content").and_then(|v| v.as_str())
             {
                 self.async_tape
-                    .append_entry(tape_name, &TapeEntry::system(content, meta.clone()))
+                    .append_system_if_changed(tape_name, content, meta.clone())
                     .await?;
             } else {
                 self.async_tape
@@ -1401,9 +1393,7 @@ fn slice_entries_by_anchor(entries: &[TapeEntry], anchor: &AnchorSelector) -> Ve
         AnchorSelector::None => entries.to_vec(),
         AnchorSelector::LastAnchor => {
             // Find the last entry with kind == "anchor"
-            let pos = entries
-                .iter()
-                .rposition(|e| e.kind == "anchor");
+            let pos = entries.iter().rposition(|e| e.kind == "anchor");
             match pos {
                 Some(idx) => entries[idx + 1..].to_vec(),
                 None => entries.to_vec(), // no anchors → return all
@@ -1556,10 +1546,7 @@ pub fn inject_decisions_into_system_prompt(messages: &mut Vec<Value>, decisions:
 
     if let Some(idx) = last_system_idx {
         if let Some(obj) = messages[idx].as_object_mut() {
-            let existing = obj
-                .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
+            let existing = obj.get("content").and_then(|c| c.as_str()).unwrap_or("");
             let new_content = format!("{}{}", existing, block);
             obj.insert("content".to_owned(), Value::String(new_content));
         }
@@ -2055,15 +2042,12 @@ mod tests {
             .build()
             .unwrap();
         let initial_round_msgs = build_messages(Some("hello"), Some("system"), None);
+        llm.persist_initial_messages("test-tape", &initial_round_msgs)
+            .await
+            .unwrap();
 
         let messages = llm
-            ._prepare_messages(
-                Some("test-tape"),
-                None,
-                true,
-                &initial_round_msgs,
-                &initial_round_msgs,
-            )
+            ._prepare_messages(Some("test-tape"), None, &initial_round_msgs)
             .await
             .unwrap();
 
@@ -2081,6 +2065,207 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].kind, "system");
         assert_eq!(entries[1].kind, "message");
+    }
+
+    #[tokio::test]
+    async fn test_persist_initial_messages_skips_duplicate_system_prompt() {
+        let llm = LLM::builder()
+            .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+            .build()
+            .unwrap();
+        let tape = "test-dedup";
+
+        // First call writes system + user.
+        let msgs1 = build_messages(Some("hello"), Some("system prompt"), None);
+        llm.persist_initial_messages(tape, &msgs1).await.unwrap();
+
+        // Second call with same system prompt should NOT duplicate it.
+        let msgs2 = build_messages(Some("world"), Some("system prompt"), None);
+        llm.persist_initial_messages(tape, &msgs2).await.unwrap();
+
+        let entries = llm
+            .async_tape
+            .fetch_entries(&llm.async_tape.query_tape(tape))
+            .await
+            .unwrap();
+
+        let system_count = entries.iter().filter(|e| e.kind == "system").count();
+        assert_eq!(system_count, 1, "system prompt should only appear once");
+
+        let message_count = entries.iter().filter(|e| e.kind == "message").count();
+        assert_eq!(message_count, 2, "both user messages should be persisted");
+    }
+
+    #[tokio::test]
+    async fn test_persist_initial_messages_writes_changed_system_prompt() {
+        let llm = LLM::builder()
+            .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+            .build()
+            .unwrap();
+        let tape = "test-changed";
+
+        let msgs1 = build_messages(Some("hello"), Some("prompt v1"), None);
+        llm.persist_initial_messages(tape, &msgs1).await.unwrap();
+
+        // Different system prompt should be written.
+        let msgs2 = build_messages(Some("world"), Some("prompt v2"), None);
+        llm.persist_initial_messages(tape, &msgs2).await.unwrap();
+
+        let entries = llm
+            .async_tape
+            .fetch_entries(&llm.async_tape.query_tape(tape))
+            .await
+            .unwrap();
+
+        let system_count = entries.iter().filter(|e| e.kind == "system").count();
+        assert_eq!(system_count, 2, "changed system prompt should be written");
+    }
+
+    #[tokio::test]
+    async fn test_persist_initial_messages_no_system_in_msgs() {
+        let llm = LLM::builder()
+            .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+            .build()
+            .unwrap();
+        let tape = "test-no-system";
+
+        // Messages with no system prompt — only user message.
+        let msgs = build_messages(Some("hello"), None, None);
+        llm.persist_initial_messages(tape, &msgs).await.unwrap();
+
+        let entries = llm
+            .async_tape
+            .fetch_entries(&llm.async_tape.query_tape(tape))
+            .await
+            .unwrap();
+
+        assert_eq!(entries.iter().filter(|e| e.kind == "system").count(), 0);
+        assert_eq!(entries.iter().filter(|e| e.kind == "message").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_persist_initial_messages_three_calls_same_prompt() {
+        let llm = LLM::builder()
+            .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+            .build()
+            .unwrap();
+        let tape = "test-triple";
+
+        for i in 0..3 {
+            let msgs = build_messages(Some(&format!("msg {i}")), Some("stable system"), None);
+            llm.persist_initial_messages(tape, &msgs).await.unwrap();
+        }
+
+        let entries = llm
+            .async_tape
+            .fetch_entries(&llm.async_tape.query_tape(tape))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            entries.iter().filter(|e| e.kind == "system").count(),
+            1,
+            "system prompt should appear exactly once across 3 calls"
+        );
+        assert_eq!(
+            entries.iter().filter(|e| e.kind == "message").count(),
+            3,
+            "all 3 user messages should be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persist_initial_messages_change_then_revert() {
+        let llm = LLM::builder()
+            .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+            .build()
+            .unwrap();
+        let tape = "test-revert";
+
+        let msgs_v1 = build_messages(Some("a"), Some("v1"), None);
+        llm.persist_initial_messages(tape, &msgs_v1).await.unwrap();
+
+        let msgs_v2 = build_messages(Some("b"), Some("v2"), None);
+        llm.persist_initial_messages(tape, &msgs_v2).await.unwrap();
+
+        // Revert back to v1 — should write again since latest is v2.
+        let msgs_v1_again = build_messages(Some("c"), Some("v1"), None);
+        llm.persist_initial_messages(tape, &msgs_v1_again)
+            .await
+            .unwrap();
+
+        let entries = llm
+            .async_tape
+            .fetch_entries(&llm.async_tape.query_tape(tape))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            entries.iter().filter(|e| e.kind == "system").count(),
+            3,
+            "v1 -> v2 -> v1 should produce 3 system entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persist_initial_messages_empty_list() {
+        let llm = LLM::builder()
+            .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+            .build()
+            .unwrap();
+        let tape = "test-empty";
+
+        llm.persist_initial_messages(tape, &[]).await.unwrap();
+
+        let entries = llm
+            .async_tape
+            .fetch_entries(&llm.async_tape.query_tape(tape))
+            .await
+            .unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_build_full_context_dedup_with_legacy_duplicate_system_entries() {
+        // Even if the tape contains duplicate system entries (e.g. from before
+        // the dedup fix), build_full_context_from_entries keeps only the last one.
+        let meta = json!({});
+        let entries = vec![
+            TapeEntry::system("prompt v1", meta.clone()),
+            TapeEntry::message(json!({"role": "user", "content": "hello"}), meta.clone()),
+            TapeEntry::system("prompt v1", meta.clone()), // legacy duplicate
+            TapeEntry::message(json!({"role": "user", "content": "world"}), meta),
+        ];
+        let messages = build_full_context_from_entries(&entries);
+
+        let system_msgs: Vec<_> = messages
+            .iter()
+            .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+            .collect();
+        assert_eq!(system_msgs.len(), 1, "build_full_context should keep only the last system");
+        assert_eq!(system_msgs[0]["content"], "prompt v1");
+
+        let user_msgs: Vec<_> = messages
+            .iter()
+            .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+            .collect();
+        assert_eq!(user_msgs.len(), 2, "all user messages should be preserved");
+    }
+
+    #[tokio::test]
+    async fn test_prepare_messages_no_tape_returns_in_memory() {
+        let llm = LLM::builder()
+            .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+            .build()
+            .unwrap();
+
+        let in_memory = vec![json!({"role": "user", "content": "hello"})];
+        let msgs = llm
+            ._prepare_messages(None, None, &in_memory)
+            .await
+            .unwrap();
+
+        assert_eq!(msgs, in_memory);
     }
 
     // ----- extract_content -----
@@ -2558,10 +2743,12 @@ mod tests {
         inject_decisions_into_system_prompt(&mut messages, &["Use PostgreSQL".to_string()]);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "system");
-        assert!(messages[0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("1. Use PostgreSQL"));
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("1. Use PostgreSQL")
+        );
     }
 
     #[test]
@@ -2578,10 +2765,7 @@ mod tests {
         let meta = json!({});
         let entries = vec![
             TapeEntry::decision("Use PostgreSQL", meta.clone()),
-            TapeEntry::message(
-                json!({"role": "user", "content": "Hello"}),
-                meta.clone(),
-            ),
+            TapeEntry::message(json!({"role": "user", "content": "Hello"}), meta.clone()),
         ];
         let messages = build_full_context_from_entries(&entries);
         // Decision entries are skipped by build_full_context (kind is not message/system/tool_*)

@@ -181,12 +181,14 @@ async fn maybe_send_user_facing_notice(ctx: Option<&ToolContext>, args: &Value) 
         "text": description,
     });
     let notify_url = format!("{url}/notify");
-    if let Err(err) = HTTP_CLIENT
+    let mut req = HTTP_CLIENT
         .post(&notify_url)
-        .json(&payload)
-        .send()
-        .await
-    {
+        .timeout(Duration::from_secs(3))
+        .json(&payload);
+    if let Ok(token) = std::env::var("ELI_SIDECAR_TOKEN") {
+        req = req.bearer_auth(&token);
+    }
+    if let Err(err) = req.send().await {
         tracing::debug!(error = %err, session_id, notify_url, "tool.notice request failed");
     }
 }
@@ -1178,11 +1180,13 @@ fn tool_sidecar() -> Tool {
                 let tool_url = format!("{url}/tools/{tool_name}");
                 let payload =
                     build_sidecar_request_payload(params, description.as_deref(), session_id);
-                let resp = HTTP_CLIENT
+                let mut req = HTTP_CLIENT
                     .post(&tool_url)
-                    .json(&payload)
-                    .send()
-                    .await
+                    .json(&payload);
+                if let Ok(token) = std::env::var("ELI_SIDECAR_TOKEN") {
+                    req = req.bearer_auth(&token);
+                }
+                let resp = req.send().await
                     .map_err(|e| {
                         ConduitError::new(ErrorKind::Tool, format!("sidecar request failed: {e}"))
                     })?;

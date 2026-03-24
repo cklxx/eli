@@ -170,12 +170,14 @@ impl Channel for WebhookChannel {
     }
 
     async fn send(&self, message: ChannelMessage) -> anyhow::Result<()> {
-        let resp = self
+        let mut req = self
             .http_client
             .post(&self.settings.callback_url)
-            .json(&message)
-            .send()
-            .await;
+            .json(&message);
+        if let Ok(token) = std::env::var("ELI_SIDECAR_TOKEN") {
+            req = req.bearer_auth(&token);
+        }
+        let resp = req.send().await;
 
         match resp {
             Ok(r) if r.status().is_success() => Ok(()),

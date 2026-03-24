@@ -171,14 +171,21 @@ export function beginPendingTyping(params: {
   accountId: string;
   sessionId: string;
 }): Promise<void> {
+  console.log(
+    `[typing] BEGIN sessionId=${params.sessionId} messageId=${params.messageId}`,
+  );
   return queueTypingTask(params.sessionId, async () => {
     // Queue the add operation so a later cleanup for the same session cannot
     // overtake it and get dropped before the reaction state is recorded.
     const typingState = await addTypingState(params);
     if (!typingState) {
+      console.log(`[typing] BEGIN ${params.sessionId} → null state, skipping`);
       pendingTyping.delete(params.sessionId);
       return;
     }
+    console.log(
+      `[typing] BEGIN ${params.sessionId} → stored msgId=${typingState?.messageId} rxnId=${typingState?.reactionId}`,
+    );
     pendingTyping.set(params.sessionId, {
       typingState,
       cfg: params.cfg,
@@ -191,17 +198,28 @@ export function endPendingTyping(params: {
   sessionId: string;
   channelPlugin?: ChannelPlugin;
 }): Promise<void> {
+  console.log(
+    `[typing] END sessionId=${params.sessionId} plugin=${params.channelPlugin?.meta?.id ?? "none"} keys=[${[...pendingTyping.keys()]}]`,
+  );
   return queueTypingTask(params.sessionId, async () => {
     // Cleanup shares the same queue as beginPendingTyping(). If outbound
     // arrives before typing setup finishes, this waits behind the add step
     // and still removes the reaction once the state is available.
     const typing = pendingTyping.get(params.sessionId);
     if (!typing) {
+      console.log(`[typing] END ${params.sessionId} → NOT FOUND in map`);
       return;
     }
-
+    console.log(
+      `[typing] END ${params.sessionId} → found msgId=${typing.typingState?.messageId} rxnId=${typing.typingState?.reactionId}`,
+    );
     pendingTyping.delete(params.sessionId);
-    await removeTypingState(params.channelPlugin, typing);
+    try {
+      await removeTypingState(params.channelPlugin, typing);
+      console.log(`[typing] END ${params.sessionId} → removal OK`);
+    } catch (e: any) {
+      console.log(`[typing] END ${params.sessionId} → removal THREW: ${e.message}`);
+    }
   });
 }
 
