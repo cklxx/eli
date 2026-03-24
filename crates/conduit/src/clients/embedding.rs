@@ -57,6 +57,13 @@ impl EmbeddingClient {
             .resolve_provider_model(model, provider)
             .map_err(|e| ErrorPayload::new(e.kind, e.message))?;
 
+        let api_key = self.core.resolve_api_key(&provider_name).ok_or_else(|| {
+            ErrorPayload::new(
+                ErrorKind::Config,
+                format!("No API key found for provider '{provider_name}'"),
+            )
+        })?;
+
         let client = self.core.get_client(&provider_name);
         let api_base = self
             .core
@@ -81,7 +88,7 @@ impl EmbeddingClient {
             "input": input_value,
         });
 
-        let response = client.post(&url).json(&body).send().await.map_err(|e| {
+        let response = client.post(&url).bearer_auth(&api_key).json(&body).send().await.map_err(|e| {
             ErrorPayload::new(
                 ErrorKind::Provider,
                 format!("{}:{}: {}", provider_name, model_id, e),
