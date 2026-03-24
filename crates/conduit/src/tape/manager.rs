@@ -543,33 +543,52 @@ mod tests {
     #[tokio::test]
     async fn test_async_append_system_if_changed_first_write() {
         let store = InMemoryTapeStore::new();
-        let manager = AsyncTapeManager::new(
-            Some(Box::new(AsyncTapeStoreAdapter::new(store))),
-            None,
+        let manager =
+            AsyncTapeManager::new(Some(Box::new(AsyncTapeStoreAdapter::new(store))), None);
+        assert!(
+            manager
+                .append_system_if_changed("t", "hello", json!({}))
+                .await
+                .unwrap()
         );
-        assert!(manager.append_system_if_changed("t", "hello", json!({})).await.unwrap());
     }
 
     #[tokio::test]
     async fn test_async_append_system_if_changed_duplicate() {
         let store = InMemoryTapeStore::new();
-        let manager = AsyncTapeManager::new(
-            Some(Box::new(AsyncTapeStoreAdapter::new(store))),
-            None,
+        let manager =
+            AsyncTapeManager::new(Some(Box::new(AsyncTapeStoreAdapter::new(store))), None);
+        assert!(
+            manager
+                .append_system_if_changed("t", "hello", json!({}))
+                .await
+                .unwrap()
         );
-        assert!(manager.append_system_if_changed("t", "hello", json!({})).await.unwrap());
-        assert!(!manager.append_system_if_changed("t", "hello", json!({})).await.unwrap());
+        assert!(
+            !manager
+                .append_system_if_changed("t", "hello", json!({}))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
     async fn test_async_append_system_if_changed_on_change() {
         let store = InMemoryTapeStore::new();
-        let manager = AsyncTapeManager::new(
-            Some(Box::new(AsyncTapeStoreAdapter::new(store))),
-            None,
+        let manager =
+            AsyncTapeManager::new(Some(Box::new(AsyncTapeStoreAdapter::new(store))), None);
+        assert!(
+            manager
+                .append_system_if_changed("t", "v1", json!({}))
+                .await
+                .unwrap()
         );
-        assert!(manager.append_system_if_changed("t", "v1", json!({})).await.unwrap());
-        assert!(manager.append_system_if_changed("t", "v2", json!({})).await.unwrap());
+        assert!(
+            manager
+                .append_system_if_changed("t", "v2", json!({}))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -581,9 +600,18 @@ mod tests {
         );
         manager
             .record_chat(
-                "t", "r1", None, None,
+                "t",
+                "r1",
+                None,
+                None,
                 &[json!({"role": "user", "content": "hi"})],
-                Some("hey"), None, None, None, None, None, None,
+                Some("hey"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -600,9 +628,18 @@ mod tests {
         );
         manager
             .record_chat(
-                "t", "r1", Some(""), None,
+                "t",
+                "r1",
+                Some(""),
+                None,
                 &[json!({"role": "user", "content": "hi"})],
-                Some("hey"), None, None, None, None, None, None,
+                Some("hey"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -619,17 +656,35 @@ mod tests {
         );
         manager
             .record_chat(
-                "t", "r1", Some("v1"), None,
+                "t",
+                "r1",
+                Some("v1"),
+                None,
                 &[json!({"role": "user", "content": "hi"})],
-                Some("hey"), None, None, None, None, None, None,
+                Some("hey"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             )
             .await
             .unwrap();
         manager
             .record_chat(
-                "t", "r2", Some("v2"), None,
+                "t",
+                "r2",
+                Some("v2"),
+                None,
                 &[json!({"role": "user", "content": "bye"})],
-                Some("cya"), None, None, None, None, None, None,
+                Some("cya"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -648,9 +703,18 @@ mod tests {
         for i in 0..3 {
             manager
                 .record_chat(
-                    "t", &format!("r{i}"), Some("stable"), None,
+                    "t",
+                    &format!("r{i}"),
+                    Some("stable"),
+                    None,
                     &[json!({"role": "user", "content": format!("msg {i}")})],
-                    Some("ok"), None, None, None, None, None, None,
+                    Some("ok"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -674,16 +738,32 @@ mod tests {
     fn test_append_system_if_changed_returns_false_on_duplicate() {
         let store = InMemoryTapeStore::new();
         let manager = TapeManager::new(Some(Box::new(store)), None);
-        assert!(manager.append_system_if_changed("t", "hello", json!({})).unwrap());
-        assert!(!manager.append_system_if_changed("t", "hello", json!({})).unwrap());
+        assert!(
+            manager
+                .append_system_if_changed("t", "hello", json!({}))
+                .unwrap()
+        );
+        assert!(
+            !manager
+                .append_system_if_changed("t", "hello", json!({}))
+                .unwrap()
+        );
     }
 
     #[test]
     fn test_append_system_if_changed_returns_true_on_changed_content() {
         let store = InMemoryTapeStore::new();
         let manager = TapeManager::new(Some(Box::new(store)), None);
-        assert!(manager.append_system_if_changed("t", "v1", json!({})).unwrap());
-        assert!(manager.append_system_if_changed("t", "v2", json!({})).unwrap());
+        assert!(
+            manager
+                .append_system_if_changed("t", "v1", json!({}))
+                .unwrap()
+        );
+        assert!(
+            manager
+                .append_system_if_changed("t", "v2", json!({}))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -692,9 +772,18 @@ mod tests {
         let manager = TapeManager::new(Some(Box::new(store.clone())), None);
         manager
             .record_chat(
-                "t", "r1", None, None,
+                "t",
+                "r1",
+                None,
+                None,
                 &[json!({"role": "user", "content": "hi"})],
-                Some("hey"), None, None, None, None, None, None,
+                Some("hey"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             )
             .unwrap();
         let entries = store.read("t").unwrap();
@@ -707,9 +796,18 @@ mod tests {
         let manager = TapeManager::new(Some(Box::new(store.clone())), None);
         manager
             .record_chat(
-                "t", "r1", Some(""), None,
+                "t",
+                "r1",
+                Some(""),
+                None,
                 &[json!({"role": "user", "content": "hi"})],
-                Some("hey"), None, None, None, None, None, None,
+                Some("hey"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             )
             .unwrap();
         let entries = store.read("t").unwrap();
@@ -722,16 +820,34 @@ mod tests {
         let manager = TapeManager::new(Some(Box::new(store.clone())), None);
         manager
             .record_chat(
-                "t", "r1", Some("v1"), None,
+                "t",
+                "r1",
+                Some("v1"),
+                None,
                 &[json!({"role": "user", "content": "hi"})],
-                Some("hey"), None, None, None, None, None, None,
+                Some("hey"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             )
             .unwrap();
         manager
             .record_chat(
-                "t", "r2", Some("v2"), None,
+                "t",
+                "r2",
+                Some("v2"),
+                None,
                 &[json!({"role": "user", "content": "bye"})],
-                Some("cya"), None, None, None, None, None, None,
+                Some("cya"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             )
             .unwrap();
         let entries = store.read("t").unwrap();
@@ -746,9 +862,18 @@ mod tests {
         for i in 0..3 {
             manager
                 .record_chat(
-                    "t", &format!("r{i}"), Some("stable prompt"), None,
+                    "t",
+                    &format!("r{i}"),
+                    Some("stable prompt"),
+                    None,
                     &[json!({"role": "user", "content": format!("msg {i}")})],
-                    Some("ok"), None, None, None, None, None, None,
+                    Some("ok"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                 )
                 .unwrap();
         }

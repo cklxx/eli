@@ -226,8 +226,14 @@ mod tests {
     fn test_latest_system_content_no_system_entries() {
         let meta = serde_json::json!({});
         let entries = vec![
-            TapeEntry::message(serde_json::json!({"role": "user", "content": "hi"}), meta.clone()),
-            TapeEntry::message(serde_json::json!({"role": "assistant", "content": "hello"}), meta),
+            TapeEntry::message(
+                serde_json::json!({"role": "user", "content": "hi"}),
+                meta.clone(),
+            ),
+            TapeEntry::message(
+                serde_json::json!({"role": "assistant", "content": "hello"}),
+                meta,
+            ),
         ];
         assert_eq!(latest_system_content(&entries), None);
     }
@@ -247,7 +253,10 @@ mod tests {
         let meta = serde_json::json!({});
         let entries = vec![
             TapeEntry::system("prompt v1", meta.clone()),
-            TapeEntry::message(serde_json::json!({"role": "user", "content": "hi"}), meta.clone()),
+            TapeEntry::message(
+                serde_json::json!({"role": "user", "content": "hi"}),
+                meta.clone(),
+            ),
             TapeEntry::system("prompt v2", meta.clone()),
             TapeEntry::message(serde_json::json!({"role": "user", "content": "bye"}), meta),
         ];

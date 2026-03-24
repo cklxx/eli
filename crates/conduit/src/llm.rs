@@ -2242,7 +2242,11 @@ mod tests {
             .iter()
             .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
             .collect();
-        assert_eq!(system_msgs.len(), 1, "build_full_context should keep only the last system");
+        assert_eq!(
+            system_msgs.len(),
+            1,
+            "build_full_context should keep only the last system"
+        );
         assert_eq!(system_msgs[0]["content"], "prompt v1");
 
         let user_msgs: Vec<_> = messages
@@ -2260,10 +2264,7 @@ mod tests {
             .unwrap();
 
         let in_memory = vec![json!({"role": "user", "content": "hello"})];
-        let msgs = llm
-            ._prepare_messages(None, None, &in_memory)
-            .await
-            .unwrap();
+        let msgs = llm._prepare_messages(None, None, &in_memory).await.unwrap();
 
         assert_eq!(msgs, in_memory);
     }
