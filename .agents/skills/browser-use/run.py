@@ -30,6 +30,28 @@ load_repo_dotenv(__file__)
 
 _CALL_TIMEOUT = int(os.environ.get("BROWSER_SKILL_TIMEOUT", "30"))
 _INTER_CALL_DELAY = float(os.environ.get("BROWSER_SKILL_DELAY", "4"))
+_MCP_EXTENSION_ID = "mmlmfjhmonkocbjadbfplnigmagldckm"
+
+
+def _close_extension_tabs():
+    """Close all Playwright MCP extension tabs in Chrome via AppleScript."""
+    if sys.platform != "darwin":
+        return
+    script = f'''
+    tell application "Google Chrome"
+        repeat with w in windows
+            set n to count of tabs of w
+            repeat with i from n to 1 by -1
+                if URL of tab i of w contains "{_MCP_EXTENSION_ID}" then
+                    close tab i of w
+                end if
+            end repeat
+            if (count of tabs of w) = 0 then close w
+        end repeat
+    end tell
+    '''
+    with contextlib.suppress(Exception):
+        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
 
 
 class McpSession:
@@ -108,16 +130,6 @@ class McpSession:
 
     def close(self):
         if self.proc:
-            # Close extension tab we opened before killing the process
-            with contextlib.suppress(Exception):
-                self.call("browser_run_code", {
-                    "code": """async (page) => {
-                        const pages = page.context().pages();
-                        for (const p of pages) {
-                            if (p.url().includes('chrome-extension://')) await p.close();
-                        }
-                    }"""
-                })
             with contextlib.suppress(Exception):
                 self.proc.stdin.close()
             try:
@@ -125,6 +137,8 @@ class McpSession:
                 self.proc.wait(timeout=3)
             except Exception:
                 self.proc.kill()
+        # Clean up ALL extension tabs via AppleScript (works across contexts)
+        _close_extension_tabs()
 
 
 def _call_mcp_tools(tool_calls: list[tuple[str, dict]], timeout: int = _CALL_TIMEOUT) -> list[dict]:
