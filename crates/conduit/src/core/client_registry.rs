@@ -181,7 +181,10 @@ impl ClientRegistry {
             .default_headers(headers)
             .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
             .build()
-            .unwrap_or_else(|_| Client::new())
+            .unwrap_or_else(|err| {
+                tracing::warn!(%err, provider, "failed to build HTTP client with custom config, falling back to default");
+                Client::new()
+            })
     }
 }
 

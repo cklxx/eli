@@ -10,8 +10,11 @@ use crate::auth::APIKeyResolver;
 use crate::clients::parsing::parser_for_transport;
 pub use crate::core::api_format::ApiFormat;
 use crate::core::errors::{ConduitError, ErrorKind};
-use crate::core::execution::{ApiBaseConfig, ApiKeyConfig, LLMCore, TransportResponse};
-use crate::core::results::{AsyncTextStream, StreamEvent, ToolAutoResult, ToolAutoResultKind};
+use crate::core::execution::{ApiBaseConfig, ApiKeyConfig, LLMCore};
+use crate::core::response_parser::TransportResponse;
+use crate::core::results::{
+    AsyncTextStream, StreamEvent, ToolAutoResult, ToolAutoResultKind, ToolExecution,
+};
 use crate::core::tool_calls::{normalize_message_tool_calls, normalize_tool_calls};
 use crate::tape::entries::TapeEntry;
 use crate::tape::{
@@ -33,6 +36,27 @@ pub const DEFAULT_MODEL: &str = "openai:gpt-4o-mini";
 /// Hook to process stream events before they are emitted to the caller.
 /// Return `Some(event)` to forward (possibly transformed), or `None` to drop.
 pub type StreamEventFilter = Arc<dyn Fn(StreamEvent) -> Option<StreamEvent> + Send + Sync>;
+
+// ---------------------------------------------------------------------------
+// ChatRequest
+// ---------------------------------------------------------------------------
+
+/// Bundles the parameters shared across chat and tool-calling methods.
+///
+/// All fields are optional so callers only fill in what they need.
+#[derive(Default)]
+pub struct ChatRequest<'a> {
+    pub prompt: Option<&'a str>,
+    pub system_prompt: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub provider: Option<&'a str>,
+    pub messages: Option<Vec<Value>>,
+    pub max_tokens: Option<u32>,
+    pub tools: Option<&'a ToolSet>,
+    pub tool_context: Option<&'a ToolContext>,
+    pub tape: Option<&'a str>,
+    pub tape_context: Option<&'a TapeContext>,
+}
 
 // ---------------------------------------------------------------------------
 // LLMBuilder
@@ -414,110 +438,55 @@ impl LLM {
     /// Synchronous wrapper for [`chat_async`](Self::chat_async).
     ///
     /// Creates a single-threaded tokio runtime and blocks the current thread.
-    pub fn chat_sync(
-        &mut self,
-        prompt: Option<&str>,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-        provider: Option<&str>,
-        messages: Option<Vec<Value>>,
-        max_tokens: Option<u32>,
-    ) -> Result<String, ConduitError> {
+    pub fn chat_sync(&mut self, req: ChatRequest<'_>) -> Result<String, ConduitError> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| {
                 ConduitError::new(ErrorKind::Unknown, format!("Failed to create runtime: {e}"))
             })?;
-        rt.block_on(self.chat_async(
-            prompt,
-            system_prompt,
-            model,
-            provider,
-            messages,
-            max_tokens,
-            None,
-        ))
+        rt.block_on(self.chat_async(req))
     }
 
     /// Synchronous wrapper for [`run_tools`](Self::run_tools).
     ///
     /// Creates a single-threaded tokio runtime and blocks the current thread.
-    #[allow(clippy::too_many_arguments)]
-    pub fn run_tools_sync(
-        &mut self,
-        prompt: Option<&str>,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-        provider: Option<&str>,
-        messages: Option<Vec<Value>>,
-        max_tokens: Option<u32>,
-        tools: &ToolSet,
-        context: Option<&ToolContext>,
-        tape: Option<&str>,
-        tape_context: Option<&TapeContext>,
-    ) -> Result<ToolAutoResult, ConduitError> {
+    pub fn run_tools_sync(&mut self, req: ChatRequest<'_>) -> Result<ToolAutoResult, ConduitError> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| {
                 ConduitError::new(ErrorKind::Unknown, format!("Failed to create runtime: {e}"))
             })?;
-        rt.block_on(self.run_tools(
-            prompt,
-            system_prompt,
-            model,
-            provider,
-            messages,
-            max_tokens,
-            tools,
-            context,
-            tape,
-            tape_context,
-        ))
+        rt.block_on(self.run_tools(req))
     }
 
     // -- Chat ----------------------------------------------------------------
 
     /// Synchronous chat (blocks the current thread).
-    pub fn chat(
-        &mut self,
-        prompt: Option<&str>,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-        provider: Option<&str>,
-        messages: Option<Vec<Value>>,
-        max_tokens: Option<u32>,
-    ) -> Result<String, ConduitError> {
+    pub fn chat(&mut self, req: ChatRequest<'_>) -> Result<String, ConduitError> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| {
                 ConduitError::new(ErrorKind::Unknown, format!("Failed to create runtime: {e}"))
             })?;
-        rt.block_on(self.chat_async(
+        rt.block_on(self.chat_async(req))
+    }
+
+    /// Async chat completion returning the assistant text.
+    pub async fn chat_async(&mut self, req: ChatRequest<'_>) -> Result<String, ConduitError> {
+        let ChatRequest {
             prompt,
             system_prompt,
             model,
             provider,
             messages,
             max_tokens,
-            None,
-        ))
-    }
+            tape,
+            ..
+        } = req;
 
-    /// Async chat completion returning the assistant text.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn chat_async(
-        &mut self,
-        prompt: Option<&str>,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-        provider: Option<&str>,
-        messages: Option<Vec<Value>>,
-        max_tokens: Option<u32>,
-        tape: Option<&str>,
-    ) -> Result<String, ConduitError> {
         // Read existing tape messages if a tape name is provided.
         let tape_messages = if let Some(tape_name) = tape {
             match self.async_tape.read_messages(tape_name, None).await {
@@ -600,17 +569,20 @@ impl LLM {
     // -- Tool calls ----------------------------------------------------------
 
     /// Get raw tool calls from the model.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn tool_calls(
-        &mut self,
-        prompt: Option<&str>,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-        provider: Option<&str>,
-        messages: Option<Vec<Value>>,
-        max_tokens: Option<u32>,
-        tools: &ToolSet,
-    ) -> Result<Vec<Value>, ConduitError> {
+    pub async fn tool_calls(&mut self, req: ChatRequest<'_>) -> Result<Vec<Value>, ConduitError> {
+        let ChatRequest {
+            prompt,
+            system_prompt,
+            model,
+            provider,
+            messages,
+            max_tokens,
+            tools,
+            ..
+        } = req;
+        let tools = tools.ok_or_else(|| {
+            ConduitError::new(ErrorKind::InvalidInput, "tool_calls requires tools")
+        })?;
         let msgs = build_messages(prompt, system_prompt, messages.as_deref());
         let schemas = tools.payload().map(|s| s.to_vec());
         let response =
@@ -634,20 +606,22 @@ impl LLM {
     }
 
     /// Get tool calls and execute them against the provided tools.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn run_tools(
-        &mut self,
-        prompt: Option<&str>,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-        provider: Option<&str>,
-        messages: Option<Vec<Value>>,
-        max_tokens: Option<u32>,
-        tools: &ToolSet,
-        context: Option<&ToolContext>,
-        tape: Option<&str>,
-        tape_context: Option<&TapeContext>,
-    ) -> Result<ToolAutoResult, ConduitError> {
+    pub async fn run_tools(&mut self, req: ChatRequest<'_>) -> Result<ToolAutoResult, ConduitError> {
+        let ChatRequest {
+            prompt,
+            system_prompt,
+            model,
+            provider,
+            messages,
+            max_tokens,
+            tools,
+            tool_context: context,
+            tape,
+            tape_context,
+        } = req;
+        let tools = tools.ok_or_else(|| {
+            ConduitError::new(ErrorKind::InvalidInput, "run_tools requires tools")
+        })?;
         let schemas = tools.payload().map(|s| s.to_vec());
 
         // Accumulate tool calls/results across all rounds for the return value
@@ -668,6 +642,15 @@ impl LLM {
         // to tape so subsequent reads include it.
         let mut first_round = true;
 
+        let round_params = RoundParams {
+            schemas: &schemas,
+            model,
+            provider,
+            max_tokens,
+            tools,
+            tool_context: context,
+        };
+
         let max_iterations: usize = 250; // Safety limit for tool-calling rounds
         let mut iteration: usize = 0;
 
@@ -679,233 +662,320 @@ impl LLM {
                     format!("run_tools exceeded max iterations ({})", max_iterations),
                 ));
             }
+
             // Build msgs for this round
-            let msgs = if let Some(tape_name) = tape {
-                if first_round {
-                    // Write extra messages to tape (system prompt and user prompt
-                    // are written by the caller before invoking run_tools).
-                    let run_id = Uuid::new_v4().to_string();
-                    let meta = serde_json::json!({ "run_id": &run_id });
-
-                    if let Some(ref extra_msgs) = messages {
-                        for m in extra_msgs {
-                            if let Err(e) = self
-                                .async_tape
-                                .append_entry(
-                                    tape_name,
-                                    &TapeEntry::message(m.clone(), meta.clone()),
-                                )
-                                .await
-                            {
-                                tracing::error!(
-                                    error = %e,
-                                    tape = %tape_name,
-                                    "failed to append initial tape message"
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Read full context from tape (includes system, messages, tool_call, tool_result)
-                let default_ctx = self.async_tape.default_context().clone();
-                let ctx = tape_context.unwrap_or(&default_ctx);
-                let query = ctx.build_query(self.async_tape.query_tape(tape_name));
-                let entries = match self.async_tape.fetch_entries(&query).await {
-                    Ok(entries) => entries,
-                    Err(e) if e.kind == ErrorKind::NotFound && query.after_last => {
-                        tracing::warn!(
-                            error = %e,
-                            tape = %tape_name,
-                            "anchored tape context unavailable; falling back to full tape"
-                        );
-                        match self
-                            .async_tape
-                            .fetch_entries(&self.async_tape.query_tape(tape_name))
-                            .await
-                        {
-                            Ok(entries) => entries,
-                            Err(fallback) => {
-                                tracing::error!(
-                                    error = %fallback,
-                                    tape = %tape_name,
-                                    "failed to fetch fallback tape entries"
-                                );
-                                Vec::new()
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, tape = %tape_name, "failed to fetch tape entries");
-                        Vec::new()
-                    }
-                };
-                let mut tape_msgs = build_full_context_from_entries(&entries);
-                // Apply context budget: truncate large tool results, trim if over budget
-                crate::tape::context::apply_context_budget(&mut tape_msgs);
-                tape_msgs
-            } else {
-                in_memory_msgs.clone()
-            };
-
-            first_round = false;
-
-            let response = self
-                .core
-                .run_chat(
-                    msgs,
-                    schemas.clone(),
-                    model,
-                    provider,
-                    max_tokens,
-                    false,
-                    None,
-                    Default::default(),
-                    |resp: TransportResponse, _prov: &str, _model: &str, _attempt: u32| {
-                        Ok(resp.payload)
-                    },
+            let msgs = self
+                ._prepare_messages(
+                    messages.as_deref(),
+                    tape,
+                    tape_context,
+                    first_round,
+                    &in_memory_msgs,
                 )
                 .await?;
 
-            // Extract usage from this round's response.
-            if let Some(usage) = response.get("usage").cloned() {
+            first_round = false;
+
+            // Execute model call + tool round
+            let round = self
+                ._execute_tool_round(&msgs, &round_params)
+                .await?;
+
+            // Update cumulative usage
+            if let Some(usage) = round.usage {
                 last_usage = Some(usage);
             }
 
-            let raw_calls = extract_tool_calls(&response)?;
-
-            if raw_calls.is_empty() {
-                // Model returned text, no more tool calls - done
-                let content = extract_content(&response).unwrap_or_default();
-
-                // Write final assistant message to tape
-                if let Some(tape_name) = tape {
-                    let meta = serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
-                    let assistant_msg =
-                        serde_json::json!({"role": "assistant", "content": &content});
-                    if let Err(e) = self
-                        .async_tape
-                        .append_entry(tape_name, &TapeEntry::message(assistant_msg, meta))
-                        .await
-                    {
-                        tracing::error!(
-                            error = %e,
-                            tape = %tape_name,
-                            "failed to append final assistant message"
-                        );
+            match round.outcome {
+                ToolRoundOutcome::Text(content) => {
+                    // Write final assistant message to tape
+                    if let Some(tape_name) = tape {
+                        let meta =
+                            serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
+                        let assistant_msg =
+                            serde_json::json!({"role": "assistant", "content": &content});
+                        if let Err(e) = self
+                            .async_tape
+                            .append_entry(
+                                tape_name,
+                                &TapeEntry::message(assistant_msg, meta),
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                error = %e,
+                                tape = %tape_name,
+                                "failed to append final assistant message"
+                            );
+                        }
                     }
+
+                    return Ok(ToolAutoResult {
+                        kind: ToolAutoResultKind::Text,
+                        text: Some(content),
+                        tool_calls: all_tool_calls,
+                        tool_results: all_tool_results,
+                        error: None,
+                        usage: last_usage,
+                    });
                 }
+                ToolRoundOutcome::Tools {
+                    response,
+                    execution,
+                } => {
+                    // Accumulate for return value
+                    all_tool_calls.extend(execution.tool_calls.clone());
+                    all_tool_results.extend(execution.tool_results.clone());
 
-                return Ok(ToolAutoResult {
-                    kind: ToolAutoResultKind::Text,
-                    text: Some(content),
-                    tool_calls: all_tool_calls,
-                    tool_results: all_tool_results,
-                    error: None,
-                    usage: last_usage,
-                });
-            }
-
-            // Execute tools
-            let execution = self
-                .tool_executor
-                .execute_async(ToolCallResponse::List(raw_calls), &tools.runnable, context)
-                .await?;
-
-            // Log tool errors but continue the loop so the LLM can see the
-            // error as a tool result and react (retry, try a different
-            // approach, or report failure gracefully).
-            if let Some(ref err) = execution.error {
-                tracing::warn!(
-                    error = %err,
-                    "tool execution error — feeding back to LLM for recovery"
-                );
-            }
-
-            // Accumulate for return value
-            all_tool_calls.extend(execution.tool_calls.clone());
-            all_tool_results.extend(execution.tool_results.clone());
-
-            if let Some(tape_name) = tape {
-                // Write assistant tool_call entry to tape
-                let meta = serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
-                if let Err(e) = self
-                    .async_tape
-                    .append_entry(
-                        tape_name,
-                        &TapeEntry::tool_call(execution.tool_calls.clone(), meta.clone()),
+                    // Persist round to tape or accumulate in memory
+                    self._persist_round(
+                        tape,
+                        &response,
+                        &execution,
+                        &mut in_memory_msgs,
                     )
-                    .await
-                {
-                    tracing::error!(
-                        error = %e,
-                        tape = %tape_name,
-                        "failed to append assistant tool calls"
-                    );
-                }
-
-                // Write tool_result entries to tape
-                let paired: Vec<Value> = execution
-                    .tool_calls
-                    .iter()
-                    .zip(execution.tool_results.iter())
-                    .map(|(call, result)| {
-                        let call_id = call.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                        serde_json::json!({"call_id": call_id, "output": result})
-                    })
-                    .collect();
-                if let Err(e) = self
-                    .async_tape
-                    .append_entry(tape_name, &TapeEntry::tool_result(paired, meta))
-                    .await
-                {
-                    tracing::error!(
-                        error = %e,
-                        tape = %tape_name,
-                        "failed to append assistant tool results"
-                    );
-                }
-            } else {
-                // tape=None fallback: accumulate in memory
-                let assistant_msg = build_assistant_tool_call_message(&response);
-                in_memory_msgs.push(assistant_msg);
-
-                for (i, result) in execution.tool_results.iter().enumerate() {
-                    let call_id = execution
-                        .tool_calls
-                        .get(i)
-                        .and_then(|c| c.get("id"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let content_str = match result {
-                        Value::String(s) => s.clone(),
-                        other => serde_json::to_string(other).unwrap_or_default(),
-                    };
-                    in_memory_msgs.push(serde_json::json!({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": content_str,
-                    }));
+                    .await;
                 }
             }
             // Loop continues - next iteration reads from tape (or in_memory_msgs)
         }
     }
 
+    // -- run_tools helpers ---------------------------------------------------
+
+    /// Build the message list for a single tool round.
+    ///
+    /// When a tape is active, writes initial messages on the first round and
+    /// then reads the full context back from tape. Otherwise returns the
+    /// in-memory accumulation.
+    async fn _prepare_messages(
+        &self,
+        messages: Option<&[Value]>,
+        tape: Option<&str>,
+        tape_context: Option<&TapeContext>,
+        first_round: bool,
+        in_memory_msgs: &[Value],
+    ) -> Result<Vec<Value>, ConduitError> {
+        if let Some(tape_name) = tape {
+            if first_round {
+                // Write extra messages to tape (system prompt and user prompt
+                // are written by the caller before invoking run_tools).
+                let run_id = Uuid::new_v4().to_string();
+                let meta = serde_json::json!({ "run_id": &run_id });
+
+                if let Some(extra_msgs) = messages {
+                    for m in extra_msgs {
+                        if let Err(e) = self
+                            .async_tape
+                            .append_entry(
+                                tape_name,
+                                &TapeEntry::message(m.clone(), meta.clone()),
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                error = %e,
+                                tape = %tape_name,
+                                "failed to append initial tape message"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Read full context from tape (includes system, messages, tool_call, tool_result)
+            let default_ctx = self.async_tape.default_context().clone();
+            let ctx = tape_context.unwrap_or(&default_ctx);
+            let query = ctx.build_query(self.async_tape.query_tape(tape_name));
+            let entries = match self.async_tape.fetch_entries(&query).await {
+                Ok(entries) => entries,
+                Err(e) if e.kind == ErrorKind::NotFound && query.after_last => {
+                    tracing::warn!(
+                        error = %e,
+                        tape = %tape_name,
+                        "anchored tape context unavailable; falling back to full tape"
+                    );
+                    match self
+                        .async_tape
+                        .fetch_entries(&self.async_tape.query_tape(tape_name))
+                        .await
+                    {
+                        Ok(entries) => entries,
+                        Err(fallback) => {
+                            tracing::error!(
+                                error = %fallback,
+                                tape = %tape_name,
+                                "failed to fetch fallback tape entries"
+                            );
+                            Vec::new()
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, tape = %tape_name, "failed to fetch tape entries");
+                    Vec::new()
+                }
+            };
+            let mut tape_msgs = build_full_context_from_entries(&entries);
+            // Apply context budget: truncate large tool results, trim if over budget
+            crate::tape::context::apply_context_budget(&mut tape_msgs);
+            Ok(tape_msgs)
+        } else {
+            Ok(in_memory_msgs.to_vec())
+        }
+    }
+
+    /// Execute a single model call and, if tool calls are returned, execute them.
+    ///
+    /// Returns the round outcome (text response or tool execution results).
+    async fn _execute_tool_round(
+        &mut self,
+        msgs: &[Value],
+        params: &RoundParams<'_>,
+    ) -> Result<ToolRound, ConduitError> {
+        let response = self
+            .core
+            .run_chat(
+                msgs.to_vec(),
+                params.schemas.clone(),
+                params.model,
+                params.provider,
+                params.max_tokens,
+                false,
+                None,
+                Default::default(),
+                |resp: TransportResponse, _prov: &str, _model: &str, _attempt: u32| {
+                    Ok(resp.payload)
+                },
+            )
+            .await?;
+
+        let usage = response.get("usage").cloned();
+        let raw_calls = extract_tool_calls(&response)?;
+
+        if raw_calls.is_empty() {
+            let content = extract_content(&response)?;
+            return Ok(ToolRound {
+                usage,
+                outcome: ToolRoundOutcome::Text(content),
+            });
+        }
+
+        // Execute tools
+        let execution = self
+            .tool_executor
+            .execute_async(ToolCallResponse::List(raw_calls), &params.tools.runnable, params.tool_context)
+            .await?;
+
+        // Log tool errors but continue the loop so the LLM can see the
+        // error as a tool result and react (retry, try a different
+        // approach, or report failure gracefully).
+        if let Some(ref err) = execution.error {
+            tracing::warn!(
+                error = %err,
+                "tool execution error — feeding back to LLM for recovery"
+            );
+        }
+
+        Ok(ToolRound {
+            usage,
+            outcome: ToolRoundOutcome::Tools {
+                response,
+                execution,
+            },
+        })
+    }
+
+    /// Write a completed tool round to tape, or accumulate in memory.
+    async fn _persist_round(
+        &self,
+        tape: Option<&str>,
+        response: &Value,
+        execution: &ToolExecution,
+        in_memory_msgs: &mut Vec<Value>,
+    ) {
+        if let Some(tape_name) = tape {
+            // Write assistant tool_call entry to tape
+            let meta = serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
+            if let Err(e) = self
+                .async_tape
+                .append_entry(
+                    tape_name,
+                    &TapeEntry::tool_call(execution.tool_calls.clone(), meta.clone()),
+                )
+                .await
+            {
+                tracing::error!(
+                    error = %e,
+                    tape = %tape_name,
+                    "failed to append assistant tool calls"
+                );
+            }
+
+            // Write tool_result entries to tape
+            let paired: Vec<Value> = execution
+                .tool_calls
+                .iter()
+                .zip(execution.tool_results.iter())
+                .map(|(call, result)| {
+                    let call_id =
+                        call.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    serde_json::json!({"call_id": call_id, "output": result})
+                })
+                .collect();
+            if let Err(e) = self
+                .async_tape
+                .append_entry(tape_name, &TapeEntry::tool_result(paired, meta))
+                .await
+            {
+                tracing::error!(
+                    error = %e,
+                    tape = %tape_name,
+                    "failed to append assistant tool results"
+                );
+            }
+        } else {
+            // tape=None fallback: accumulate in memory
+            let assistant_msg = build_assistant_tool_call_message(response);
+            in_memory_msgs.push(assistant_msg);
+
+            for (i, result) in execution.tool_results.iter().enumerate() {
+                let call_id = execution
+                    .tool_calls
+                    .get(i)
+                    .and_then(|c| c.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let content_str = match result {
+                    Value::String(s) => s.clone(),
+                    other => serde_json::to_string(other).unwrap_or_default(),
+                };
+                in_memory_msgs.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": content_str,
+                }));
+            }
+        }
+    }
+
     // -- Streaming -----------------------------------------------------------
 
     /// Stream chat completion as an async `TextStream`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn stream(
         &mut self,
-        prompt: Option<&str>,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-        provider: Option<&str>,
-        messages: Option<Vec<Value>>,
-        max_tokens: Option<u32>,
-        tape: Option<&str>,
+        req: ChatRequest<'_>,
     ) -> Result<AsyncTextStream, ConduitError> {
+        let ChatRequest {
+            prompt,
+            system_prompt,
+            model,
+            provider,
+            messages,
+            max_tokens,
+            tape,
+            ..
+        } = req;
         use futures::StreamExt;
 
         // Read existing tape messages if a tape name is provided.
@@ -1171,7 +1241,11 @@ impl LLM {
              Question: {question}"
         );
         let answer = self
-            .chat_async(Some(&prompt), None, None, None, None, Some(16), None)
+            .chat_async(ChatRequest {
+                prompt: Some(&prompt),
+                max_tokens: Some(16),
+                ..Default::default()
+            })
             .await?;
         let normalized = answer.trim().to_lowercase();
         Ok(normalized.starts_with("yes"))
@@ -1205,7 +1279,11 @@ impl LLM {
         );
 
         let answer = self
-            .chat_async(Some(&prompt), None, None, None, None, Some(64), None)
+            .chat_async(ChatRequest {
+                prompt: Some(&prompt),
+                max_tokens: Some(64),
+                ..Default::default()
+            })
             .await?;
 
         let trimmed = answer.trim().to_string();
@@ -1246,6 +1324,37 @@ impl fmt::Debug for LLM {
 }
 
 // ---------------------------------------------------------------------------
+// Internal types for run_tools decomposition
+// ---------------------------------------------------------------------------
+
+/// Parameters for a single tool-calling round (avoids too-many-arguments).
+struct RoundParams<'a> {
+    schemas: &'a Option<Vec<Value>>,
+    model: Option<&'a str>,
+    provider: Option<&'a str>,
+    max_tokens: Option<u32>,
+    tools: &'a ToolSet,
+    tool_context: Option<&'a ToolContext>,
+}
+
+/// Result of a single tool-calling round.
+struct ToolRound {
+    usage: Option<Value>,
+    outcome: ToolRoundOutcome,
+}
+
+/// Whether the model returned text (done) or tool calls (continue looping).
+enum ToolRoundOutcome {
+    /// Model returned a text response — no more tool calls.
+    Text(String),
+    /// Model returned tool calls that were executed.
+    Tools {
+        response: Value,
+        execution: ToolExecution,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1267,7 +1376,7 @@ impl<'a> From<&'a [String]> for EmbedInput<'a> {
     }
 }
 
-fn default_api_base(provider: &str) -> String {
+pub(crate) fn default_api_base(provider: &str) -> String {
     match provider {
         "openai" => "https://api.openai.com/v1".to_string(),
         "anthropic" => "https://api.anthropic.com/v1".to_string(),
@@ -1850,6 +1959,15 @@ mod tests {
     #[test]
     fn test_extract_content_missing() {
         let response = json!({});
+        assert!(extract_content(&response).is_err());
+    }
+
+    #[test]
+    fn test_extract_content_anthropic_empty_content_errors() {
+        let response = json!({
+            "role": "assistant",
+            "content": []
+        });
         assert!(extract_content(&response).is_err());
     }
 

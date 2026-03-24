@@ -13,7 +13,7 @@ use super::errors::ErrorKind;
 // ---------------------------------------------------------------------------
 
 /// A serializable error payload carried inside streams and results.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ErrorPayload {
     pub kind: ErrorKind,
     pub message: String,

@@ -2,7 +2,8 @@ use serde_json::Value;
 
 use crate::adapter::ProviderAdapter;
 use crate::clients::parsing::TransportKind;
-use crate::core::execution::{LLMCore, TransportCallRequest};
+use crate::core::execution::LLMCore;
+use crate::core::request_builder::TransportCallRequest;
 
 pub static OPENAI_ADAPTER: OpenAIAdapter = OpenAIAdapter;
 

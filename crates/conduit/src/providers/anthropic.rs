@@ -3,7 +3,7 @@ use serde_json::Value;
 use crate::adapter::ProviderAdapter;
 use crate::clients::parsing::TransportKind;
 use crate::core::anthropic_messages;
-use crate::core::execution::TransportCallRequest;
+use crate::core::request_builder::TransportCallRequest;
 
 pub static ANTHROPIC_ADAPTER: AnthropicAdapter = AnthropicAdapter;
 

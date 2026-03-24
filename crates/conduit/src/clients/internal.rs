@@ -5,15 +5,7 @@ use std::sync::Arc;
 
 use crate::core::errors::{ConduitError, ErrorKind};
 use crate::core::execution::LLMCore;
-
-/// Default API base URL for a provider.
-fn default_api_base(provider: &str) -> String {
-    match provider {
-        "openai" => "https://api.openai.com/v1".to_string(),
-        "anthropic" => "https://api.anthropic.com/v1".to_string(),
-        other => format!("https://api.{other}.com/v1"),
-    }
-}
+use crate::llm::default_api_base;
 
 /// Low-level operations client wrapping `LLMCore`.
 ///

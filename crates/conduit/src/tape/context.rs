@@ -97,11 +97,14 @@ fn default_messages(entries: &[TapeEntry]) -> Vec<Value> {
     messages
 }
 
-/// Maximum characters for a single tool result content.
+/// Maximum characters for a single tool result content before truncation.
 const MAX_TOOL_RESULT_CHARS: usize = 16_000;
 
-/// Maximum total characters across all messages before aggressive trimming.
+/// Maximum total characters across all messages before aggressive trimming kicks in.
 const MAX_TOTAL_CONTEXT_CHARS: usize = 400_000;
+
+/// Number of recent user-message rounds to keep during aggressive trimming.
+const AGGRESSIVE_TRIM_KEEP_ROUNDS: usize = 2;
 
 /// Apply context budget: truncate large tool results and trim if total exceeds budget.
 pub fn apply_context_budget(messages: &mut Vec<Value>) {
@@ -181,23 +184,23 @@ fn aggressive_trim(messages: &mut Vec<Value>) {
         .cloned()
         .collect();
 
-    // Find the start of the last 2 complete rounds.
+    // Find the start of the last AGGRESSIVE_TRIM_KEEP_ROUNDS complete rounds.
     // A round = user msg + assistant msg (possibly with tool_calls) + tool results.
-    // Walk backwards to find where the 2nd-to-last user message starts.
+    // Walk backwards to find where the Nth-to-last user message starts.
     let mut user_count = 0;
     let mut keep_from = conversation.len();
     for (i, msg) in conversation.iter().enumerate().rev() {
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
         if role == "user" {
             user_count += 1;
-            if user_count >= 2 {
+            if user_count >= AGGRESSIVE_TRIM_KEEP_ROUNDS {
                 keep_from = i;
                 break;
             }
         }
     }
-    // If we didn't find 2 user messages, keep everything
-    if user_count < 2 {
+    // If we didn't find enough user messages, keep everything
+    if user_count < AGGRESSIVE_TRIM_KEEP_ROUNDS {
         keep_from = 0;
     }
 

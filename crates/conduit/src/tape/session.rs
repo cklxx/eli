@@ -4,11 +4,8 @@ use serde_json::Value;
 
 use crate::core::errors::ConduitError;
 use crate::core::results::ToolAutoResult;
-use crate::llm::LLM;
+use crate::llm::{ChatRequest, LLM};
 use crate::tape::entries::TapeEntry;
-use crate::tape::context::TapeContext;
-use crate::tools::context::ToolContext;
-use crate::tools::schema::ToolSet;
 
 /// A convenience wrapper that pairs an [`LLM`] reference with a tape name,
 /// so that every call automatically records to (and reads from) the tape.
@@ -32,56 +29,25 @@ impl<'a> TapeSession<'a> {
     }
 
     /// Chat with the model, recording the exchange to the session tape.
+    ///
+    /// The `tape` field of the request is overridden with this session's tape name.
     pub async fn chat(
         &mut self,
-        prompt: Option<&str>,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-        provider: Option<&str>,
-        messages: Option<Vec<Value>>,
-        max_tokens: Option<u32>,
+        mut req: ChatRequest<'_>,
     ) -> Result<String, ConduitError> {
-        self.llm
-            .chat_async(
-                prompt,
-                system_prompt,
-                model,
-                provider,
-                messages,
-                max_tokens,
-                Some(&self.tape),
-            )
-            .await
+        req.tape = Some(&self.tape);
+        self.llm.chat_async(req).await
     }
 
     /// Run tools, recording the exchange to the session tape.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// The `tape` field of the request is overridden with this session's tape name.
     pub async fn run_tools(
         &mut self,
-        prompt: Option<&str>,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-        provider: Option<&str>,
-        messages: Option<Vec<Value>>,
-        max_tokens: Option<u32>,
-        tools: &ToolSet,
-        context: Option<&ToolContext>,
-        tape_context: Option<&TapeContext>,
+        mut req: ChatRequest<'_>,
     ) -> Result<ToolAutoResult, ConduitError> {
-        self.llm
-            .run_tools(
-                prompt,
-                system_prompt,
-                model,
-                provider,
-                messages,
-                max_tokens,
-                tools,
-                context,
-                Some(&self.tape),
-                tape_context,
-            )
-            .await
+        req.tape = Some(&self.tape);
+        self.llm.run_tools(req).await
     }
 
     /// Append a raw [`TapeEntry`] to the session tape.

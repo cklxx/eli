@@ -140,10 +140,8 @@ impl TapeManager {
 
         // Only append error if it is different from context_error
         if let Some(err) = error {
-            let is_same = context_error
-                .map(|ce| std::ptr::eq(ce, err))
-                .unwrap_or(false);
-            if !is_same {
+            let is_duplicate = context_error.is_some_and(|ce| ce == err);
+            if !is_duplicate {
                 self.store
                     .append(tape, &TapeEntry::error(err, meta.clone()))?;
             }
@@ -338,10 +336,8 @@ impl AsyncTapeManager {
         }
 
         if let Some(err) = error {
-            let is_same = context_error
-                .map(|ce| std::ptr::eq(ce, err))
-                .unwrap_or(false);
-            if !is_same {
+            let is_duplicate = context_error.is_some_and(|ce| ce == err);
+            if !is_duplicate {
                 self.store
                     .append(tape, &TapeEntry::error(err, meta.clone()))
                     .await?;

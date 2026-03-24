@@ -12,7 +12,8 @@ use crate::clients::parsing::{
     BaseTransportParser, ToolCallDelta, TransportKind, parser_for_transport,
 };
 use crate::core::errors::ErrorKind;
-use crate::core::execution::{LLMCore, TransportResponse};
+use crate::core::execution::LLMCore;
+use crate::core::response_parser::TransportResponse;
 use crate::core::results::{
     AsyncStreamEvents, AsyncTextStream, ErrorPayload, StreamEvent, StreamEventKind, StreamState,
 };

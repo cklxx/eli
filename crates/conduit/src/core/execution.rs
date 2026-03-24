@@ -1,77 +1,20 @@
-//! Core execution utilities for Conduit.
+//! Core execution: retry/orchestration loop and LLMCore definition.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::info;
 
 use super::api_format::ApiFormat;
 use super::client_registry::ClientRegistry;
+use super::error_classify::AttemptDecision;
 use super::errors::{ConduitError, ErrorKind};
+use super::message_norm::normalize_messages_for_api;
 use super::provider_runtime::ProviderRuntime;
-use super::request_adapters::normalize_responses_kwargs;
-use super::results::ErrorPayload;
-use super::tool_calls::{
-    normalize_message_tool_calls, normalize_tool_calls, tool_call_arguments_string, tool_call_id,
-    tool_call_name,
-};
+use super::response_parser::TransportResponse;
 use crate::clients::parsing::TransportKind;
-use crate::providers;
-
-/// What to do after one failed attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttemptDecision {
-    RetrySameModel,
-    TryNextModel,
-}
-
-/// Result of classifying and deciding how to handle one exception.
-#[derive(Debug, Clone)]
-pub struct AttemptOutcome {
-    pub error: ConduitError,
-    pub decision: AttemptDecision,
-}
-
-/// Wrapper that pairs a transport kind with the raw response payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransportResponse {
-    pub transport: TransportKind,
-    pub payload: Value,
-}
-
-/// All the parameters needed for a single provider call.
-#[derive(Debug, Clone)]
-pub struct TransportCallRequest {
-    pub client: Arc<Client>,
-    pub provider_name: String,
-    pub model_id: String,
-    pub api_base: Option<String>,
-    pub messages_payload: Vec<Value>,
-    pub tools_payload: Option<Vec<Value>>,
-    pub max_tokens: Option<u32>,
-    pub stream: bool,
-    pub reasoning_effort: Option<Value>,
-    pub kwargs: serde_json::Map<String, Value>,
-    pub is_anthropic_oauth: bool,
-}
-
-/// Shared LLM execution utilities (provider resolution, retries, client cache).
-pub struct LLMCore {
-    provider: String,
-    model: String,
-    fallback_models: Vec<String>,
-    max_retries: u32,
-    api_key: ApiKeyConfig,
-    api_base: ApiBaseConfig,
-    client_registry: ClientRegistry,
-    api_format: ApiFormat,
-    verbose: u32,
-    #[allow(clippy::type_complexity)]
-    error_classifier: Option<Box<dyn Fn(&ConduitError) -> Option<ErrorKind> + Send + Sync>>,
-}
 
 /// How API keys are configured.
 #[derive(Debug, Clone)]
@@ -89,207 +32,19 @@ pub enum ApiBaseConfig {
     PerProvider(HashMap<String, String>),
 }
 
-/// Classify an error by scanning the message text for common patterns.
-///
-/// Returns `None` when no pattern matches, allowing the caller to fall
-/// through to other classification strategies.
-pub fn classify_by_text_signature(message: &str) -> Option<ErrorKind> {
-    let lower = message.to_lowercase();
-
-    // Authentication / configuration errors
-    if lower.contains("auth")
-        || lower.contains("unauthorized")
-        || lower.contains("api key")
-        || lower.contains("invalid key")
-    {
-        return Some(ErrorKind::Config);
-    }
-
-    // Rate-limit / quota errors
-    if lower.contains("rate limit") || lower.contains("429") || lower.contains("quota") {
-        return Some(ErrorKind::Temporary);
-    }
-
-    // Not-found errors
-    if lower.contains("not found") || lower.contains("404") {
-        return Some(ErrorKind::NotFound);
-    }
-
-    // Timeout errors
-    if lower.contains("timeout") || lower.contains("timed out") {
-        return Some(ErrorKind::Temporary);
-    }
-
-    // Server errors
-    if lower.contains("server error")
-        || lower.contains("500")
-        || lower.contains("502")
-        || lower.contains("503")
-    {
-        return Some(ErrorKind::Temporary);
-    }
-
-    None
-}
-
-/// Normalize messages to ensure protocol compliance before sending to any LLM API.
-///
-/// - Removes orphan tool_use blocks (no matching tool_result follows)
-/// - Removes orphan tool_result messages (no matching tool_use precedes)
-pub fn normalize_messages_for_api(messages: Vec<Value>, transport: TransportKind) -> Vec<Value> {
-    let normalized_messages: Vec<Value> = messages
-        .into_iter()
-        .map(|message| normalize_message_tool_calls(&message))
-        .collect();
-    let result = prune_orphan_tool_messages(normalized_messages);
-
-    // Anthropic-specific role merging is intentionally deferred to
-    // `build_messages_body`, where tool results have already been converted into
-    // Anthropic content blocks. Doing it earlier on the generic message shape
-    // can collapse multiple `role=tool` messages and drop call IDs.
-    if transport == TransportKind::Messages {
-        return result;
-    }
-
-    result
-}
-
-/// Remove orphan tool_use assistant messages and orphan tool_result messages.
-///
-/// A tool_result is orphan when no assistant message has a matching tool_call id.
-/// An assistant message with tool_calls is orphan when any of its calls lack a
-/// matching tool_result.
-fn prune_orphan_tool_messages(messages: Vec<Value>) -> Vec<Value> {
-    // Collect all tool_call IDs from assistant messages
-    let mut tool_call_ids: HashSet<String> = HashSet::new();
-    for msg in &messages {
-        if let Some(calls) = msg.get("tool_calls").and_then(|c| c.as_array()) {
-            for call in calls {
-                if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
-                    tool_call_ids.insert(id.to_owned());
-                }
-            }
-        }
-    }
-
-    // Collect all tool_result IDs
-    let mut tool_result_ids: HashSet<String> = HashSet::new();
-    for msg in &messages {
-        if msg.get("role").and_then(|r| r.as_str()) == Some("tool")
-            && let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str())
-        {
-            tool_result_ids.insert(id.to_owned());
-        }
-    }
-
-    // Filter: keep messages that are not orphans
-    let mut filtered = Vec::new();
-    for msg in messages {
-        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
-
-        if role == "tool" {
-            // Keep tool result only if its call_id has a matching tool_use
-            let call_id = msg
-                .get("tool_call_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if call_id.is_empty() || !tool_call_ids.contains(call_id) {
-                continue; // Drop orphan tool result
-            }
-        }
-
-        if role == "assistant"
-            && let Some(calls) = msg.get("tool_calls").and_then(|c| c.as_array())
-        {
-            // Check if ALL tool_calls have matching results
-            let all_have_results = calls.iter().all(|call| {
-                call.get("id")
-                    .and_then(|v| v.as_str())
-                    .map(|id| tool_result_ids.contains(id))
-                    .unwrap_or(false)
-            });
-            if !all_have_results && !calls.is_empty() {
-                // Drop assistant message with orphan tool_calls
-                continue;
-            }
-        }
-
-        filtered.push(msg);
-    }
-
-    filtered
-}
-
-/// Enforce Anthropic-specific message ordering rules.
-///
-/// - Merges consecutive same-role messages (except system).
-/// - Inserts a synthetic "user" message at the start if needed.
-/// - Appends a synthetic "user" message at the end if the last message is "assistant".
-#[cfg(test)]
-fn enforce_anthropic_message_rules(messages: Vec<Value>) -> Vec<Value> {
-    if messages.is_empty() {
-        return messages;
-    }
-
-    let mut result: Vec<Value> = Vec::new();
-
-    for msg in messages {
-        let role = msg
-            .get("role")
-            .and_then(|r| r.as_str())
-            .unwrap_or("")
-            .to_owned();
-
-        // Skip system messages in this pass (they go separately in Anthropic API)
-        if role == "system" {
-            result.push(msg);
-            continue;
-        }
-
-        // Merge consecutive same-role messages
-        if let Some(last) = result.last() {
-            let last_role = last.get("role").and_then(|r| r.as_str()).unwrap_or("");
-            if last_role == role && role != "system" {
-                // Merge: append content to previous message
-                let prev_content = last.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                let new_content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                if !new_content.is_empty() {
-                    let merged = format!("{prev_content}\n\n{new_content}");
-                    if let Some(last_mut) = result.last_mut() {
-                        if let Some(obj) = last_mut.as_object_mut() {
-                            obj.insert("content".to_owned(), Value::String(merged));
-                        }
-                    }
-                }
-                continue;
-            }
-        }
-
-        result.push(msg);
-    }
-
-    // Ensure first non-system message is "user"
-    let first_non_system = result
-        .iter()
-        .position(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"));
-    if let Some(idx) = first_non_system {
-        if result[idx].get("role").and_then(|r| r.as_str()) != Some("user") {
-            result.insert(
-                idx,
-                serde_json::json!({"role": "user", "content": "Continue."}),
-            );
-        }
-    }
-
-    // Ensure last message is "user" (but NOT if it ends with tool results, which is valid)
-    if let Some(last) = result.last() {
-        let last_role = last.get("role").and_then(|r| r.as_str()).unwrap_or("");
-        if last_role == "assistant" {
-            result.push(serde_json::json!({"role": "user", "content": "Continue."}));
-        }
-    }
-
-    result
+/// Shared LLM execution utilities (provider resolution, retries, client cache).
+pub struct LLMCore {
+    provider: String,
+    model: String,
+    fallback_models: Vec<String>,
+    max_retries: u32,
+    api_key: ApiKeyConfig,
+    api_base: ApiBaseConfig,
+    client_registry: ClientRegistry,
+    api_format: ApiFormat,
+    verbose: u32,
+    #[allow(clippy::type_complexity)]
+    error_classifier: Option<Box<dyn Fn(&ConduitError) -> Option<ErrorKind> + Send + Sync>>,
 }
 
 impl LLMCore {
@@ -371,6 +126,16 @@ impl LLMCore {
     /// Total number of attempts = 1 + max_retries, minimum 1.
     pub fn max_attempts(&self) -> u32 {
         1u32.max(1 + self.max_retries)
+    }
+
+    /// Apply the custom error classifier, if set.
+    pub(crate) fn custom_classify(&self, error: &ConduitError) -> Option<ErrorKind> {
+        if let Some(ref classifier) = self.error_classifier
+            && let Some(kind) = classifier(error)
+        {
+            return Some(kind);
+        }
+        None
     }
 
     /// Resolve a `"provider:model"` string into `(provider, model)`.
@@ -467,573 +232,6 @@ impl LLMCore {
             .get_or_create(provider, api_key.as_deref(), api_base.as_deref())
     }
 
-    /// Log an error at the warning level if verbose mode is enabled.
-    pub fn log_error(&self, error: &ConduitError, provider: &str, model: &str, attempt: u32) {
-        if self.verbose == 0 {
-            return;
-        }
-        let prefix = format!(
-            "[{}:{}] attempt {}/{}",
-            provider,
-            model,
-            attempt + 1,
-            self.max_attempts()
-        );
-        if let Some(ref cause) = error.cause {
-            warn!("{} failed: {} (cause={:?})", prefix, error, cause);
-        } else {
-            warn!("{} failed: {}", prefix, error);
-        }
-    }
-
-    /// Classify an error into an `ErrorKind`.
-    ///
-    /// Resolution order:
-    /// 1. Custom classifier (if set)
-    /// 2. Text-signature heuristic on the error message
-    /// 3. The error's own `kind` field
-    pub fn classify_error(&self, error: &ConduitError) -> ErrorKind {
-        if let Some(ref classifier) = self.error_classifier
-            && let Some(kind) = classifier(error)
-        {
-            return kind;
-        }
-        if let Some(kind) = classify_by_text_signature(&error.message) {
-            return kind;
-        }
-        error.kind
-    }
-
-    /// Classify an HTTP status code into an `ErrorKind`.
-    pub fn classify_http_status(status: u16) -> Option<ErrorKind> {
-        match status {
-            401 | 403 => Some(ErrorKind::Config),
-            400 | 404 | 413 | 422 => Some(ErrorKind::InvalidInput),
-            408 | 409 | 425 | 429 => Some(ErrorKind::Temporary),
-            s if (500..600).contains(&s) => Some(ErrorKind::Provider),
-            _ => None,
-        }
-    }
-
-    /// Whether the error kind should trigger a retry.
-    pub fn should_retry(kind: ErrorKind) -> bool {
-        matches!(kind, ErrorKind::Temporary | ErrorKind::Provider)
-    }
-
-    /// Wrap a raw error message into a `ConduitError` with provider/model context.
-    pub fn wrap_error(
-        &self,
-        kind: ErrorKind,
-        provider: &str,
-        model: &str,
-        message: &str,
-    ) -> ConduitError {
-        ConduitError::new(kind, format!("{}:{}: {}", provider, model, message))
-    }
-
-    /// Handle a single failed attempt and decide what to do next.
-    pub fn handle_attempt_error(
-        &self,
-        error: ConduitError,
-        provider_name: &str,
-        model_id: &str,
-        attempt: u32,
-    ) -> AttemptOutcome {
-        let kind = self.classify_error(&error);
-        self.log_error(&error, provider_name, model_id, attempt);
-        let can_retry = Self::should_retry(kind) && (attempt + 1) < self.max_attempts();
-        let decision = if can_retry {
-            AttemptDecision::RetrySameModel
-        } else {
-            AttemptDecision::TryNextModel
-        };
-        AttemptOutcome { error, decision }
-    }
-
-    /// Build an `ErrorPayload` with populated details from retry context.
-    ///
-    /// The `details` object includes `provider`, `model`, `attempt`,
-    /// `max_attempts`, and optionally `http_status`.
-    pub fn build_error_payload(
-        &self,
-        error: &ConduitError,
-        provider_name: &str,
-        model_id: &str,
-        attempt: u32,
-        http_status: Option<u16>,
-    ) -> ErrorPayload {
-        let mut details = serde_json::json!({
-            "provider": provider_name,
-            "model": model_id,
-            "attempt": attempt + 1,
-            "max_attempts": self.max_attempts(),
-        });
-        if let Some(status) = http_status {
-            details
-                .as_object_mut()
-                .unwrap()
-                .insert("http_status".to_owned(), Value::Number(status.into()));
-        }
-        ErrorPayload::new(error.kind, &error.message).with_details(details)
-    }
-
-    /// Build kwargs with the correct max_tokens argument name for the provider.
-    pub fn decide_kwargs_for_provider(
-        provider: &str,
-        max_tokens: Option<u32>,
-        kwargs: &serde_json::Map<String, Value>,
-    ) -> serde_json::Map<String, Value> {
-        let max_tokens_arg = ProviderRuntime::completion_max_tokens_arg(provider);
-        let mut clean = kwargs.clone();
-        if clean.contains_key(&max_tokens_arg) {
-            return clean;
-        }
-        if let Some(mt) = max_tokens {
-            clean.insert(max_tokens_arg, Value::Number(mt.into()));
-        }
-        clean
-    }
-
-    /// Build kwargs for the responses transport format.
-    pub fn decide_responses_kwargs(
-        max_tokens: Option<u32>,
-        kwargs: &serde_json::Map<String, Value>,
-        drop_extra_headers: bool,
-    ) -> serde_json::Map<String, Value> {
-        let mut clean = kwargs.clone();
-        if drop_extra_headers {
-            clean.remove("extra_headers");
-        }
-        normalize_responses_kwargs(&mut clean);
-        if clean.contains_key("max_output_tokens") || max_tokens.is_none() {
-            return clean;
-        }
-        if let Some(mt) = max_tokens {
-            clean.insert("max_output_tokens".to_owned(), Value::Number(mt.into()));
-        }
-        clean
-    }
-
-    /// Whether to include stream usage options for completion format.
-    pub fn should_default_completion_stream_usage(provider_name: &str) -> bool {
-        ProviderRuntime::should_include_completion_stream_usage(provider_name)
-    }
-
-    /// Add stream_options to kwargs if applicable.
-    pub fn with_default_completion_stream_options(
-        provider_name: &str,
-        stream: bool,
-        kwargs: &serde_json::Map<String, Value>,
-    ) -> serde_json::Map<String, Value> {
-        if !stream {
-            return kwargs.clone();
-        }
-        if !Self::should_default_completion_stream_usage(provider_name) {
-            return kwargs.clone();
-        }
-        if kwargs.contains_key("stream_options") {
-            return kwargs.clone();
-        }
-        let mut result = kwargs.clone();
-        result.insert(
-            "stream_options".to_owned(),
-            serde_json::json!({"include_usage": true}),
-        );
-        result
-    }
-
-    /// Add reasoning configuration to kwargs if applicable.
-    pub fn with_responses_reasoning(
-        kwargs: &serde_json::Map<String, Value>,
-        reasoning_effort: Option<&Value>,
-    ) -> serde_json::Map<String, Value> {
-        let effort = match reasoning_effort {
-            Some(e) if !e.is_null() => e,
-            _ => return kwargs.clone(),
-        };
-        if kwargs.contains_key("reasoning") {
-            return kwargs.clone();
-        }
-        let mut result = kwargs.clone();
-        result.insert(
-            "reasoning".to_owned(),
-            serde_json::json!({"effort": effort}),
-        );
-        result
-    }
-
-    /// Convert completion-format tool schemas to responses format.
-    pub fn convert_tools_for_responses(tools_payload: Option<&[Value]>) -> Option<Vec<Value>> {
-        let tools = tools_payload?;
-        if tools.is_empty() {
-            return None;
-        }
-
-        let mut converted = Vec::with_capacity(tools.len());
-        for tool in tools {
-            if let Some(function) = tool.get("function").and_then(|f| f.as_object()) {
-                let mut entry = serde_json::Map::new();
-                entry.insert(
-                    "type".to_owned(),
-                    tool.get("type")
-                        .cloned()
-                        .unwrap_or(Value::String("function".to_owned())),
-                );
-                if let Some(name) = function.get("name") {
-                    entry.insert("name".to_owned(), name.clone());
-                }
-                entry.insert(
-                    "description".to_owned(),
-                    function
-                        .get("description")
-                        .cloned()
-                        .unwrap_or(Value::String(String::new())),
-                );
-                entry.insert(
-                    "parameters".to_owned(),
-                    function
-                        .get("parameters")
-                        .cloned()
-                        .unwrap_or(serde_json::json!({})),
-                );
-                if let Some(strict) = function.get("strict") {
-                    entry.insert("strict".to_owned(), strict.clone());
-                }
-                converted.push(Value::Object(entry));
-            } else {
-                converted.push(tool.clone());
-            }
-        }
-        Some(converted)
-    }
-
-    /// Determine which transport to use for a given request.
-    pub fn selected_transport(
-        &self,
-        provider_name: &str,
-        model_id: &str,
-        tools_payload: Option<&[Value]>,
-        supports_responses: bool,
-        preferred_transport: Option<TransportKind>,
-    ) -> Result<TransportKind, ConduitError> {
-        ProviderRuntime::new(provider_name, model_id, None, None, self.api_format)
-            .selected_transport(tools_payload, supports_responses, preferred_transport)
-    }
-
-    /// Split messages into (instructions, input_items) for the responses format.
-    ///
-    /// System/developer messages are joined into the instructions string.
-    /// Other messages are converted to responses input items.
-    pub fn split_messages_for_responses(messages: &[Value]) -> (Option<String>, Vec<Value>) {
-        let mut instruction_parts: Vec<String> = Vec::new();
-        let mut filtered: Vec<&Value> = Vec::new();
-
-        for message in messages {
-            let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("");
-            if role == "system" || role == "developer" {
-                if let Some(content) = message.get("content").and_then(|c| c.as_str())
-                    && !content.is_empty()
-                {
-                    instruction_parts.push(content.to_owned());
-                }
-                continue;
-            }
-            filtered.push(message);
-        }
-
-        let instructions = if instruction_parts.is_empty() {
-            None
-        } else {
-            let joined = instruction_parts
-                .into_iter()
-                .filter(|p| !p.trim().is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            if joined.is_empty() {
-                None
-            } else {
-                Some(joined)
-            }
-        };
-
-        let input_items = Self::convert_messages_to_responses_input(&filtered);
-        (instructions, input_items)
-    }
-
-    /// Convert filtered messages to the responses input format.
-    fn convert_messages_to_responses_input(messages: &[&Value]) -> Vec<Value> {
-        let mut items: Vec<Value> = Vec::new();
-
-        for message in messages {
-            let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("");
-            let content = message.get("content");
-            let content_str = content.and_then(|c| c.as_str()).unwrap_or("");
-
-            // user/assistant messages with content
-            if (role == "user" || role == "assistant") && !content_str.is_empty() {
-                items.push(serde_json::json!({
-                    "role": role,
-                    "content": content_str,
-                    "type": "message",
-                }));
-            }
-
-            // assistant tool calls
-            if role == "assistant"
-                && let Some(tool_calls) = message.get("tool_calls").and_then(|tc| tc.as_array())
-            {
-                for (index, tool_call) in normalize_tool_calls(tool_calls).into_iter().enumerate() {
-                    let name = tool_call_name(&tool_call).unwrap_or("");
-                    if name.is_empty() {
-                        continue;
-                    }
-                    let call_id = tool_call_id(&tool_call)
-                        .map(|s| s.to_owned())
-                        .unwrap_or_else(|| format!("call_{}", index + 1));
-                    let arguments = tool_call_arguments_string(&tool_call);
-                    items.push(serde_json::json!({
-                        "type": "function_call",
-                        "name": name,
-                        "arguments": arguments,
-                        "call_id": call_id,
-                    }));
-                }
-            }
-
-            // tool result messages
-            if role == "tool" {
-                let call_id = message
-                    .get("tool_call_id")
-                    .or_else(|| message.get("call_id"))
-                    .and_then(|v| v.as_str());
-                if let Some(cid) = call_id {
-                    let output = message
-                        .get("content")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("");
-                    items.push(serde_json::json!({
-                        "type": "function_call_output",
-                        "call_id": cid,
-                        "output": output,
-                    }));
-                }
-            }
-        }
-
-        items
-    }
-
-    /// Build the request URL for a given provider and transport.
-    pub fn build_request_url(api_base: &str, transport: TransportKind) -> String {
-        providers::adapter_for_transport(transport).build_request_url(api_base, transport)
-    }
-
-    /// Build the JSON body for a completion-format request.
-    pub fn build_completion_body(request: &TransportCallRequest, provider_name: &str) -> Value {
-        let mut adapter_request = request.clone();
-        adapter_request.provider_name = provider_name.to_owned();
-        providers::adapter_for_transport(TransportKind::Completion)
-            .build_request_body(&adapter_request, TransportKind::Completion)
-    }
-
-    /// Build the JSON body for an Anthropic Messages-format request.
-    pub fn build_messages_body(request: &TransportCallRequest) -> Value {
-        providers::adapter_for_transport(TransportKind::Messages)
-            .build_request_body(request, TransportKind::Messages)
-    }
-
-    /// Build the JSON body for a responses-format request.
-    pub fn build_responses_body(request: &TransportCallRequest) -> Value {
-        providers::adapter_for_transport(TransportKind::Responses)
-            .build_request_body(request, TransportKind::Responses)
-    }
-
-    /// Collect an SSE streaming response into a single JSON value.
-    ///
-    /// For Responses format, looks for a `response.completed` event and extracts
-    /// the `response` field. For Completion format, assembles content from
-    /// `delta.content` chunks.
-    async fn collect_sse_response(
-        resp: reqwest::Response,
-        transport: TransportKind,
-    ) -> Result<Value, ConduitError> {
-        use futures::StreamExt;
-
-        let mut stream = resp.bytes_stream();
-        let mut buffer = String::new();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| {
-                ConduitError::new(ErrorKind::Provider, format!("SSE stream error: {e}"))
-            })?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-        }
-
-        info!(
-            target: "eli_trace",
-            transport = ?transport,
-            raw_sse = ?buffer,
-            "llm.raw_sse_response"
-        );
-
-        // Parse SSE events from the buffer.
-        match transport {
-            TransportKind::Messages => {
-                // Anthropic Messages streaming: assemble from content_block_delta events.
-                // Look for message_stop event and assemble content blocks.
-                let mut content = String::new();
-                let mut tool_use_blocks: Vec<Value> = Vec::new();
-                let mut current_tool: Option<serde_json::Map<String, Value>> = None;
-                let mut tool_args_buffer = String::new();
-                let mut usage: Option<Value> = None;
-
-                for line in buffer.lines() {
-                    let line = line.trim();
-                    if let Some(data) = line.strip_prefix("data: ")
-                        && let Ok(event) = serde_json::from_str::<Value>(data)
-                    {
-                        let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        match event_type {
-                            "content_block_start" => {
-                                if let Some(block) = event.get("content_block") {
-                                    let block_type =
-                                        block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                    if block_type == "tool_use" {
-                                        let mut tool = serde_json::Map::new();
-                                        if let Some(id) = block.get("id") {
-                                            tool.insert("id".to_owned(), id.clone());
-                                        }
-                                        if let Some(name) = block.get("name") {
-                                            tool.insert("name".to_owned(), name.clone());
-                                        }
-                                        tool_args_buffer.clear();
-                                        current_tool = Some(tool);
-                                    }
-                                }
-                            }
-                            "content_block_delta" => {
-                                if let Some(delta) = event.get("delta") {
-                                    let delta_type =
-                                        delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                    if delta_type == "text_delta" {
-                                        if let Some(text) =
-                                            delta.get("text").and_then(|t| t.as_str())
-                                        {
-                                            content.push_str(text);
-                                        }
-                                    } else if delta_type == "input_json_delta"
-                                        && let Some(partial) =
-                                            delta.get("partial_json").and_then(|p| p.as_str())
-                                    {
-                                        tool_args_buffer.push_str(partial);
-                                    }
-                                }
-                            }
-                            "content_block_stop" => {
-                                if let Some(mut tool) = current_tool.take() {
-                                    let input: Value = serde_json::from_str(&tool_args_buffer)
-                                        .unwrap_or(serde_json::json!({}));
-                                    tool.insert("input".to_owned(), input);
-                                    tool.insert(
-                                        "type".to_owned(),
-                                        Value::String("tool_use".to_owned()),
-                                    );
-                                    tool_use_blocks.push(Value::Object(tool));
-                                    tool_args_buffer.clear();
-                                }
-                            }
-                            "message_delta" => {
-                                if let Some(u) = event.get("usage") {
-                                    usage = Some(u.clone());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                // Build an Anthropic Messages response object.
-                let mut content_blocks: Vec<Value> = Vec::new();
-                if !content.is_empty() {
-                    content_blocks.push(serde_json::json!({"type": "text", "text": content}));
-                }
-                content_blocks.extend(tool_use_blocks);
-
-                let mut result = serde_json::json!({
-                    "role": "assistant",
-                    "content": content_blocks
-                });
-                if let Some(u) = usage {
-                    result
-                        .as_object_mut()
-                        .unwrap()
-                        .insert("usage".to_owned(), u);
-                }
-                Ok(result)
-            }
-            TransportKind::Responses => {
-                // Look for "response.completed" event which has the full response.
-                for line in buffer.lines() {
-                    let line = line.trim();
-                    if let Some(data) = line.strip_prefix("data: ")
-                        && let Ok(event) = serde_json::from_str::<Value>(data)
-                        && event.get("type").and_then(|t| t.as_str()) == Some("response.completed")
-                        && let Some(response) = event.get("response")
-                    {
-                        return Ok(response.clone());
-                    }
-                }
-                Err(ConduitError::new(
-                    ErrorKind::Provider,
-                    "SSE stream ended without response.completed event",
-                ))
-            }
-            _ => {
-                // Completion format: assemble content from delta chunks.
-                let mut content = String::new();
-                let mut tool_calls: Vec<Value> = Vec::new();
-
-                for line in buffer.lines() {
-                    let line = line.trim();
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if data == "[DONE]" {
-                            break;
-                        }
-                        if let Ok(event) = serde_json::from_str::<Value>(data)
-                            && let Some(choices) = event.get("choices").and_then(|c| c.as_array())
-                        {
-                            for choice in choices {
-                                if let Some(delta) = choice.get("delta") {
-                                    if let Some(c) = delta.get("content").and_then(|c| c.as_str()) {
-                                        content.push_str(c);
-                                    }
-                                    if let Some(tc) =
-                                        delta.get("tool_calls").and_then(|t| t.as_array())
-                                    {
-                                        tool_calls.extend(tc.iter().cloned());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let mut result = serde_json::json!({
-                    "choices": [{
-                        "message": {
-                            "role": "assistant",
-                            "content": content
-                        }
-                    }]
-                });
-                if !tool_calls.is_empty() {
-                    result["choices"][0]["message"]["tool_calls"] = Value::Array(tool_calls);
-                }
-                Ok(result)
-            }
-        }
-    }
-
     /// Execute a synchronous (non-streaming) chat call with retry logic.
     ///
     /// Iterates over model candidates, retrying on transient errors.
@@ -1090,7 +288,7 @@ impl LLMCore {
                 let normalized_messages =
                     normalize_messages_for_api(messages_payload.clone(), transport);
 
-                let request = TransportCallRequest {
+                let request = super::request_builder::TransportCallRequest {
                     client: Arc::clone(&client),
                     provider_name: provider_name.clone(),
                     model_id: model_id.clone(),
@@ -1298,7 +496,7 @@ impl LLMCore {
                 let normalized_messages =
                     normalize_messages_for_api(messages_payload.clone(), transport);
 
-                let request = TransportCallRequest {
+                let request = super::request_builder::TransportCallRequest {
                     client: Arc::clone(&client),
                     provider_name: provider_name.clone(),
                     model_id: model_id.clone(),
@@ -1385,7 +583,12 @@ impl LLMCore {
 mod tests {
     use super::*;
     use crate::core::anthropic_messages;
+    use crate::core::error_classify::classify_by_text_signature;
+    use crate::core::message_norm::{enforce_anthropic_message_rules, prune_orphan_tool_messages};
     use serde_json::json;
+
+    // Re-import TransportCallRequest for test use
+    use super::super::request_builder::TransportCallRequest;
 
     #[test]
     fn test_resolve_model_provider() {
@@ -1531,7 +734,7 @@ mod tests {
                 }),
                 json!({"role": "tool", "tool_call_id": "toolu_1", "content": "ok-1"}),
                 json!({"role": "tool", "tool_call_id": "toolu_2", "content": "ok-2"}),
-                json!({"role": "user", "content": "继续"}),
+                json!({"role": "user", "content": "\u{7ee7}\u{7eed}"}),
             ],
             tools_payload: None,
             max_tokens: Some(512),
@@ -1553,7 +756,7 @@ mod tests {
         assert_eq!(user_blocks[1]["type"], "tool_result");
         assert_eq!(user_blocks[1]["tool_use_id"], "toolu_2");
         assert_eq!(user_blocks[2]["type"], "text");
-        assert_eq!(user_blocks[2]["text"], "继续");
+        assert_eq!(user_blocks[2]["text"], "\u{7ee7}\u{7eed}");
     }
 
     #[test]

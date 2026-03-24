@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use conduit::core::results::ToolAutoResultKind;
-use conduit::llm::LLM;
+use conduit::llm::{ChatRequest, LLM};
 use conduit::{
     ConduitError, ErrorKind, TapeContext, TapeEntry, Tool, ToolAutoResult, ToolContext, ToolSet,
 };
@@ -820,18 +820,16 @@ async fn run_tools_once(
 
     // Call run_tools — it handles tape reading/writing internally.
     let result = llm
-        .run_tools(
-            Some(&prompt_text),
-            Some(system_prompt),
-            None, // model override (already set on LLM)
-            None, // provider override
-            None, // messages — run_tools reads from tape itself
-            Some(settings.max_tokens as u32),
-            &tool_set,
-            Some(&tool_ctx),
-            Some(tape_name), // tape name for internal read/write
-            tape_context,    // anchor override for grace period
-        )
+        .run_tools(ChatRequest {
+            prompt: Some(&prompt_text),
+            system_prompt: Some(system_prompt),
+            max_tokens: Some(settings.max_tokens as u32),
+            tools: Some(&tool_set),
+            tool_context: Some(&tool_ctx),
+            tape: Some(tape_name),
+            tape_context,
+            ..Default::default()
+        })
         .await?;
 
     // No need to manually record anything — run_tools already wrote to tape.

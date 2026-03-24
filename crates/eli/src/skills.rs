@@ -3,7 +3,15 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use std::sync::LazyLock;
+
 use regex::Regex;
+
+static FRONTMATTER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)^---\s*\n.*?\n---\s*\n").unwrap());
+
+static SKILL_NAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(SKILL_NAME_PATTERN).unwrap());
 
 /// Directory under a project workspace containing skills.
 const PROJECT_SKILLS_DIR: &str = ".agents/skills";
@@ -77,8 +85,7 @@ impl SkillMetadata {
             .replace("${PYTHON}", &python);
 
         // Strip frontmatter.
-        let front_re = Regex::new(r"(?s)^---\s*\n.*?\n---\s*\n").unwrap();
-        let body = front_re.replace(&substituted, "").trim().to_owned();
+        let body = FRONTMATTER_RE.replace(&substituted, "").trim().to_owned();
         if body.is_empty() { None } else { Some(body) }
     }
 }
@@ -217,8 +224,7 @@ fn is_valid_name(name: &str, skill_dir: &Path) -> bool {
     if normalized != dir_name {
         return false;
     }
-    let re = Regex::new(SKILL_NAME_PATTERN).unwrap();
-    re.is_match(normalized)
+    SKILL_NAME_RE.is_match(normalized)
 }
 
 fn is_valid_description(description: &str) -> bool {
