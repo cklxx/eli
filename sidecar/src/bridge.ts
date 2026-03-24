@@ -33,10 +33,61 @@ function inferToolGroup(name: string): string {
 
 let eliUrl = "";
 let sidecarConfig: SidecarConfig;
+const INBOUND_RETRY_LIMIT = 3;
+const INBOUND_RETRY_DELAY_MS = 200;
 
 export function initBridge(config: SidecarConfig) {
   eliUrl = config.eli_url;
   sidecarConfig = config;
+}
+
+function extractCauseCode(err: unknown): string | null {
+  if (!err || typeof err !== "object" || !("cause" in err)) return null;
+  const cause = (err as { cause?: unknown }).cause;
+  if (!cause || typeof cause !== "object" || !("code" in cause)) return null;
+  const code = (cause as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
+function isRetryableInboundError(err: unknown): boolean {
+  return extractCauseCode(err) === "ECONNREFUSED";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function postToEli(url: string, msg: EliChannelMessage): Promise<Response> {
+  return fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(msg),
+  });
+}
+
+async function handleInboundResponse(url: string, resp: Response): Promise<boolean> {
+  if (resp.ok) return true;
+  const body = await resp.text();
+  console.error(`[bridge] POST ${url} failed: ${resp.status} ${body}`);
+  return true;
+}
+
+function handleInboundError(url: string, err: unknown, retry: number): boolean {
+  if (isRetryableInboundError(err) && retry < INBOUND_RETRY_LIMIT) {
+    console.warn(`[bridge] POST ${url} ECONNREFUSED, retry ${retry + 1}/${INBOUND_RETRY_LIMIT}`);
+    return false;
+  }
+  console.error(`[bridge] POST ${url} error:`, err);
+  return true;
+}
+
+async function trySendToEli(url: string, msg: EliChannelMessage, retry: number): Promise<boolean> {
+  try {
+    const resp = await postToEli(url, msg);
+    return await handleInboundResponse(url, resp);
+  } catch (err) {
+    return handleInboundError(url, err, retry);
+  }
 }
 
 function buildChannelConfig(): { channels: SidecarConfig["channels"] } {
@@ -128,18 +179,9 @@ export async function sendToEli(envelope: InboundEnvelope): Promise<void> {
   const msg = envelopeToEliMessage(envelope);
   const url = `${eliUrl}/inbound`;
 
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(msg),
-    });
-    if (!resp.ok) {
-      const body = await resp.text();
-      console.error(`[bridge] POST ${url} failed: ${resp.status} ${body}`);
-    }
-  } catch (err) {
-    console.error(`[bridge] POST ${url} error:`, err);
+  for (let retry = 0; retry <= INBOUND_RETRY_LIMIT; retry += 1) {
+    if (await trySendToEli(url, msg, retry)) return;
+    await sleep(INBOUND_RETRY_DELAY_MS);
   }
 }
 
@@ -202,6 +244,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
         res.status(501).json({ error: `channel "${sourceChannel}" cannot send text` });
         return;
       }
+      const sendText = channelPlugin.outbound?.sendText;
 
       try {
         // Build the cfg object in the shape OpenClaw plugins expect:
@@ -231,9 +274,13 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
           res.json({ ok: true, cleanup_only: true });
           return;
         }
+        if (!sendText) {
+          res.status(501).json({ error: `channel "${sourceChannel}" cannot send text` });
+          return;
+        }
 
         // OpenClaw outbound adapters use { cfg, to, text, accountId, replyToId, threadId }
-        const result = await channelPlugin.outbound.sendText({
+        const result = await sendText({
           cfg,
           to,
           text: msg.content,

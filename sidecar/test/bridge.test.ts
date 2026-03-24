@@ -23,6 +23,13 @@ let capturedInbound: any[] = [];
 let sentMessages: Array<{ text: string; chatId: string; accountId: string }> = [];
 let cleanupCalls: Array<{ typingState: any; accountId: string }> = [];
 
+function connectionRefusedError(): Error {
+  const cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:3100"), {
+    code: "ECONNREFUSED",
+  });
+  return Object.assign(new TypeError("fetch failed"), { cause });
+}
+
 // Mock channel plugin with outbound.sendText
 const mockChannel: ChannelPlugin = {
   meta: { id: "mock-channel", label: "Mock Channel" },
@@ -121,6 +128,31 @@ describe("inbound: sendToEli", () => {
     expect(msg.is_active).toBe(true);
     expect(msg.context.source_channel).toBe("mock-channel");
     expect(msg.context.sender_name).toBe("Bob");
+  });
+
+  it("retries ECONNREFUSED up to 3 times before succeeding", async () => {
+    const originalFetch = globalThis.fetch;
+    let attempts = 0;
+
+    globalThis.fetch = (async () => {
+      attempts += 1;
+      if (attempts < 4) throw connectionRefusedError();
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await sendToEli({
+        channel: "mock-channel",
+        accountId: "default",
+        senderId: "sender_retry",
+        chatType: "direct",
+        text: "retry me",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(attempts).toBe(4);
   });
 });
 
