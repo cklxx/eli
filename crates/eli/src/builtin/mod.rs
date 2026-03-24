@@ -27,6 +27,8 @@ use crate::channels::message::{ChannelMessage, MessageKind};
 use crate::hooks::{EliHookSpec, TapeStoreKind};
 use crate::types::{Envelope, PromptValue, State};
 
+pub(crate) const CLEANUP_ONLY_CONTEXT_KEY: &str = "_eli_cleanup_only";
+
 // ---------------------------------------------------------------------------
 // BuiltinImpl — default hook implementations
 // ---------------------------------------------------------------------------
@@ -134,6 +136,11 @@ impl BuiltinImpl {
         session_id: &str,
         model_output: &str,
     ) -> Vec<ChannelMessage> {
+        let output_channel = if message.output_channel.is_empty() {
+            message.channel.as_str()
+        } else {
+            message.output_channel.as_str()
+        };
         let clean = crate::builtin::cli::strip_fake_tool_calls(model_output);
         if clean.trim().is_empty() {
             tracing::info!(
@@ -142,14 +149,16 @@ impl BuiltinImpl {
                 raw_model_output = ?model_output,
                 "builtin.render_outbound.empty_after_cleanup"
             );
-            return Vec::new();
+            let mut extra = message.context.clone();
+            extra.insert(CLEANUP_ONLY_CONTEXT_KEY.to_owned(), Value::Bool(true));
+            let outbound = ChannelMessage::new(session_id, &message.channel, "")
+                .with_chat_id(&message.chat_id)
+                .with_output_channel(output_channel)
+                .with_kind(message.kind)
+                .with_context(extra)
+                .finalize();
+            return vec![outbound];
         }
-
-        let output_channel = if message.output_channel.is_empty() {
-            message.channel.as_str()
-        } else {
-            message.output_channel.as_str()
-        };
 
         let outbound = ChannelMessage::new(session_id, &message.channel, clean)
             .with_chat_id(&message.chat_id)
@@ -314,5 +323,43 @@ impl EliHookSpec for BuiltinImpl {
 
     fn provide_tape_store(&self) -> Option<TapeStoreKind> {
         Some(TapeStoreKind::Sync(Arc::new(self.provide_tape_store())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_outbound_empty_emits_cleanup_only_message() {
+        let builtin = BuiltinImpl::new();
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "source_channel".to_owned(),
+            Value::String("feishu".to_owned()),
+        );
+        let message = ChannelMessage::new("feishu:default:user_1", "webhook", "hello")
+            .with_chat_id("user_1")
+            .with_context(extra)
+            .finalize();
+
+        let outbounds = builtin.render_outbound(&message, "feishu:default:user_1", "");
+
+        assert_eq!(outbounds.len(), 1);
+        assert!(outbounds[0].content.is_empty());
+        assert_eq!(
+            outbounds[0]
+                .context
+                .get(CLEANUP_ONLY_CONTEXT_KEY)
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            outbounds[0]
+                .context
+                .get("source_channel")
+                .and_then(|v| v.as_str()),
+            Some("feishu")
+        );
     }
 }

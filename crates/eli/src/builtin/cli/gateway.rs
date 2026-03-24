@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-
 use crate::channels::message::ChannelMessage;
 
 /// Resolve the sidecar directory. Search order:
@@ -325,7 +324,13 @@ pub(crate) async fn gateway_command(enable_channels: Vec<String>) -> anyhow::Res
                             };
 
                             let content = super::outbound_string_field(outbound, "content");
-                            if content.trim().is_empty() {
+                            let cleanup_only = outbound
+                                .get("context")
+                                .and_then(|v| v.as_object())
+                                .and_then(|ctx| ctx.get(crate::builtin::CLEANUP_ONLY_CONTEXT_KEY))
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            if content.trim().is_empty() && !cleanup_only {
                                 continue;
                             }
 

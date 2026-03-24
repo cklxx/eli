@@ -69,6 +69,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
 
     app.post("/outbound", async (req, res) => {
       const msg = req.body as EliChannelMessage;
+      const cleanupOnly = Boolean(msg.context?._eli_cleanup_only);
       let { sourceChannel, accountId, chatId, chatType } = parseOutboundTarget(msg);
 
       // Fallback: extract source_channel from session_id (format: "channel:account:chatId")
@@ -94,7 +95,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
         return;
       }
 
-      if (!channelPlugin.outbound?.sendText) {
+      if (!cleanupOnly && !channelPlugin.outbound?.sendText) {
         console.error(`[bridge] outbound: channel "${sourceChannel}" has no sendText`);
         res.status(501).json({ error: `channel "${sourceChannel}" cannot send text` });
         return;
@@ -106,14 +107,16 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
         const cfg = { channels: sidecarConfig.channels };
 
         // Route target: use lifecycle hook, or fall back to context fields / chatId.
-        let to: string;
-        if (channelPlugin.lifecycle?.resolveOutboundTarget) {
-          to = channelPlugin.lifecycle.resolveOutboundTarget(msg.context ?? {}, chatId);
-        } else {
-          to = msg.context?.channel_target || msg.context?.feishu_to || chatId;
+        let to = chatId;
+        if (!cleanupOnly) {
+          if (channelPlugin.lifecycle?.resolveOutboundTarget) {
+            to = channelPlugin.lifecycle.resolveOutboundTarget(msg.context ?? {}, chatId);
+          } else {
+            to = msg.context?.channel_target || msg.context?.feishu_to || chatId;
+          }
         }
 
-        console.log(`[bridge] outbound: channel=${sourceChannel} to=${to} accountId=${accountId} textLen=${msg.content?.length}`);
+        console.log(`[bridge] outbound: channel=${sourceChannel} to=${to} accountId=${accountId} textLen=${msg.content?.length} cleanupOnly=${cleanupOnly}`);
 
         // Remove typing indicator if one was set for this session.
         const sessionId = msg.session_id || `${sourceChannel}:${accountId}:${chatId}`;
@@ -144,6 +147,11 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
               console.log(`[bridge] typing indicator removal failed: ${e.message}`);
             }
           }
+        }
+
+        if (cleanupOnly) {
+          res.json({ ok: true, cleanup_only: true });
+          return;
         }
 
         // OpenClaw outbound adapters use { cfg, to, text, accountId, replyToId, threadId }

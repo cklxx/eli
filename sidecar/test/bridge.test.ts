@@ -5,12 +5,13 @@
  * plugin, then verifies end-to-end message flow in both directions.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import express from "express";
 import type { Server } from "node:http";
 import { registry } from "../src/registry.js";
 import { initBridge, sendToEli, startOutboundServer } from "../src/bridge.js";
 import { envelopeToEliMessage, parseOutboundTarget } from "../src/envelope.js";
+import { pendingTyping } from "../src/runtime.js";
 import type { ChannelPlugin, InboundEnvelope, EliChannelMessage } from "../src/types.js";
 
 const MOCK_ELI_PORT = 13100;
@@ -20,6 +21,7 @@ let mockEliServer: Server;
 let sidecarServer: Server | undefined;
 let capturedInbound: any[] = [];
 let sentMessages: Array<{ text: string; chatId: string; accountId: string }> = [];
+let cleanupCalls: Array<{ typingState: any; accountId: string }> = [];
 
 // Mock channel plugin with outbound.sendText
 const mockChannel: ChannelPlugin = {
@@ -36,11 +38,17 @@ const mockChannel: ChannelPlugin = {
       return { ok: true };
     },
   },
+  lifecycle: {
+    onOutboundReply: async ({ typingState, accountId }: any) => {
+      cleanupCalls.push({ typingState, accountId });
+    },
+  },
 };
 
 beforeAll(async () => {
   capturedInbound = [];
   sentMessages = [];
+  cleanupCalls = [];
 
   // Mock eli server — captures inbound POSTs.
   await new Promise<void>((resolve) => {
@@ -64,6 +72,13 @@ beforeAll(async () => {
   registry.registerChannel(mockChannel);
 
   sidecarServer = await startOutboundServer(SIDECAR_PORT);
+});
+
+beforeEach(() => {
+  capturedInbound = [];
+  sentMessages = [];
+  cleanupCalls = [];
+  pendingTyping.clear();
 });
 
 afterAll(() => {
@@ -106,8 +121,6 @@ describe("inbound: sendToEli", () => {
 
 describe("outbound: eli callback", () => {
   it("routes response to the correct channel plugin's sendText", async () => {
-    sentMessages = [];
-
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -131,6 +144,42 @@ describe("outbound: eli callback", () => {
     expect(sentMessages[0].text).toBe("Hello from eli");
     expect(sentMessages[0].chatId).toBe("user_1");
     expect(sentMessages[0].accountId).toBe("default");
+  });
+
+  it("runs cleanup-only outbound without sending text", async () => {
+    pendingTyping.set("mock-channel:default:user_cleanup", {
+      typingState: { reaction: "thinking" },
+      cfg: { channels: {} },
+      accountId: "default",
+    });
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "mock-channel:default:user_cleanup",
+        channel: "webhook",
+        content: "",
+        chat_id: "user_cleanup",
+        context: {
+          source_channel: "mock-channel",
+          account_id: "default",
+          chat_type: "direct",
+          _eli_cleanup_only: true,
+        },
+        output_channel: "webhook",
+      }),
+    });
+
+    const body = (await resp.json()) as any;
+    expect(resp.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.cleanup_only).toBe(true);
+    expect(sentMessages).toHaveLength(0);
+    expect(cleanupCalls).toHaveLength(1);
+    expect(cleanupCalls[0].typingState).toEqual({ reaction: "thinking" });
+    expect(cleanupCalls[0].accountId).toBe("default");
+    expect(pendingTyping.has("mock-channel:default:user_cleanup")).toBe(false);
   });
 
   it("returns 404 for unknown source_channel", async () => {
