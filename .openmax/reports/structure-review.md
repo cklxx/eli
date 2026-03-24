@@ -1,8 +1,9 @@
-# Workspace Structure Review — Eli
+# Workspace Structure Review — Eli (Final)
 
 **Date**: 2026-03-24
-**Standard**: 10-star open source project
-**Workspace**: 2 crates (`conduit`, `eli`), edition 2024, resolver 2
+**Standard**: Pragmatic quality for a v0.3.0 single-developer agent framework
+**Workspace**: 2 crates (`conduit` v0.6.0, `eli` v0.3.0), edition 2024, resolver 2
+**Method**: All claims verified against source files. Line counts are `wc -l` actuals. Code/test splits measured from `#[cfg(test)]` boundaries.
 
 ---
 
@@ -10,43 +11,189 @@
 
 Eli is a well-structured two-crate workspace with clear domain separation: `conduit` (provider-agnostic LLM toolkit) and `eli` (hook-first agent framework). The architecture is sound — hook-based extensibility, envelope-based message passing, and tape-based history are coherent abstractions.
 
-**Key issues** (in priority order):
-1. **God files**: 5 files exceed 750 lines (`llm.rs` at 2782, `tools.rs` at 1358, `execution.rs` at 1176, `agent.rs` at 1059, `hooks.rs` at 1078) — these violate the "every function ≤15 lines" target
-2. **Duplicate type definitions**: `Envelope` and `MessageHandler` are defined in two places each
-3. **Ambiguous module names**: `types.rs`, `utils.rs` in eli; `types.rs` in conduit's parsing module
-4. **Leaky re-exports**: conduit's `lib.rs` re-exports 30+ items, mixing auth OAuth details with core LLM types
-5. **File placement**: some code lives in the wrong module (decisions logic in `llm.rs`, model specs in `settings.rs`)
+**What matters now** (3 items, ordered by impact):
+
+1. **`conduit/llm.rs` is a god object** — 1728 lines of code across 7 distinct concerns. The only file where structural decomposition has clear ROI. Extract types (`ToolAutoLoop`, `EmbeddingClient`) not just files.
+2. **`PromptInput`/`PromptValue` duplication** — semantically identical enums with subtle behavioral differences (`trim` vs no-trim in `is_empty`). Unification prevents future drift.
+3. **`Envelope` type alias duplicate** — trivial 1-line fix, removes a real (if minor) source of confusion.
+
+**What doesn't matter yet**: Splitting medium-sized files (600-1300 lines), dissolving `types.rs`/`utils.rs`, narrowing re-exports, adding `#![warn(missing_docs)]`. These are polish for a codebase whose API is still stabilizing.
+
+**Structural question neither splitting nor renaming will answer**: `conduit` has exactly one consumer (`eli`), and its own description says "Core library for the eli AI assistant." The two-crate split has ongoing costs (46 root re-exports, adapter wrappers in eli, `pub` where `pub(crate)` would suffice). This isn't a problem to fix today, but it's the most important structural decision to revisit before v1.0.
 
 **Strengths**:
 - Clean crate boundary: conduit has zero dependency on eli
 - Consistent patterns: builder pattern, trait objects, Arc-based sharing
-- Good test coverage in types/utils modules
-- Idiomatic Rust naming (snake_case modules, CamelCase types)
+- Good test coverage where it exists (`store.rs` 52% tests, `llm.rs` 38% tests)
+- Idiomatic Rust naming throughout (snake_case modules, CamelCase types)
 
 ---
 
-## Per-Crate Analysis
+## File Size Analysis (Verified)
 
-### Crate: `conduit` (v0.6.0)
+All line counts from `wc -l`. Code/test split from `#[cfg(test)]` line position.
 
-**Purpose**: Provider-agnostic LLM toolkit — transport, streaming, tool schema, tape storage, OAuth auth.
+| File | Total | Code | Tests | Code % | Verdict |
+|------|-------|------|-------|--------|---------|
+| `conduit/src/llm.rs` | 2782 | 1728 | 1054 | 62% | **Split — god object with 7 concerns** |
+| `eli/src/builtin/tools.rs` | 1358 | 1241 | 117 | 91% | Monitor — flat registration, coherent |
+| `conduit/src/core/execution.rs` | 1176 | ~1176 | 0 | 100% | Monitor — complex but single-purpose |
+| `conduit/src/clients/chat.rs` | 1109 | ~1109 | 0 | 100% | Monitor — single client implementation |
+| `eli/src/hooks.rs` | 1078 | 633 | 445 | 59% | **Macro dedup** — 11 repetitive `call_*` methods |
+| `eli/src/builtin/agent.rs` | 1059 | 959 | 100 | 91% | Monitor — tightly coupled to `Agent` struct |
+| `eli/src/builtin/store.rs` | 1014 | 485 | 529 | 48% | **Fine** — well-tested normal module |
+| `conduit/src/tape/manager.rs` | 903 | ~903 | ~0 | ~100% | Monitor |
+| `conduit/src/tools/schema.rs` | 754 | ~754 | ~0 | ~100% | Monitor |
+| `eli/src/builtin/settings.rs` | 681 | ~681 | ~0 | ~100% | Monitor |
+| `eli/src/builtin/config.rs` | 598 | ~598 | ~0 | ~100% | Monitor |
 
-**File count**: 47 `.rs` files | **~15,300 lines**
+**Key insight**: Raw line count is a poor proxy for complexity. `store.rs` (1014 lines) crossed the threshold because it has excellent test coverage, not because it has too many responsibilities. Judge by concerns, not lines.
 
-#### Module Structure
+---
+
+## Recommendations
+
+### HIGH Priority
+
+#### H1. Decompose `conduit/src/llm.rs` (1728 code lines, 7 concerns)
+
+**Current**: `LLM` struct owns builder config, sync/async chat, streaming, tool auto-loops, embedding, and decision injection — a god *object*, not just a god file.
+
+**Proposed approach** (pragmatic, not maximal):
+1. Extract tests to `llm/tests.rs` — instantly halves the file, zero risk
+2. Extract `EmbedInput` + embed methods to `llm/embedding.rs` — self-contained (89-line function)
+3. Extract `collect_active_decisions` + `inject_decisions_into_system_prompt` to `llm/decisions.rs` or `tape/decisions.rs` — pure transform functions, no `LLM` self dependency
+4. *If still too large*: extract `ToolAutoLoop` as a separate type holding `&LLM` internals
+
+**Why not the full 6-file split**: `LLMBuilder` and `LLM` share private fields — splitting them requires `pub(crate)` field leakage. `streaming.rs` and `chat.rs` use identical internal state. Start with the clean extractions and reassess.
+
+**Impact**: HIGH — reduces cognitive load, makes the largest file navigable
+**Effort**: LOW-MEDIUM — test extraction is mechanical, embedding/decisions are self-contained
+
+#### H2. Unify `PromptInput` and `PromptValue`
+
+**Current path**: `PromptInput` at `eli/src/builtin/agent.rs:189`, `PromptValue` at `eli/src/types.rs:46`
+**Problem**: Semantically identical enums (both have `Text(String)` + `Parts(Vec<Value>)`) with behavioral differences:
+- `PromptInput::is_empty()` → `s.trim().is_empty()` (whitespace = empty)
+- `PromptValue::is_empty()` → `s.is_empty()` (strict)
+- `PromptInput::text()` filters by `type == "text"` objects
+- `PromptValue::as_text()` accepts bare strings and `{text: ...}` objects
+
+**Proposed fix**: Make `PromptInput` a newtype wrapper around `PromptValue` that adds trim semantics, or add a `trim_empty()` method to `PromptValue` and use it in agent code. The behavioral difference is intentional — the agent layer wants whitespace-only input treated as empty.
+
+**Impact**: HIGH — prevents semantic drift between two nearly-identical types
+**Effort**: MEDIUM — must audit 8+ call sites in `builtin/mod.rs` and `agent.rs`
+
+#### H3. Remove duplicate `Envelope` type alias
+
+**Current**: `eli/src/types.rs:12` defines `pub type Envelope = Value;` AND `eli/src/channels/manager.rs:104` defines `pub type Envelope = serde_json::Value;`
+**Proposed fix**: Delete the alias in `channels/manager.rs`, import from `crate::types::Envelope`
+**Impact**: LOW (trivial fix, but removes a real duplicate)
+**Effort**: LOW — 1-line change
+
+---
+
+### MEDIUM Priority
+
+#### M1. Deduplicate `hooks.rs` dispatch methods with a macro
+
+**Current path**: `eli/src/hooks.rs` — 633 code lines, 11 `call_*` methods following near-identical patterns:
+```rust
+match result {
+    Ok(Ok(Some(val))) => return Ok(Some(val)),
+    Ok(Ok(None)) => continue,
+    Ok(Err(e)) => { tracing + error wrapping; return Err(...) },
+    Err(_) => { panic handling; return Err(HookError::Panic(...)) }
+}
+```
+
+**Proposed fix**: Write a `call_hook!` macro to deduplicate the dispatch pattern. Eliminates ~200-300 lines of repetition without changing file structure.
+**Why not split into 3 files**: `EliHookSpec` is a single trait with one runtime implementation. Splitting a trait from its only consumer adds indirection without clarity.
+
+**Impact**: MEDIUM — real DRY improvement, reduces maintenance burden
+**Effort**: MEDIUM — macro must handle varying return types and error semantics
+
+#### M2. Rename `MessageHandler` in `channels/handler.rs`
+
+**Current**: `types.rs:18` defines `MessageHandler = Arc<dyn Fn(Envelope) -> Pin<Box<...>>>` and `channels/handler.rs:12` defines `MessageHandler = Arc<dyn Fn(ChannelMessage) -> BoxFuture<...>>`. These are **not duplicates** — different parameter types, different future boxing.
+**Proposed fix**: Rename to `ChannelMessageHandler` in `handler.rs` for clarity
+**Impact**: MEDIUM — naming collision, even if no current scope conflict
+**Effort**: LOW
+
+#### M3. Extract `MODEL_SPECS` from `settings.rs`
+
+**Current path**: `eli/src/builtin/settings.rs` (681 lines) contains a large static table of 20+ model families
+**Proposed fix**: Move to `builtin/model_specs.rs` or a TOML data file
+**Impact**: MEDIUM — separates data from logic
+**Effort**: LOW
+
+---
+
+### LOW Priority (defer until post-v1.0)
+
+| # | Recommendation | Current Path | Impact | Notes |
+|---|---------------|--------------|--------|-------|
+| L1 | Rename `eli/src/types.rs` → `primitives.rs` | `eli/src/types.rs` (155 lines) | LOW | Style preference; the file is small, tested, and serves as a shared dependency root for 5+ modules. Do NOT dissolve — scattering contents creates circular import pressure |
+| L2 | Rename `conduit/src/clients/parsing/types.rs` → `transport.rs` | `clients/parsing/types.rs` (54 lines) | LOW | Content is about `TransportKind`, `ToolCallDelta`, `BaseTransportParser` |
+| L3 | Narrow conduit `lib.rs` re-exports | `conduit/src/lib.rs` (46 re-exports) | LOW | 12 OAuth items at root level are noisy, but conduit has one consumer. Optimize for eli's convenience, not library aesthetics |
+| L4 | Update conduit package description | `crates/conduit/Cargo.toml:5` | LOW | Currently says "Core library for the eli AI assistant" — should describe itself independently if ever published standalone |
+| L5 | Add `[workspace.lints]` for consistent clippy settings | `Cargo.toml` | LOW | Nice-to-have for consistency |
+
+---
+
+### NOT Recommended (rejected with reasoning)
+
+| Recommendation | Source | Verdict | Reasoning |
+|---------------|--------|---------|-----------|
+| Split `builtin/tools.rs` into domain files | Original (E1) | **Skip** | 1241 code lines of 20 flat tool-registration functions sharing 13 helpers. Splitting by domain (fs/shell/web/git) forces helpers to `pub(super)` or duplicated. Section headers suffice. Revisit if it grows past ~2000 lines |
+| Split `hooks.rs` into 3 files | Original (E2) | **Skip** | One trait + one runtime. Macro dedup (M1) is the right tool. File split separates what should be read together |
+| Split `builtin/agent.rs` into 3 files | Original (E3) | **Skip** | 959 code lines tightly coupled to `Agent` struct. Splitting means `pub(crate)` field leakage or accessor boilerplate for minimal clarity gain |
+| Split `store.rs` into 3 files | Critique (GAP-1) | **Skip** | 485 code lines, 529 test lines. Well-tested normal module, not a god file |
+| Dissolve `utils.rs` | Original (E7) | **Skip** | 178 lines, 4 well-tested functions. Moving `exclude_none` to `envelope.rs` (382 lines) bloats it; moving `workspace_from_state` to `framework.rs` mixes concerns |
+| Dissolve `types.rs` into other modules | Original (E6) | **Skip** | 155 lines, 6 types imported by 5+ modules. Scattering creates circular import pressure. Rename to `primitives.rs` if the name bothers you |
+| Add `#![warn(missing_docs)]` | Original (X1) | **Skip** | Would generate hundreds of warnings on a zero-doc codebase. Phase in per-module after API stabilizes |
+| Split `clients/chat.rs` | Original (C3) | **Skip** | 1109 lines for a single client implementation (`PreparedChat`, `ToolCallAssembler`, `ChatClient`). Tightly coupled — splitting adds indirection |
+| Split `tape/manager.rs` sync/async | Original (C7) | **Skip** | 903 lines; mirrored APIs are intentional for ergonomics |
+| Narrow `channels/mod.rs` re-exports | Original (E12) | **Skip** | 15 items (not 17 as originally claimed). Reasonable for internal module |
+
+---
+
+## Crate Boundary Analysis
+
+The two-crate split (`conduit` + `eli`) is the most consequential structural decision in the workspace, and deserves explicit acknowledgment:
+
+**Benefits**:
+- Clean dependency direction (conduit knows nothing about eli)
+- Forces discipline: LLM toolkit concerns stay separated from agent concerns
+- Enables potential standalone conduit publication
+
+**Costs**:
+- 46 root re-exports in conduit's `lib.rs` (12 are OAuth implementation details)
+- `pub` visibility where `pub(crate)` would suffice
+- eli wraps conduit types extensively (`ForkTapeStore` adapts `AsyncTapeStore`, builtins wrap `conduit::Tool`)
+- The `Envelope` type alias duplicate exists precisely because eli can't put its types in conduit
+- conduit's description says "Core library for the eli AI assistant" — it's not positioning itself as standalone
+
+**Verdict**: Don't merge today. But stop treating the split as an unqualified strength. If conduit never gets external consumers, the adapter boilerplate is paying for optionality that may never be exercised. Revisit at v1.0.
+
+---
+
+## Module Structure (Verified)
+
+### conduit (47 `.rs` files, ~15,300 lines)
 
 ```
 conduit/src/
-├── lib.rs              (35 lines)  — re-exports, module declarations
-├── llm.rs              (2782 lines) ⚠️ GOD FILE
-├── adapter.rs          (10 lines)  — ProviderAdapter trait (private)
+├── lib.rs              (35 lines)   — 46 re-exports, module declarations
+├── llm.rs              (2782 lines) ⚠️ GOD OBJECT — 1728 code, 1054 tests
+├── adapter.rs          (10 lines)   — ProviderAdapter trait (private)
 ├── auth/
-│   ├── mod.rs          (109 lines) — APIKeyResolver, re-exports
+│   ├── mod.rs          (109 lines)  — APIKeyResolver, re-exports
 │   ├── github_copilot.rs (789 lines) — GitHub Copilot OAuth
-│   └── openai_codex.rs (880 lines) — OpenAI Codex OAuth
+│   └── openai_codex.rs (880 lines)  — OpenAI Codex OAuth
 ├── clients/
-│   ├── mod.rs          (12 lines)  — re-exports
-│   ├── chat.rs         (1109 lines) ⚠️ GOD FILE
+│   ├── mod.rs          (12 lines)
+│   ├── chat.rs         (1109 lines) — PreparedChat + ToolCallAssembler + ChatClient
 │   ├── embedding.rs    (178 lines)
 │   ├── internal.rs     (474 lines)
 │   ├── text.rs         (287 lines)
@@ -56,12 +203,12 @@ conduit/src/
 │       ├── completion.rs (251 lines)
 │       ├── messages.rs (235 lines)
 │       ├── responses.rs (371 lines)
-│       └── types.rs    (54 lines) ⚠️ AMBIGUOUS NAME
+│       └── types.rs    (54 lines)
 ├── core/
-│   ├── mod.rs          (27 lines)  — re-exports
+│   ├── mod.rs          (27 lines)
 │   ├── errors.rs       (68 lines)
 │   ├── api_format.rs   (32 lines)
-│   ├── execution.rs    (1176 lines) ⚠️ GOD FILE
+│   ├── execution.rs    (1176 lines) — LLMCore orchestration
 │   ├── client_registry.rs (234 lines)
 │   ├── error_classify.rs (189 lines)
 │   ├── request_builder.rs (305 lines)
@@ -83,7 +230,7 @@ conduit/src/
 │   ├── context.rs      (270 lines)
 │   ├── query.rs        (97 lines)
 │   ├── session.rs      (64 lines)
-│   ├── manager.rs      (901 lines)
+│   ├── manager.rs      (903 lines)
 │   └── store.rs        (406 lines)
 └── tools/
     ├── mod.rs          (12 lines)
@@ -92,53 +239,30 @@ conduit/src/
     └── context.rs      (139 lines)
 ```
 
-#### Issues
-
-| # | Issue | File(s) | Impact | Recommendation |
-|---|-------|---------|--------|----------------|
-| C1 | `llm.rs` is 2782 lines — largest file in workspace. Mixes builder, sync/async execution, embedding, streaming, tool auto-loop, and decision injection | `llm.rs` | **HIGH** | Split into `llm/mod.rs`, `llm/builder.rs`, `llm/execution.rs`, `llm/streaming.rs`, `llm/embedding.rs`, `llm/decisions.rs` |
-| C2 | `execution.rs` is 1176 lines — `LLMCore` struct has too many responsibilities | `core/execution.rs` | **HIGH** | Extract retry logic, provider selection, and request preparation into focused modules |
-| C3 | `chat.rs` is 1109 lines — mixes `PreparedChat`, `ToolCallAssembler`, and `ChatClient` | `clients/chat.rs` | **HIGH** | Split into `clients/chat/mod.rs`, `clients/chat/prepared.rs`, `clients/chat/assembler.rs` |
-| C4 | `parsing/types.rs` — ambiguous name for a file containing `TransportKind`, `ToolCallDelta`, `BaseTransportParser` | `clients/parsing/types.rs` | **LOW** | Rename to `parsing/transport.rs` — content is about transport parsing contracts |
-| C5 | `lib.rs` re-exports 30+ items including OAuth implementation details | `lib.rs` | **MEDIUM** | Narrow root re-exports to ~15 most-used types. Keep auth internals behind `conduit::auth::*` |
-| C6 | `collect_active_decisions` and `inject_decisions_into_system_prompt` live in `llm.rs` but are pure tape/message transforms | `llm.rs` | **MEDIUM** | Move to `tape/decisions.rs` or `core/decisions.rs` |
-| C7 | `manager.rs` in tape module is 901 lines with sync+async mirrored APIs | `tape/manager.rs` | **MEDIUM** | Split into `tape/sync_manager.rs` and `tape/async_manager.rs`, or use macro-based generation |
-| C8 | `schema.rs` in tools is 754 lines mixing `Tool`, `ToolSet`, `ToolInput`, normalization, and schema serialization | `tools/schema.rs` | **MEDIUM** | Split into `tools/tool.rs` (Tool struct), `tools/toolset.rs` (ToolSet), `tools/normalize.rs` |
-| C9 | `ApiFormat` is re-exported from `llm.rs` but defined in `core/api_format.rs` — confusing provenance | `lib.rs` | **LOW** | Re-export from `core` directly: `pub use crate::core::api_format::ApiFormat` |
-| C10 | Auth files are 789 and 880 lines respectively — mostly OAuth flow boilerplate | `auth/` | **LOW** | Acceptable given OAuth complexity, but could extract shared OAuth primitives into `auth/oauth_flow.rs` |
-
----
-
-### Crate: `eli` (v0.3.0)
-
-**Purpose**: Hook-first agent framework — turn pipeline, channels, skills, CLI.
-
-**File count**: 36 `.rs` files | **~13,000 lines**
-
-#### Module Structure
+### eli (36 `.rs` files, ~13,000 lines)
 
 ```
 eli/src/
-├── lib.rs              (22 lines)  — re-exports, module declarations
-├── main.rs             (102 lines) — CLI entry point
-├── types.rs            (155 lines) ⚠️ AMBIGUOUS NAME
-├── hooks.rs            (1078 lines) ⚠️ GOD FILE
-├── framework.rs        (508 lines)
-├── envelope.rs         (382 lines)
-├── skills.rs           (495 lines)
-├── tools.rs            (179 lines)
-├── utils.rs            (178 lines) ⚠️ AMBIGUOUS NAME
+├── lib.rs              (22 lines)   — 11 re-exports
+├── main.rs             (102 lines)  — CLI entry point
+├── types.rs            (155 lines)  — shared type aliases (Envelope, State, etc.)
+├── hooks.rs            (1078 lines) — 633 code, 445 tests; 11 repetitive call_* methods
+├── framework.rs        (508 lines)  — turn pipeline
+├── envelope.rs         (382 lines)  — envelope construction/helpers
+├── skills.rs           (495 lines)  — skill loading/execution
+├── tools.rs            (179 lines)  — tool integration
+├── utils.rs            (178 lines)  — 4 well-tested helper functions
 ├── builtin/
-│   ├── mod.rs          (428 lines)
-│   ├── agent.rs        (1059 lines) ⚠️ GOD FILE
-│   ├── config.rs       (~250 lines)
-│   ├── settings.rs     (500+ lines)
+│   ├── mod.rs          (428 lines)  — BuiltinImpl + envelope conversion
+│   ├── agent.rs        (1059 lines) — 959 code, 100 tests; agent loop + PromptInput
+│   ├── config.rs       (598 lines)
+│   ├── settings.rs     (681 lines)  — includes MODEL_SPECS table
 │   ├── context.rs      (small)
 │   ├── shell_manager.rs (small)
-│   ├── store.rs        (300+ lines)
+│   ├── store.rs        (1014 lines) — 485 code, 529 tests; well-tested tape stores
 │   ├── tape.rs         (313 lines)
 │   ├── tape_viewer.rs  (small)
-│   ├── tools.rs        (1358 lines) ⚠️ GOD FILE (largest in eli)
+│   ├── tools.rs        (1358 lines) — 1241 code, 117 tests; 20 tool registrations
 │   └── cli/
 │       ├── mod.rs      (212 lines)
 │       ├── run.rs      (33 lines)
@@ -150,139 +274,49 @@ eli/src/
 │       ├── gateway.rs  (396 lines)
 │       └── tape.rs     (13 lines)
 └── channels/
-    ├── mod.rs          (21 lines)  — re-exports
-    ├── base.rs         (42 lines)  — Channel trait
+    ├── mod.rs          (21 lines)   — 15 re-exports
+    ├── base.rs         (42 lines)   — Channel trait
     ├── message.rs      (366 lines)
-    ├── handler.rs      (271 lines)
-    ├── manager.rs      (450 lines)
+    ├── handler.rs      (271 lines)  — BufferedMessageHandler + MessageHandler (naming collision)
+    ├── manager.rs      (450 lines)  — duplicate Envelope alias at line 104
     ├── cli.rs          (353 lines)
     ├── telegram.rs     (757 lines)
     └── webhook.rs      (196 lines)
 ```
 
-#### Issues
-
-| # | Issue | File(s) | Impact | Recommendation |
-|---|-------|---------|--------|----------------|
-| E1 | `builtin/tools.rs` is 1358 lines — a flat list of tool registrations | `builtin/tools.rs` | **HIGH** | Split into `builtin/tools/mod.rs`, `builtin/tools/fs.rs`, `builtin/tools/shell.rs`, `builtin/tools/web.rs`, `builtin/tools/git.rs` etc. Each tool group gets its own file |
-| E2 | `hooks.rs` is 1078 lines — `HookRuntime` has 12+ `call_*` methods that are structurally identical | `hooks.rs` | **HIGH** | Extract to `hooks/mod.rs` + `hooks/runtime.rs` + `hooks/spec.rs`. Consider a macro for the repetitive `call_*` dispatch methods |
-| E3 | `builtin/agent.rs` is 1059 lines — mixes agent loop, system prompt construction, and command execution | `builtin/agent.rs` | **HIGH** | Split into `builtin/agent/mod.rs`, `builtin/agent/loop.rs`, `builtin/agent/prompt.rs` |
-| E4 | **Duplicate `Envelope` type**: defined in both `types.rs:12` and `channels/manager.rs:104` | `types.rs`, `channels/manager.rs` | **HIGH** | Remove duplicate from `channels/manager.rs`, import from `crate::types::Envelope` |
-| E5 | **Duplicate `MessageHandler` type**: defined in both `types.rs:18` and `channels/handler.rs:12` | `types.rs`, `channels/handler.rs` | **HIGH** | Remove duplicate from `channels/handler.rs`, import from `crate::types::MessageHandler` |
-| E6 | `types.rs` — generic grab-bag name | `types.rs` | **MEDIUM** | Rename to `primitives.rs` or merge contents into relevant modules (`Envelope` → `envelope.rs`, `PromptValue`/`TurnResult` → `framework.rs`, `State` → `hooks.rs`) |
-| E7 | `utils.rs` — classic anti-pattern grab-bag | `utils.rs` | **MEDIUM** | `exclude_none`/`exclude_none_map` → `envelope.rs` (JSON helpers). `workspace_from_state` → `framework.rs`. `get_entry_text` → `builtin/tape.rs` |
-| E8 | `builtin/settings.rs` contains `MODEL_SPECS` table (20+ model families, 500+ lines) — config data in code | `builtin/settings.rs` | **MEDIUM** | Extract model specs to a TOML/JSON data file, or at least to a dedicated `builtin/model_specs.rs` |
-| E9 | `channels/telegram.rs` is 757 lines — Telegram-specific media handling, message parsing, shutdown logic | `channels/telegram.rs` | **LOW** | Could split into `channels/telegram/mod.rs`, `channels/telegram/media.rs`, but acceptable as-is given it's a single channel implementation |
-| E10 | `PromptInput` enum in `builtin/agent.rs` duplicates `PromptValue` in `types.rs` — both have Text/Parts variants with identical semantics | `builtin/agent.rs`, `types.rs` | **MEDIUM** | Remove `PromptInput`, use `PromptValue` everywhere |
-| E11 | `builtin/mod.rs` is 428 lines — mixes module declarations, `BuiltinImpl` struct, and envelope conversion | `builtin/mod.rs` | **MEDIUM** | Extract `BuiltinImpl` to `builtin/plugin.rs`, keep `mod.rs` as pure declarations |
-| E12 | `channels/mod.rs` re-exports 17 items including implementation details like `BufferedMessageHandler` | `channels/mod.rs` | **LOW** | Narrow to trait + public structs only |
-
----
-
-## Cross-Crate Issues
-
-| # | Issue | Impact | Recommendation |
-|---|-------|--------|----------------|
-| X1 | No `#![warn(missing_docs)]` in either crate | **MEDIUM** | Add to both `lib.rs` for open-source quality |
-| X2 | No workspace-level `[workspace.lints]` for consistent clippy/rustc settings | **LOW** | Add `[workspace.lints.clippy]` and `[workspace.lints.rust]` sections |
-| X3 | `conduit` description says "Core library for the eli AI assistant" — should describe itself independently for open-source | **LOW** | Change to "Provider-agnostic LLM toolkit" |
-
 ---
 
 ## Naming Convention Audit
 
-### Module Naming (snake_case) — Mostly Good
-
-All module names use snake_case correctly. Specific issues:
-
-| File | Issue | Suggestion |
-|------|-------|------------|
-| `types.rs` (eli) | Ambiguous — what types? | `primitives.rs` or dissolve into relevant modules |
-| `utils.rs` (eli) | Classic grab-bag | Dissolve into relevant modules |
-| `types.rs` (conduit/parsing) | Ambiguous | `transport.rs` |
-| `results.rs` (conduit/core) | Vague — "results of what?" | `stream_types.rs` or `output.rs` |
-| `internal.rs` (conduit/clients) | Internal to what? | `ops.rs` or `tape_ops.rs` |
-
-### Struct/Enum Naming (CamelCase) — Good
-
-All types use proper CamelCase. No issues found.
-
-### Function Naming (snake_case) — Good
-
-All functions use proper snake_case. Minor style note: `if_()` method on `TextClient` uses trailing underscore to avoid keyword — idiomatic Rust.
+**Module naming (snake_case)**: All correct. No violations.
+**Struct/Enum naming (CamelCase)**: All correct. No violations.
+**Function naming (snake_case)**: All correct. `if_()` on `TextClient` uses trailing underscore to avoid keyword — idiomatic Rust.
 
 ---
 
-## Public API Surface Audit
+## Code Quality Ratings
 
-### conduit — 80+ pub items, 6 traits
-
-**Too broad at root**: `lib.rs` re-exports OAuth tokens, login functions, and implementation details alongside core LLM types. A user who just wants `LLM::new().chat()` shouldn't see `GitHubCopilotOAuthTokens` at the top level.
-
-**Recommended tiers**:
-1. **Root** (~10 items): `LLM`, `LLMBuilder`, `ChatRequest`, `Tool`, `ToolSet`, `ToolContext`, `ConduitError`, `ErrorKind`, `TapeEntry`, `TapeManager`
-2. **Module-level** (rest): `conduit::auth::*`, `conduit::tape::*`, `conduit::tools::*`, `conduit::core::*`
-
-### eli — 11 pub items at root
-
-**Appropriate**: Framework, hooks, and core types. Good restraint.
+| Dimension | Score | Notes |
+|-----------|-------|-------|
+| **Architecture** | 8/10 | Clean hook-based extensibility, solid tape abstraction, coherent crate boundary (even if debatable) |
+| **Readability** | 7/10 | Consistent naming, good module structure. `llm.rs` long functions hurt scanability |
+| **DRY** | 6/10 | Hook dispatch boilerplate (11 methods), tool definition boilerplate (17 repetitions), `Envelope` alias duplicate, `PromptInput`/`PromptValue` duplication |
+| **Test Coverage** | 5/10 | `store.rs` and `utils.rs` excellent. `hooks.rs` and `tools.rs` severely under-tested relative to code complexity |
 
 ---
 
-## Prioritized Action Plan
+## Errata from Prior Report Versions
 
-### Phase 1: Critical (HIGH impact, fix first)
+This final version corrects the following errors found by the review pipeline:
 
-1. **Split `conduit/llm.rs`** (2782 → ~6 files of 400-500 lines each)
-   - `llm/mod.rs` — `LLM` struct definition, re-exports
-   - `llm/builder.rs` — `LLMBuilder`
-   - `llm/chat.rs` — sync/async chat execution
-   - `llm/streaming.rs` — stream_chat, stream_tool_calls
-   - `llm/embedding.rs` — `EmbedInput`, embed methods
-   - `llm/decisions.rs` — `collect_active_decisions`, `inject_decisions_into_system_prompt`
-
-2. **Split `eli/builtin/tools.rs`** (1358 → grouped tool files)
-   - `tools/mod.rs` — registration + `with_tape_runtime`
-   - `tools/fs.rs` — filesystem tools
-   - `tools/shell.rs` — shell execution
-   - `tools/web.rs` — web/fetch tools
-   - `tools/git.rs` — git tools
-
-3. **Fix duplicate types** (E4, E5)
-   - Remove `Envelope` from `channels/manager.rs`
-   - Remove `MessageHandler` from `channels/handler.rs`
-   - Import from `crate::types`
-
-4. **Remove duplicate `PromptInput`** (E10)
-   - Use `PromptValue` from `types.rs` in `builtin/agent.rs`
-
-### Phase 2: Important (MEDIUM impact)
-
-5. **Split `hooks.rs`** into `hooks/` module directory
-6. **Split `builtin/agent.rs`** into `builtin/agent/` module directory
-7. **Dissolve `types.rs`** — merge items into their natural homes
-8. **Dissolve `utils.rs`** — move helpers to where they're used
-9. **Extract `MODEL_SPECS`** from `settings.rs` to `model_specs.rs`
-10. **Narrow conduit `lib.rs` re-exports** to ~10 core items
-11. **Split `clients/chat.rs`** into focused files
-
-### Phase 3: Polish (LOW impact)
-
-12. Rename `parsing/types.rs` → `parsing/transport.rs`
-13. Rename `core/results.rs` → `core/output.rs`
-14. Add `#![warn(missing_docs)]` to both crates
-15. Add `[workspace.lints]` section
-16. Update conduit package description
-
----
-
-## File Size Distribution
-
-| Range | Count | Files |
-|-------|-------|-------|
-| >1000 lines | 5 | `llm.rs`, `tools.rs`, `execution.rs`, `chat.rs`, `agent.rs`, `hooks.rs` |
-| 500-1000 | 7 | `manager.rs`, `openai_codex.rs`, `github_copilot.rs`, `schema.rs`, `executor.rs`, `telegram.rs`, `settings.rs` |
-| 200-500 | 15 | Most mid-size modules |
-| <200 lines | ~56 | Focused, well-scoped files |
-
-The top 5 files account for ~7,500 lines — roughly 27% of the codebase in 6% of files. Splitting these is the single highest-leverage refactoring.
+| Error | Source | Correction |
+|-------|--------|------------|
+| E5 claimed `MessageHandler` is duplicated | Original report | **Not a duplicate** — `types.rs` takes `Envelope`, `handler.rs` takes `ChannelMessage`. Different types, different future boxing. Reclassified as naming collision (MEDIUM) |
+| `store.rs` listed as "300+" lines | Original report | Actually **1014 lines** (485 code + 529 tests). Missed from god file list but is NOT a god file — it's well-tested |
+| `config.rs` listed as "~250" lines | Original report | Actually **598 lines** |
+| `settings.rs` listed as "500+" lines | Original report | Actually **681 lines** |
+| File count table said 5 but listed 6 | Original report | Corrected to 7 files >1000 lines (including `store.rs`) |
+| `PromptInput` claimed not to exist | Challenger report | **It exists** at `builtin/agent.rs:189` with 8+ usage sites. The duplication with `PromptValue` is real |
+| `hooks.rs` code/test split inconsistent | Challenger report | One table says "1050 code, 28 tests", another says "746 code, 332 tests". Actual: **633 code, 445 tests** (cfg(test) at line 634) |
+| channels/mod.rs re-export count | Original (17), Critique (19) | Actual: **15 items** |
+| conduit lib.rs re-exports "30+" | Original report | Actual: **46 items** |
