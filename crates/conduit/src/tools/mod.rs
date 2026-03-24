@@ -7,6 +7,6 @@ pub mod schema;
 pub use context::ToolContext;
 pub use executor::{ToolCallResponse, ToolExecutor};
 pub use schema::{
-    Tool, ToolHandlerFn, ToolInput, ToolInputItem, ToolResult, ToolSet, normalize_tools,
-    tool_from_fn, tool_from_schema,
+    Tool, ToolAction, ToolHandlerFn, ToolInput, ToolInputItem, ToolResult, ToolSet,
+    normalize_tools, tool_from_fn, tool_from_schema,
 };

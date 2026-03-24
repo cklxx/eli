@@ -44,6 +44,17 @@ impl fmt::Debug for Tool {
     }
 }
 
+/// Action returned by `wrap_tool` hooks to control tool visibility.
+#[derive(Debug)]
+pub enum ToolAction {
+    /// Leave the tool unchanged.
+    Keep,
+    /// Remove the tool from the set (model will not see it).
+    Remove,
+    /// Replace the tool with a modified version.
+    Replace(Tool),
+}
+
 impl Clone for Tool {
     fn clone(&self) -> Self {
         Self {

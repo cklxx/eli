@@ -284,6 +284,41 @@ pub struct ToolExecution {
 }
 
 // ---------------------------------------------------------------------------
+// UsageEvent
+// ---------------------------------------------------------------------------
+
+/// Token usage from a single API call, including failed attempts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageEvent {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub attempt: u32,
+    pub success: bool,
+    pub timestamp: String,
+}
+
+impl UsageEvent {
+    /// Extract a `UsageEvent` from a raw API response's `"usage"` field.
+    pub fn from_raw(raw: &Value, model: &str, attempt: u32, success: bool) -> Option<Self> {
+        let usage = raw.as_object()?;
+        Some(Self {
+            model: model.to_owned(),
+            input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            attempt,
+            success,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        })
+    }
+
+    /// Total tokens for this event.
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ToolAutoResult
 // ---------------------------------------------------------------------------
 
@@ -306,10 +341,9 @@ pub struct ToolAutoResult {
     pub tool_results: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorPayload>,
-    /// Token usage from the last API response (contains `input_tokens`,
-    /// `output_tokens`, `total_tokens`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Value>,
+    /// Token usage events from all API calls in this tool-execution loop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usage: Vec<UsageEvent>,
 }
 
 impl ToolAutoResult {
@@ -321,7 +355,7 @@ impl ToolAutoResult {
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
             error: None,
-            usage: None,
+            usage: Vec::new(),
         }
     }
 
@@ -333,7 +367,7 @@ impl ToolAutoResult {
             tool_calls,
             tool_results,
             error: None,
-            usage: None,
+            usage: Vec::new(),
         }
     }
 
@@ -349,7 +383,12 @@ impl ToolAutoResult {
             tool_calls: tool_calls.unwrap_or_default(),
             tool_results: tool_results.unwrap_or_default(),
             error: Some(error),
-            usage: None,
+            usage: Vec::new(),
         }
+    }
+
+    /// Total input + output tokens across all usage events.
+    pub fn total_tokens(&self) -> u64 {
+        self.usage.iter().map(|u| u.total_tokens()).sum()
     }
 }

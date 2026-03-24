@@ -236,10 +236,11 @@ pub trait EliHookSpec: Send + Sync {
         None
     }
 
-    /// Wrap a tool before execution. Returns a modified tool with middleware applied,
-    /// or `None` to leave the tool unchanged.
-    fn wrap_tool(&self, tool: &conduit::Tool) -> Option<conduit::Tool> {
-        None
+    /// Wrap a tool before execution. Returns a `ToolAction` to keep, remove, or replace
+    /// the tool. Plugins are called in forward order (first-registered first) so that
+    /// safety plugins registered early can remove tools before later plugins see them.
+    fn wrap_tool(&self, tool: &conduit::Tool) -> conduit::ToolAction {
+        conduit::ToolAction::Keep
     }
 
     /// Provide a tape store instance for conversation recording.
@@ -339,15 +340,23 @@ impl HookRuntime {
             let name = plugin.plugin_name().to_owned();
             result = result
                 .into_iter()
-                .map(|tool| {
+                .filter_map(|tool| {
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         plugin.wrap_tool(&tool)
                     })) {
-                        Ok(Some(wrapped)) => wrapped,
-                        Ok(None) => tool,
+                        Ok(conduit::ToolAction::Keep) => Some(tool),
+                        Ok(conduit::ToolAction::Remove) => {
+                            tracing::info!(
+                                plugin = %name,
+                                tool = %tool.name,
+                                "hook.wrap_tool removed tool"
+                            );
+                            None
+                        }
+                        Ok(conduit::ToolAction::Replace(wrapped)) => Some(wrapped),
                         Err(_) => {
                             tracing::error!(plugin = %name, "hook.wrap_tool panicked");
-                            tool
+                            Some(tool)
                         }
                     }
                 })

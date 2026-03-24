@@ -19,7 +19,7 @@ use crate::core::errors::{ConduitError, ErrorKind};
 use crate::core::execution::{ApiBaseConfig, ApiKeyConfig, LLMCore};
 use crate::core::response_parser::TransportResponse;
 use crate::core::results::{
-    AsyncTextStream, StreamEvent, ToolAutoResult, ToolAutoResultKind, ToolExecution,
+    AsyncTextStream, StreamEvent, ToolAutoResult, ToolAutoResultKind, ToolExecution, UsageEvent,
 };
 use crate::core::tool_calls::{normalize_message_tool_calls, normalize_tool_calls};
 use crate::tape::entries::TapeEntry;
@@ -640,8 +640,8 @@ impl LLM {
         let mut all_tool_calls: Vec<Value> = Vec::new();
         let mut all_tool_results: Vec<Value> = Vec::new();
 
-        // Track the latest usage from API responses.
-        let mut last_usage: Option<Value> = None;
+        // Accumulate usage events from all API rounds.
+        let mut usage_events: Vec<UsageEvent> = Vec::new();
 
         let initial_round_msgs = build_messages(prompt, system_prompt, messages.as_deref());
         let mut in_memory_msgs = initial_round_msgs.clone();
@@ -682,9 +682,9 @@ impl LLM {
             // Execute model call + tool round
             let round = self._execute_tool_round(&msgs, &round_params).await?;
 
-            // Update cumulative usage
-            if let Some(usage) = round.usage {
-                last_usage = Some(usage);
+            // Accumulate usage event from this round
+            if let Some(event) = round.usage_event {
+                usage_events.push(event);
             }
 
             match round.outcome {
@@ -705,7 +705,7 @@ impl LLM {
                         tool_calls: all_tool_calls,
                         tool_results: all_tool_results,
                         error: None,
-                        usage: last_usage,
+                        usage: usage_events,
                     });
                 }
                 ToolRoundOutcome::Tools {
@@ -848,13 +848,19 @@ impl LLM {
                 )
                 .await?;
 
-        let usage = response.get("usage").cloned();
+        let model_name = response
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(params.model.unwrap_or("unknown"));
+        let usage_event = response
+            .get("usage")
+            .and_then(|raw| UsageEvent::from_raw(raw, model_name, 0, true));
         let raw_calls = extract_tool_calls(&response)?;
 
         if raw_calls.is_empty() {
             let content = extract_content(&response)?;
             return Ok(ToolRound {
-                usage,
+                usage_event,
                 outcome: ToolRoundOutcome::Text(content),
             });
         }
@@ -880,7 +886,7 @@ impl LLM {
         }
 
         Ok(ToolRound {
-            usage,
+            usage_event,
             outcome: ToolRoundOutcome::Tools {
                 response,
                 execution,
@@ -1332,7 +1338,7 @@ struct RoundParams<'a> {
 
 /// Result of a single tool-calling round.
 struct ToolRound {
-    usage: Option<Value>,
+    usage_event: Option<UsageEvent>,
     outcome: ToolRoundOutcome,
 }
 

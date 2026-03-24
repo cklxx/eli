@@ -331,9 +331,12 @@ impl EliHookSpec for BuiltinImpl {
         Some(Agent::new().system_prompt(prompt_text, state, None))
     }
 
-    fn wrap_tool(&self, tool: &conduit::Tool) -> Option<conduit::Tool> {
+    fn wrap_tool(&self, tool: &conduit::Tool) -> conduit::ToolAction {
         let wrapped = self.middleware_chain.wrap_tools(std::slice::from_ref(tool));
-        wrapped.into_iter().next()
+        match wrapped.into_iter().next() {
+            Some(t) => conduit::ToolAction::Replace(t),
+            None => conduit::ToolAction::Remove,
+        }
     }
 
     fn provide_tape_store(&self) -> Option<TapeStoreKind> {

@@ -20,7 +20,7 @@ pub use crate::clients::InternalOps;
 pub use crate::core::errors::{ConduitError, ErrorKind};
 pub use crate::core::results::{
     AsyncStreamEvents, AsyncTextStream, ErrorPayload, StreamEvent, StreamEvents, StreamState,
-    TextStream, ToolAutoResult, ToolExecution,
+    TextStream, ToolAutoResult, ToolExecution, UsageEvent,
 };
 pub use crate::llm::{
     ApiFormat, ChatRequest, EmbedInput, LLM, LLMBuilder, StreamEventFilter,
@@ -30,6 +30,6 @@ pub use crate::tape::{
     AnchorSelector, TapeContext, TapeEntry, TapeManager, TapeQuery, TapeSession,
 };
 pub use crate::tools::{
-    Tool, ToolCallResponse, ToolContext, ToolExecutor, ToolSet, normalize_tools, tool_from_fn,
-    tool_from_schema,
+    Tool, ToolAction, ToolCallResponse, ToolContext, ToolExecutor, ToolSet, normalize_tools,
+    tool_from_fn, tool_from_schema,
 };

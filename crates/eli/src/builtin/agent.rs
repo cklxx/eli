@@ -520,6 +520,7 @@ async fn agent_loop(
             settings,
             allowed_tools,
             tape_ctx_override.as_ref(),
+            None, // TODO: wire up wrap_tools from HookRuntime
         ),
     )
     .await;
@@ -577,11 +578,12 @@ async fn agent_loop(
                                 );
                             }
                         }
-                    } else if let Some(usage) = &output.usage {
+                    } else if !output.usage.is_empty() {
                         // No active grace — check whether to trigger.
-                        let input_tokens = usage
-                            .get("input_tokens")
-                            .and_then(|v| v.as_u64())
+                        let input_tokens = output
+                            .usage
+                            .last()
+                            .map(|u| u.input_tokens)
                             .unwrap_or(0) as usize;
                         let threshold = settings.context_window * 70 / 100;
                         if input_tokens >= threshold {
@@ -678,9 +680,10 @@ async fn run_tools_once(
     settings: &AgentSettings,
     allowed_tools: Option<&HashSet<String>>,
     tape_context: Option<&TapeContext>,
+    wrap_tools_fn: Option<&(dyn Fn(Vec<Tool>) -> Vec<Tool> + Send + Sync)>,
 ) -> Result<ToolAutoResult, ConduitError> {
-    // Build tools list from registry.
-    let tools: Vec<Tool> = {
+    // Build tools list from registry, then pass through hook chain.
+    let mut tools: Vec<Tool> = {
         let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(allowed) = allowed_tools {
             reg.values()
@@ -691,6 +694,9 @@ async fn run_tools_once(
             reg.values().cloned().collect()
         }
     };
+    if let Some(wrap_fn) = wrap_tools_fn {
+        tools = wrap_fn(tools);
+    }
 
     // Schemas are model-facing, but runnable tools keep their canonical names.
     let model_tool_list = model_tools(&tools);
