@@ -556,4 +556,70 @@ mod tests {
         assert_eq!(parts[0]["mime_type"], "image/jpeg");
         assert_eq!(parts[1]["mime_type"], "image/png");
     }
+
+    #[tokio::test]
+    async fn resolve_image_exactly_at_size_limit() {
+        let exact = vec![0u8; MAX_IMAGE_BYTES];
+        let media = vec![image_item("image/png", exact)];
+        let parts = resolve_image_media(&media).await;
+        // Exactly at limit should be accepted (only > limit is rejected).
+        assert_eq!(parts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_image_preserves_mime_type() {
+        let media = vec![
+            image_item("image/webp", vec![1]),
+            image_item("image/gif", vec![2]),
+        ];
+        let parts = resolve_image_media(&media).await;
+        assert_eq!(parts[0]["mime_type"], "image/webp");
+        assert_eq!(parts[1]["mime_type"], "image/gif");
+    }
+
+    #[tokio::test]
+    async fn resolve_image_mixed_with_one_oversized() {
+        let media = vec![
+            image_item("image/jpeg", vec![1, 2, 3]),
+            image_item("image/png", vec![0u8; MAX_IMAGE_BYTES + 1]),
+            image_item("image/gif", vec![4, 5]),
+        ];
+        let parts = resolve_image_media(&media).await;
+        // Only the oversized one should be skipped.
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["mime_type"], "image/jpeg");
+        assert_eq!(parts[1]["mime_type"], "image/gif");
+    }
+
+    #[tokio::test]
+    async fn resolve_image_empty_media_list() {
+        let parts = resolve_image_media(&[]).await;
+        assert!(parts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_image_all_non_image_types() {
+        let media = vec![
+            MediaItem {
+                media_type: MediaType::Audio,
+                mime_type: "audio/mpeg".to_owned(),
+                filename: None,
+                data_fetcher: None,
+            },
+            MediaItem {
+                media_type: MediaType::Video,
+                mime_type: "video/mp4".to_owned(),
+                filename: None,
+                data_fetcher: None,
+            },
+            MediaItem {
+                media_type: MediaType::Document,
+                mime_type: "application/pdf".to_owned(),
+                filename: None,
+                data_fetcher: None,
+            },
+        ];
+        let parts = resolve_image_media(&media).await;
+        assert!(parts.is_empty());
+    }
 }

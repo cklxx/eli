@@ -279,4 +279,147 @@ mod image_norm_tests {
         normalize_image_content_blocks(&mut msgs, TransportKind::Messages);
         assert_eq!(msgs[0]["content"], "just text");
     }
+
+    #[test]
+    fn multiple_images_in_single_message() {
+        let mut msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "compare these"},
+                {"type": "image_base64", "mime_type": "image/png", "data": "AAA"},
+                {"type": "image_base64", "mime_type": "image/jpeg", "data": "BBB"}
+            ]
+        })];
+        normalize_image_content_blocks(&mut msgs, TransportKind::Messages);
+
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[2]["source"]["media_type"], "image/jpeg");
+    }
+
+    #[test]
+    fn image_only_no_text() {
+        let mut msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "image_base64", "mime_type": "image/png", "data": "ONLY"}
+            ]
+        })];
+        normalize_image_content_blocks(&mut msgs, TransportKind::Messages);
+
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["data"], "ONLY");
+    }
+
+    #[test]
+    fn missing_mime_type_defaults_to_jpeg() {
+        let mut msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "image_base64", "data": "NOMINE"}
+            ]
+        })];
+        normalize_image_content_blocks(&mut msgs, TransportKind::Messages);
+
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["source"]["media_type"], "image/jpeg");
+    }
+
+    #[test]
+    fn missing_data_defaults_to_empty() {
+        let mut msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "image_base64", "mime_type": "image/png"}
+            ]
+        })];
+        normalize_image_content_blocks(&mut msgs, TransportKind::Messages);
+
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["source"]["data"], "");
+    }
+
+    #[test]
+    fn responses_transport_uses_openai_format() {
+        let mut msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "image_base64", "mime_type": "image/webp", "data": "WEBP"}
+            ]
+        })];
+        normalize_image_content_blocks(&mut msgs, TransportKind::Responses);
+
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "image_url");
+        assert_eq!(
+            content[0]["image_url"]["url"],
+            "data:image/webp;base64,WEBP"
+        );
+    }
+
+    #[test]
+    fn leaves_non_image_blocks_untouched() {
+        let mut msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hello"},
+                {"type": "image_base64", "mime_type": "image/png", "data": "IMG"},
+                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+            ]
+        })];
+        normalize_image_content_blocks(&mut msgs, TransportKind::Messages);
+
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[2]["type"], "tool_result");
+    }
+
+    #[test]
+    fn multiple_user_messages_all_normalized() {
+        let mut msgs = vec![
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "image_base64", "mime_type": "image/png", "data": "A"}
+                ]
+            }),
+            json!({
+                "role": "assistant",
+                "content": "I see an image"
+            }),
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "image_base64", "mime_type": "image/jpeg", "data": "B"}
+                ]
+            }),
+        ];
+        normalize_image_content_blocks(&mut msgs, TransportKind::Completion);
+
+        assert_eq!(msgs[0]["content"][0]["type"], "image_url");
+        assert_eq!(msgs[1]["content"], "I see an image");
+        assert_eq!(msgs[2]["content"][0]["type"], "image_url");
+    }
+
+    #[test]
+    fn image_survives_full_normalize_pipeline() {
+        let msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_base64", "mime_type": "image/png", "data": "XYZ"}
+            ]
+        })];
+        let normalized = normalize_messages_for_api(msgs, TransportKind::Messages);
+
+        let content = normalized[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["data"], "XYZ");
+    }
 }

@@ -231,4 +231,56 @@ mod tests {
         ]);
         assert_eq!(pv.strict_text(), "");
     }
+
+    // -- Multimodal vision: PromptValue with image_base64 blocks ---------------
+
+    #[test]
+    fn test_prompt_value_as_text_with_image_base64_blocks() {
+        let pv = PromptValue::Parts(vec![
+            json!({"type": "text", "text": "describe this"}),
+            json!({"type": "image_base64", "mime_type": "image/png", "data": "ABC"}),
+        ]);
+        // as_text extracts text from objects with "text" field — image blocks have no "text".
+        assert_eq!(pv.as_text(), "describe this");
+    }
+
+    #[test]
+    fn test_prompt_value_strict_text_filters_image_base64() {
+        let pv = PromptValue::Parts(vec![
+            json!({"type": "text", "text": "line1"}),
+            json!({"type": "image_base64", "mime_type": "image/jpeg", "data": "XYZ"}),
+            json!({"type": "text", "text": "line2"}),
+        ]);
+        // strict_text only includes "type": "text" parts.
+        assert_eq!(pv.strict_text(), "line1\nline2");
+    }
+
+    #[test]
+    fn test_prompt_value_image_only_parts_as_text_empty() {
+        let pv = PromptValue::Parts(vec![
+            json!({"type": "image_base64", "mime_type": "image/png", "data": "IMG"}),
+        ]);
+        assert_eq!(pv.as_text(), "");
+        assert_eq!(pv.strict_text(), "");
+    }
+
+    #[test]
+    fn test_prompt_value_parts_is_not_empty_with_image() {
+        let pv = PromptValue::Parts(vec![
+            json!({"type": "image_base64", "mime_type": "image/png", "data": "X"}),
+        ]);
+        assert!(!pv.is_empty());
+        assert!(!pv.is_blank());
+    }
+
+    #[test]
+    fn test_prompt_value_multimodal_multiple_images() {
+        let pv = PromptValue::Parts(vec![
+            json!({"type": "text", "text": "compare"}),
+            json!({"type": "image_base64", "mime_type": "image/png", "data": "A"}),
+            json!({"type": "image_base64", "mime_type": "image/jpeg", "data": "B"}),
+        ]);
+        assert_eq!(pv.strict_text(), "compare");
+        assert_eq!(pv.as_text(), "compare");
+    }
 }

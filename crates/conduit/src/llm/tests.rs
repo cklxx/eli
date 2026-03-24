@@ -1119,3 +1119,97 @@ fn test_e2e_image_normalized_to_openai() {
         "data:image/jpeg;base64,/9j/4A"
     );
 }
+
+#[test]
+fn test_build_messages_multiple_images() {
+    let parts = vec![
+        json!({"type": "text", "text": "compare"}),
+        json!({"type": "image_base64", "mime_type": "image/png", "data": "A"}),
+        json!({"type": "image_base64", "mime_type": "image/jpeg", "data": "B"}),
+    ];
+    let msgs = build_messages(None, Some(&parts), None, None);
+    assert_eq!(msgs.len(), 1);
+    let content = msgs[0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 3);
+}
+
+#[test]
+fn test_build_messages_image_only_no_text() {
+    let parts = vec![json!({"type": "image_base64", "mime_type": "image/png", "data": "ONLY"})];
+    let msgs = build_messages(None, Some(&parts), None, None);
+    assert_eq!(msgs.len(), 1);
+    let content = msgs[0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1);
+    assert_eq!(content[0]["type"], "image_base64");
+}
+
+#[test]
+fn test_build_messages_user_content_with_existing_messages() {
+    let existing = vec![
+        json!({"role": "user", "content": "first message"}),
+        json!({"role": "assistant", "content": "ok"}),
+    ];
+    let parts = vec![
+        json!({"type": "text", "text": "follow up with image"}),
+        json!({"type": "image_base64", "mime_type": "image/png", "data": "IMG"}),
+    ];
+    let msgs = build_messages(None, Some(&parts), Some("system"), Some(&existing));
+    assert_eq!(msgs.len(), 4); // system + 2 existing + user_content
+    assert_eq!(msgs[0]["role"], "system");
+    assert_eq!(msgs[1]["content"], "first message");
+    assert_eq!(msgs[2]["content"], "ok");
+    assert!(msgs[3]["content"].is_array());
+}
+
+#[test]
+fn test_build_messages_neither_prompt_nor_user_content() {
+    let msgs = build_messages(None, None, Some("system"), None);
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0]["role"], "system");
+}
+
+#[test]
+fn test_e2e_multiple_images_anthropic() {
+    use crate::clients::parsing::TransportKind;
+    use crate::core::message_norm::normalize_messages_for_api;
+
+    let parts = vec![
+        json!({"type": "text", "text": "compare these two"}),
+        json!({"type": "image_base64", "mime_type": "image/png", "data": "IMG1"}),
+        json!({"type": "image_base64", "mime_type": "image/jpeg", "data": "IMG2"}),
+    ];
+    let msgs = build_messages(None, Some(&parts), None, None);
+    let normalized = normalize_messages_for_api(msgs, TransportKind::Messages);
+
+    let content = normalized[0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 3);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["source"]["media_type"], "image/png");
+    assert_eq!(content[2]["type"], "image");
+    assert_eq!(content[2]["source"]["media_type"], "image/jpeg");
+}
+
+#[test]
+fn test_e2e_image_with_history_and_system() {
+    use crate::clients::parsing::TransportKind;
+    use crate::core::message_norm::normalize_messages_for_api;
+
+    let history = vec![
+        json!({"role": "user", "content": "hello"}),
+        json!({"role": "assistant", "content": "hi there"}),
+    ];
+    let parts = vec![
+        json!({"type": "text", "text": "now look at this"}),
+        json!({"type": "image_base64", "mime_type": "image/png", "data": "PIC"}),
+    ];
+    let msgs = build_messages(None, Some(&parts), Some("you are helpful"), Some(&history));
+    let normalized = normalize_messages_for_api(msgs, TransportKind::Messages);
+
+    assert_eq!(normalized.len(), 4);
+    assert_eq!(normalized[0]["role"], "system");
+    assert_eq!(normalized[1]["content"], "hello");
+    assert_eq!(normalized[2]["content"], "hi there");
+    let user_content = normalized[3]["content"].as_array().unwrap();
+    assert_eq!(user_content[1]["type"], "image");
+}

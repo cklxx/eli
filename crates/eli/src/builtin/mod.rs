@@ -439,7 +439,10 @@ mod tests {
         // session:2 should still be lockable (not blocked by session:1)
         let agent2 = builtin.get_or_create_agent("session:2");
         let try_lock = agent2.try_lock();
-        assert!(try_lock.is_ok(), "session:2 must not be blocked by session:1");
+        assert!(
+            try_lock.is_ok(),
+            "session:2 must not be blocked by session:1"
+        );
 
         drop(guard);
     }
@@ -557,7 +560,12 @@ mod tests {
             PromptValue::Parts(parts) => {
                 assert_eq!(parts.len(), 2);
                 assert_eq!(parts[0]["type"], "text");
-                assert!(parts[0]["text"].as_str().unwrap().contains("What is this image?"));
+                assert!(
+                    parts[0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("What is this image?")
+                );
                 assert_eq!(parts[1]["type"], "image_base64");
                 assert_eq!(parts[1]["data"], "AQID");
             }
@@ -612,5 +620,91 @@ mod tests {
             PromptValue::Text(t) => assert!(t.contains("no images")),
             PromptValue::Parts(_) => panic!("expected Text when media_parts is empty"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_build_user_prompt_multiple_images() {
+        let builtin = BuiltinImpl::new();
+        let envelope = serde_json::json!({
+            "session_id": "test",
+            "channel": "telegram",
+            "chat_id": "123",
+            "content": "compare",
+            "context": {},
+            "kind": "normal",
+            "output_channel": "telegram",
+            "media_parts": [
+                {"type": "image_base64", "mime_type": "image/png", "data": "A"},
+                {"type": "image_base64", "mime_type": "image/jpeg", "data": "B"}
+            ]
+        });
+
+        let prompt = builtin
+            .build_user_prompt(&envelope, "test", &HashMap::new())
+            .await
+            .unwrap();
+
+        match prompt {
+            PromptValue::Parts(parts) => {
+                assert_eq!(parts.len(), 3); // text + 2 images
+                assert_eq!(parts[0]["type"], "text");
+                assert_eq!(parts[1]["mime_type"], "image/png");
+                assert_eq!(parts[2]["mime_type"], "image/jpeg");
+            }
+            PromptValue::Text(_) => panic!("expected Parts with multiple images"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_user_prompt_media_parts_null_returns_text() {
+        let builtin = BuiltinImpl::new();
+        let envelope = serde_json::json!({
+            "session_id": "test",
+            "channel": "telegram",
+            "chat_id": "123",
+            "content": "null media",
+            "context": {},
+            "kind": "normal",
+            "output_channel": "telegram",
+            "media_parts": null
+        });
+
+        let prompt = builtin
+            .build_user_prompt(&envelope, "test", &HashMap::new())
+            .await
+            .unwrap();
+
+        match prompt {
+            PromptValue::Text(t) => assert!(t.contains("null media")),
+            PromptValue::Parts(_) => panic!("expected Text when media_parts is null"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_user_prompt_parts_text_extraction() {
+        let builtin = BuiltinImpl::new();
+        let envelope = serde_json::json!({
+            "session_id": "test",
+            "channel": "telegram",
+            "chat_id": "123",
+            "content": "describe this",
+            "context": {},
+            "kind": "normal",
+            "output_channel": "telegram",
+            "media_parts": [
+                {"type": "image_base64", "mime_type": "image/png", "data": "X"}
+            ]
+        });
+
+        let prompt = builtin
+            .build_user_prompt(&envelope, "test", &HashMap::new())
+            .await
+            .unwrap();
+
+        // strict_text() should extract only the text part, ignoring image blocks.
+        let text = prompt.strict_text();
+        assert!(text.contains("describe this"));
+        assert!(!text.contains("image_base64"));
+        assert!(!text.contains("image/png"));
     }
 }
