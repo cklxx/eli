@@ -459,3 +459,101 @@ async fn resolve_image_media(media: &[MediaItem]) -> Vec<Value> {
     }
     parts
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use crate::channels::message::DataFetcher;
+
+    /// Build a test `MediaItem` with a `DataFetcher` returning the given bytes.
+    fn image_item(mime: &str, bytes: Vec<u8>) -> MediaItem {
+        let fetcher: DataFetcher = Arc::new(move || {
+            let b = bytes.clone();
+            Box::pin(async move { b }) as Pin<Box<dyn std::future::Future<Output = Vec<u8>> + Send>>
+        });
+        MediaItem {
+            media_type: MediaType::Image,
+            mime_type: mime.to_owned(),
+            filename: None,
+            data_fetcher: Some(fetcher),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_image_happy_path() {
+        let media = vec![image_item("image/jpeg", vec![0xFF, 0xD8, 0xFF])];
+        let parts = resolve_image_media(&media).await;
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "image_base64");
+        assert_eq!(parts[0]["mime_type"], "image/jpeg");
+        // Verify base64 round-trips.
+        let b64 = parts[0]["data"].as_str().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
+        assert_eq!(decoded, vec![0xFF, 0xD8, 0xFF]);
+    }
+
+    #[tokio::test]
+    async fn resolve_image_skips_non_image() {
+        let audio = MediaItem {
+            media_type: MediaType::Audio,
+            mime_type: "audio/mpeg".to_owned(),
+            filename: None,
+            data_fetcher: Some(Arc::new(|| {
+                Box::pin(async { vec![1u8, 2, 3] })
+                    as Pin<Box<dyn std::future::Future<Output = Vec<u8>> + Send>>
+            })),
+        };
+        let parts = resolve_image_media(&[audio]).await;
+        assert!(parts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_image_skips_empty_bytes() {
+        let media = vec![image_item("image/png", vec![])];
+        let parts = resolve_image_media(&media).await;
+        assert!(parts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_image_skips_oversized() {
+        let big = vec![0u8; MAX_IMAGE_BYTES + 1];
+        let media = vec![image_item("image/png", big)];
+        let parts = resolve_image_media(&media).await;
+        assert!(parts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_image_skips_no_fetcher() {
+        let item = MediaItem {
+            media_type: MediaType::Image,
+            mime_type: "image/png".to_owned(),
+            filename: None,
+            data_fetcher: None,
+        };
+        let parts = resolve_image_media(&[item]).await;
+        assert!(parts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_image_multiple_mixed() {
+        let media = vec![
+            image_item("image/jpeg", vec![1, 2]),
+            MediaItem {
+                media_type: MediaType::Document,
+                mime_type: "application/pdf".to_owned(),
+                filename: None,
+                data_fetcher: None,
+            },
+            image_item("image/png", vec![3, 4, 5]),
+        ];
+        let parts = resolve_image_media(&media).await;
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["mime_type"], "image/jpeg");
+        assert_eq!(parts[1]["mime_type"], "image/png");
+    }
+}

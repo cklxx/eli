@@ -531,4 +531,86 @@ mod tests {
             Some("user:ou_abc"),
         );
     }
+
+    #[tokio::test]
+    async fn test_build_user_prompt_with_media_parts() {
+        let builtin = BuiltinImpl::new();
+        let envelope = serde_json::json!({
+            "session_id": "test",
+            "channel": "telegram",
+            "chat_id": "123",
+            "content": "What is this image?",
+            "context": {},
+            "kind": "normal",
+            "output_channel": "telegram",
+            "media_parts": [
+                {"type": "image_base64", "mime_type": "image/jpeg", "data": "AQID"}
+            ]
+        });
+
+        let prompt = builtin
+            .build_user_prompt(&envelope, "test", &HashMap::new())
+            .await
+            .unwrap();
+
+        match prompt {
+            PromptValue::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0]["type"], "text");
+                assert!(parts[0]["text"].as_str().unwrap().contains("What is this image?"));
+                assert_eq!(parts[1]["type"], "image_base64");
+                assert_eq!(parts[1]["data"], "AQID");
+            }
+            PromptValue::Text(_) => panic!("expected Parts, got Text"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_user_prompt_without_media_returns_text() {
+        let builtin = BuiltinImpl::new();
+        let envelope = serde_json::json!({
+            "session_id": "test",
+            "channel": "telegram",
+            "chat_id": "123",
+            "content": "hello",
+            "context": {},
+            "kind": "normal",
+            "output_channel": "telegram",
+        });
+
+        let prompt = builtin
+            .build_user_prompt(&envelope, "test", &HashMap::new())
+            .await
+            .unwrap();
+
+        match prompt {
+            PromptValue::Text(t) => assert!(t.contains("hello")),
+            PromptValue::Parts(_) => panic!("expected Text, got Parts"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_user_prompt_empty_media_parts_returns_text() {
+        let builtin = BuiltinImpl::new();
+        let envelope = serde_json::json!({
+            "session_id": "test",
+            "channel": "telegram",
+            "chat_id": "123",
+            "content": "no images",
+            "context": {},
+            "kind": "normal",
+            "output_channel": "telegram",
+            "media_parts": []
+        });
+
+        let prompt = builtin
+            .build_user_prompt(&envelope, "test", &HashMap::new())
+            .await
+            .unwrap();
+
+        match prompt {
+            PromptValue::Text(t) => assert!(t.contains("no images")),
+            PromptValue::Parts(_) => panic!("expected Text when media_parts is empty"),
+        }
+    }
 }
