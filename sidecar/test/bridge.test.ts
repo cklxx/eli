@@ -11,7 +11,7 @@ import type { Server } from "node:http";
 import { registry } from "../src/registry.js";
 import { initBridge, sendToEli, startOutboundServer } from "../src/bridge.js";
 import { envelopeToEliMessage, parseOutboundTarget } from "../src/envelope.js";
-import { pendingTyping, sessionContexts } from "../src/runtime.js";
+import { beginPendingTyping, pendingTyping, sessionContexts } from "../src/runtime.js";
 import type { ChannelPlugin, InboundEnvelope, EliChannelMessage } from "../src/types.js";
 
 const MOCK_ELI_PORT = 13100;
@@ -191,6 +191,62 @@ describe("outbound: eli callback", () => {
     expect(pendingTyping.has("mock-channel:default:user_cleanup")).toBe(false);
   });
 
+  it("queues typing cleanup when outbound arrives before typing setup completes", async () => {
+    let resolveTypingState: ((value: any) => void) | undefined;
+
+    mockChannel.lifecycle = {
+      onInboundMessage: async () => {
+        return await new Promise((resolve) => {
+          resolveTypingState = resolve;
+        });
+      },
+      onOutboundReply: async ({ typingState, accountId }: any) => {
+        cleanupCalls.push({ typingState, accountId });
+      },
+    };
+    registry.channels.clear();
+    registry.registerChannel(mockChannel);
+
+    void beginPendingTyping({
+      channelPlugin: mockChannel,
+      cfg: { channels: {} },
+      messageId: "msg_race",
+      accountId: "default",
+      sessionId: "mock-channel:default:user_race",
+    });
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "mock-channel:default:user_race",
+        channel: "webhook",
+        content: "Hello from eli",
+        chat_id: "user_race",
+        context: {
+          source_channel: "mock-channel",
+          account_id: "default",
+          chat_type: "direct",
+          sender_id: "user_race",
+        },
+        output_channel: "webhook",
+      }),
+    });
+
+    expect(resp.status).toBe(200);
+    expect(sentMessages).toHaveLength(1);
+    expect(cleanupCalls).toHaveLength(0);
+    expect(pendingTyping.has("mock-channel:default:user_race")).toBe(false);
+
+    resolveTypingState?.({ reaction: "thinking" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(cleanupCalls).toHaveLength(1);
+    expect(cleanupCalls[0].typingState).toEqual({ reaction: "thinking" });
+    expect(cleanupCalls[0].accountId).toBe("default");
+    expect(pendingTyping.has("mock-channel:default:user_race")).toBe(false);
+  });
+
   it("returns 404 for unknown source_channel", async () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
@@ -313,6 +369,45 @@ describe("tool execution", () => {
       chatId: "user_2",
       accountId: "default",
     });
+  });
+
+  it("sends direct notices for builtin tools without clearing typing state", async () => {
+    pendingTyping.set("mock-channel:default:user_3", {
+      typingState: { reaction: "thinking" },
+      cfg: { channels: {} },
+      accountId: "default",
+    });
+    sessionContexts.set("mock-channel:default:user_3", {
+      channel: "mock-channel",
+      messageId: "msg_3",
+      chatId: "user_3",
+      channelTarget: "route:user_3",
+      accountId: "default",
+      senderId: "user_3",
+      chatType: "direct",
+      cfg: {},
+    });
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/notify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "mock-channel:default:user_3",
+        text: "正在读取文件",
+      }),
+    });
+
+    const body = (await resp.json()) as any;
+    expect(resp.status).toBe(200);
+    expect(body).toEqual({ ok: true, delivered: true });
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]).toEqual({
+      text: "正在读取文件",
+      chatId: "route:user_3",
+      accountId: "default",
+    });
+    expect(cleanupCalls).toHaveLength(0);
+    expect(pendingTyping.has("mock-channel:default:user_3")).toBe(true);
   });
 });
 

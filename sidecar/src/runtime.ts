@@ -2,7 +2,12 @@ import { SidecarPluginApi } from "./api.js";
 import { registry } from "./registry.js";
 import { sendToEli } from "./bridge.js";
 import type { SidecarConfig } from "./config.js";
-import type { InboundEnvelope, OpenClawPluginDefinition, SessionContext } from "./types.js";
+import type {
+  ChannelPlugin,
+  InboundEnvelope,
+  OpenClawPluginDefinition,
+  SessionContext,
+} from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Typing indicator state — keyed by session so outbound can clean up
@@ -10,6 +15,23 @@ import type { InboundEnvelope, OpenClawPluginDefinition, SessionContext } from "
 
 /** Pending typing indicator states, keyed by session_id. */
 export const pendingTyping = new Map<string, { typingState: any; cfg: any; accountId: string }>();
+
+/**
+ * Serialize typing lifecycle operations per session.
+ *
+ * Purpose:
+ * The Feishu typing indicator is reaction-based, so "start typing" and
+ * "stop typing" are two separate async API calls.
+ *
+ * Scenario:
+ * `dispatchReplyFromConfig()` starts the typing reaction and immediately
+ * forwards the inbound message to eli. The webhook `/inbound` handler only
+ * enqueues that message and returns `200`, so the final outbound reply can
+ * reach the sidecar before `addTypingIndicator()` has finished. Without a
+ * queue, outbound cleanup checks `pendingTyping` too early, sees nothing,
+ * and never calls remove.
+ */
+const typingQueues = new Map<string, Promise<void>>();
 
 /** Per-session context — used by tool execution for channel-specific auth wrapping. */
 export const sessionContexts = new Map<string, SessionContext>();
@@ -19,6 +41,169 @@ const SESSION_CONTEXT_TTL_MS = 30 * 60 * 1000;
 
 /** Track TTL timers so we can cancel the old one when a session refreshes. */
 const sessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function queueTypingTask(sessionId: string, task: () => Promise<void>): Promise<void> {
+  const previous = typingQueues.get(sessionId) ?? Promise.resolve();
+  let tracked: Promise<void>;
+  tracked = previous
+    .catch(() => {})
+    .then(task)
+    .catch(() => {})
+    .finally(() => {
+      if (typingQueues.get(sessionId) === tracked) {
+        typingQueues.delete(sessionId);
+      }
+    });
+  typingQueues.set(sessionId, tracked);
+  return tracked;
+}
+
+async function addTypingState(params: {
+  channelPlugin?: ChannelPlugin;
+  cfg: any;
+  messageId: string;
+  accountId: string;
+  sessionId: string;
+}): Promise<any> {
+  const { channelPlugin, cfg, messageId, accountId, sessionId } = params;
+
+  if (channelPlugin?.lifecycle?.onInboundMessage) {
+    try {
+      return await channelPlugin.lifecycle.onInboundMessage({ cfg, messageId, accountId, sessionId });
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    const { addTypingIndicator } = require(
+      require("path").dirname(require.resolve("@larksuite/openclaw-lark"))
+        + "/src/messaging/outbound/typing.js"
+    );
+    const state = await addTypingIndicator({ cfg, messageId, accountId });
+    if (state?.messageId && !state?.reactionId) {
+      console.log(
+        `[runtime] typing indicator added without reactionId for message ${state.messageId}; cleanup will require fallback lookup`,
+      );
+    }
+    return state;
+  } catch {
+    return null;
+  }
+}
+
+async function removeTypingState(
+  channelPlugin: ChannelPlugin | undefined,
+  typing: { typingState: any; cfg: any; accountId: string },
+): Promise<void> {
+  if (channelPlugin?.lifecycle?.onOutboundReply) {
+    try {
+      await channelPlugin.lifecycle.onOutboundReply({
+        cfg: typing.cfg,
+        typingState: typing.typingState,
+        accountId: typing.accountId,
+      });
+    } catch (e: any) {
+      console.log(`[runtime] lifecycle typing removal failed: ${e.message}`);
+    }
+    return;
+  }
+
+  try {
+    const pluginDir = require("path").dirname(require.resolve("@larksuite/openclaw-lark"));
+    const { listReactionsFeishu, removeReactionFeishu } = require(
+      pluginDir + "/src/messaging/outbound/reactions.js"
+    );
+    const messageId = typing.typingState?.messageId;
+    const reactionId = typing.typingState?.reactionId;
+
+    if (!messageId) {
+      return;
+    }
+
+    if (reactionId) {
+      await removeReactionFeishu({
+        cfg: typing.cfg,
+        messageId,
+        reactionId,
+        accountId: typing.accountId,
+      });
+      return;
+    }
+
+    const reactions = await listReactionsFeishu({
+      cfg: typing.cfg,
+      messageId,
+      emojiType: "Typing",
+      accountId: typing.accountId,
+    });
+    const appTypingReactions = reactions.filter((reaction: any) =>
+      reaction?.operatorType === "app" && typeof reaction?.reactionId === "string" && reaction.reactionId.length > 0
+    );
+
+    if (appTypingReactions.length === 0) {
+      console.log(
+        `[runtime] typing cleanup skipped for message ${messageId}: no reactionId in state and no app-owned Typing reactions found`,
+      );
+      return;
+    }
+
+    for (const reaction of appTypingReactions) {
+      await removeReactionFeishu({
+        cfg: typing.cfg,
+        messageId,
+        reactionId: reaction.reactionId,
+        accountId: typing.accountId,
+      });
+    }
+    console.log(
+      `[runtime] typing cleanup fallback removed ${appTypingReactions.length} app-owned Typing reaction(s) for message ${messageId}`,
+    );
+  } catch (e: any) {
+    console.log(`[runtime] typing indicator removal failed: ${e.message}`);
+  }
+}
+
+export function beginPendingTyping(params: {
+  channelPlugin?: ChannelPlugin;
+  cfg: any;
+  messageId: string;
+  accountId: string;
+  sessionId: string;
+}): Promise<void> {
+  return queueTypingTask(params.sessionId, async () => {
+    // Queue the add operation so a later cleanup for the same session cannot
+    // overtake it and get dropped before the reaction state is recorded.
+    const typingState = await addTypingState(params);
+    if (!typingState) {
+      pendingTyping.delete(params.sessionId);
+      return;
+    }
+    pendingTyping.set(params.sessionId, {
+      typingState,
+      cfg: params.cfg,
+      accountId: params.accountId,
+    });
+  });
+}
+
+export function endPendingTyping(params: {
+  sessionId: string;
+  channelPlugin?: ChannelPlugin;
+}): Promise<void> {
+  return queueTypingTask(params.sessionId, async () => {
+    // Cleanup shares the same queue as beginPendingTyping(). If outbound
+    // arrives before typing setup finishes, this waits behind the add step
+    // and still removes the reaction once the state is available.
+    const typing = pendingTyping.get(params.sessionId);
+    if (!typing) {
+      return;
+    }
+
+    pendingTyping.delete(params.sessionId);
+    await removeTypingState(params.channelPlugin, typing);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Plugin loading
@@ -105,26 +290,7 @@ function buildPluginRuntime(config: SidecarConfig) {
           if (messageId) {
             const cfg = params.cfg ?? {};
             const channelPlugin = registry.channels.get(channel);
-
-            if (channelPlugin?.lifecycle?.onInboundMessage) {
-              // Use lifecycle hook.
-              channelPlugin.lifecycle.onInboundMessage({ cfg, messageId, accountId, sessionId })
-                .then((typingState: any) => {
-                  if (typingState) pendingTyping.set(sessionId, { typingState, cfg, accountId });
-                })
-                .catch(() => {});
-            } else {
-              // Legacy fallback: try openclaw-lark typing indicator.
-              try {
-                const { addTypingIndicator } = require(
-                  require("path").dirname(require.resolve("@larksuite/openclaw-lark"))
-                    + "/src/messaging/outbound/typing.js"
-                );
-                addTypingIndicator({ cfg, messageId, accountId }).then((typingState: any) => {
-                  pendingTyping.set(sessionId, { typingState, cfg, accountId });
-                }).catch(() => {});
-              } catch {}
-            }
+            void beginPendingTyping({ channelPlugin, cfg, messageId, accountId, sessionId });
           }
 
           await sendToEli(envelope);

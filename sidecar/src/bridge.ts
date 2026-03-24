@@ -10,7 +10,7 @@ import type {
 import { emitPluginEvent } from "./api.js";
 import { envelopeToEliMessage, parseOutboundTarget } from "./envelope.js";
 import { registry } from "./registry.js";
-import { pendingTyping, sessionContexts } from "./runtime.js";
+import { endPendingTyping, sessionContexts } from "./runtime.js";
 
 // ---------------------------------------------------------------------------
 // Tool grouping — infer group from tool name prefix
@@ -92,6 +92,19 @@ async function notifyToolCall(
     return;
   }
 
+  await sendSessionNotice(channelPlugin, sessionCtx, text, `tool "${event.toolName}"`);
+}
+
+async function sendSessionNotice(
+  channelPlugin: ChannelPlugin | undefined,
+  sessionCtx: SessionContext | null,
+  text: string,
+  noticeKind = "session notice",
+): Promise<void> {
+  if (!sessionCtx || !channelPlugin?.outbound?.sendText) {
+    return;
+  }
+
   try {
     await channelPlugin.outbound.sendText({
       cfg: buildChannelConfig(),
@@ -101,7 +114,7 @@ async function notifyToolCall(
     });
   } catch (err: any) {
     console.error(
-      `[bridge] tool notice send failed for "${event.toolName}":`,
+      `[bridge] ${noticeKind} send failed:`,
       err?.message ?? err,
     );
   }
@@ -195,34 +208,10 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
 
         // Remove typing indicator if one was set for this session.
         const sessionId = msg.session_id || `${sourceChannel}:${accountId}:${chatId}`;
-        const typing = pendingTyping.get(sessionId);
-        if (typing) {
-          pendingTyping.delete(sessionId);
-
-          if (channelPlugin.lifecycle?.onOutboundReply) {
-            // Use lifecycle hook.
-            try {
-              await channelPlugin.lifecycle.onOutboundReply({
-                cfg: typing.cfg,
-                typingState: typing.typingState,
-                accountId: typing.accountId,
-              });
-            } catch (e: any) {
-              console.log(`[bridge] lifecycle typing removal failed: ${e.message}`);
-            }
-          } else {
-            // Legacy fallback: try openclaw-lark typing indicator removal.
-            try {
-              const { removeTypingIndicator } = require(
-                require("path").dirname(require.resolve("@larksuite/openclaw-lark"))
-                  + "/src/messaging/outbound/typing.js"
-              );
-              await removeTypingIndicator({ cfg: typing.cfg, state: typing.typingState, accountId: typing.accountId });
-            } catch (e: any) {
-              console.log(`[bridge] typing indicator removal failed: ${e.message}`);
-            }
-          }
-        }
+        // Keep cleanup off the critical path of the actual reply send. The
+        // runtime queue preserves start/stop ordering for this session, so we
+        // do not need to block outbound delivery on the cleanup call here.
+        void endPendingTyping({ sessionId, channelPlugin });
 
         if (cleanupOnly) {
           res.json({ ok: true, cleanup_only: true });
@@ -346,6 +335,30 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
           content: [{ type: "text", text: `Error: ${errorMessage}` }],
         });
       }
+    });
+
+    app.post("/notify", async (req, res) => {
+      const text = normalizeToolCallText(req.body?.text);
+      if (!text) {
+        res.status(400).json({ error: "missing text" });
+        return;
+      }
+
+      const requestedSession = req.body?.session_id;
+      if (!requestedSession) {
+        res.status(400).json({ error: "missing session_id" });
+        return;
+      }
+
+      const sessionCtx = sessionContexts.get(requestedSession) ?? null;
+      if (!sessionCtx) {
+        res.json({ ok: true, delivered: false });
+        return;
+      }
+
+      const channelPlugin = registry.channels.get(sessionCtx.channel);
+      await sendSessionNotice(channelPlugin, sessionCtx, text, "tool notice");
+      res.json({ ok: true, delivered: true });
     });
 
     // Health check.
