@@ -11,6 +11,10 @@
 # OS
 .DS_Store
 
+# Python
+__pycache__/
+*.pyc
+
 # Documentation source (generated)
 docs/source
 
@@ -18,3 +22,4 @@ docs/source
 reference/
 backup/
 .gstack/
+.openmax/
