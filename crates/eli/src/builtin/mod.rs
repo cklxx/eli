@@ -38,7 +38,7 @@ pub(crate) const CLEANUP_ONLY_CONTEXT_KEY: &str = "_eli_cleanup_only";
 
 /// Default hook implementations for basic runtime operations.
 pub struct BuiltinImpl {
-    agent: Mutex<Agent>,
+    agents: std::sync::RwLock<HashMap<String, Arc<Mutex<Agent>>>>,
     home: PathBuf,
     router: SmartRouter,
     middleware_chain: MiddlewareChain,
@@ -49,14 +49,28 @@ impl BuiltinImpl {
     /// Create a new `BuiltinImpl`, registering builtin tools.
     pub fn new() -> Self {
         tools::register_builtin_tools();
-        let agent = Agent::new();
-        let home = agent.settings.home.clone();
+        let home = settings::AgentSettings::from_env().home;
         Self {
-            agent: Mutex::new(agent),
+            agents: std::sync::RwLock::new(HashMap::new()),
             home,
             router: SmartRouter::new(),
             middleware_chain: MiddlewareChain::with_defaults(),
         }
+    }
+
+    /// Get or create a per-session Agent, enabling concurrent model execution across sessions.
+    fn get_or_create_agent(&self, session_id: &str) -> Arc<Mutex<Agent>> {
+        {
+            let agents = self.agents.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(agent) = agents.get(session_id) {
+                return Arc::clone(agent);
+            }
+        }
+        let mut agents = self.agents.write().unwrap_or_else(|e| e.into_inner());
+        agents
+            .entry(session_id.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(Agent::new())))
+            .clone()
     }
 
     /// Resolve a session ID from a channel message.
@@ -107,7 +121,8 @@ impl BuiltinImpl {
         session_id: &str,
         state: &HashMap<String, Value>,
     ) -> Result<String, ConduitError> {
-        self.agent
+        let agent = self.get_or_create_agent(session_id);
+        agent
             .lock()
             .await
             .run(session_id, prompt, state, None, None, None)
@@ -392,6 +407,81 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("feishu")
         );
+    }
+
+    #[test]
+    fn test_get_or_create_agent_returns_same_instance_for_same_session() {
+        let builtin = BuiltinImpl::new();
+        let a1 = builtin.get_or_create_agent("session:1");
+        let a2 = builtin.get_or_create_agent("session:1");
+        assert!(Arc::ptr_eq(&a1, &a2), "same session must return same Arc");
+    }
+
+    #[test]
+    fn test_get_or_create_agent_returns_different_instances_for_different_sessions() {
+        let builtin = BuiltinImpl::new();
+        let a1 = builtin.get_or_create_agent("session:1");
+        let a2 = builtin.get_or_create_agent("session:2");
+        assert!(
+            !Arc::ptr_eq(&a1, &a2),
+            "different sessions must return different Arcs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_sessions_do_not_block_each_other() {
+        let builtin = Arc::new(BuiltinImpl::new());
+
+        // Lock session:1's agent
+        let agent1 = builtin.get_or_create_agent("session:1");
+        let guard = agent1.lock().await;
+
+        // session:2 should still be lockable (not blocked by session:1)
+        let agent2 = builtin.get_or_create_agent("session:2");
+        let try_lock = agent2.try_lock();
+        assert!(try_lock.is_ok(), "session:2 must not be blocked by session:1");
+
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn test_same_session_serializes() {
+        let builtin = BuiltinImpl::new();
+
+        let agent = builtin.get_or_create_agent("session:1");
+        let _guard = agent.lock().await;
+
+        // Same session should be locked
+        let agent_again = builtin.get_or_create_agent("session:1");
+        let try_lock = agent_again.try_lock();
+        assert!(
+            try_lock.is_err(),
+            "same session must serialize (lock should be held)"
+        );
+    }
+
+    #[test]
+    fn test_get_or_create_agent_concurrent_creation() {
+        use std::thread;
+
+        let builtin = Arc::new(BuiltinImpl::new());
+        let mut handles = vec![];
+
+        // Spawn 10 threads all requesting the same session simultaneously
+        for _ in 0..10 {
+            let b = Arc::clone(&builtin);
+            handles.push(thread::spawn(move || b.get_or_create_agent("shared")));
+        }
+
+        let agents: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // All must point to the same Arc
+        for agent in &agents[1..] {
+            assert!(
+                Arc::ptr_eq(&agents[0], agent),
+                "concurrent creation must converge to single instance"
+            );
+        }
     }
 
     #[test]
