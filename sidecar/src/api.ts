@@ -9,6 +9,18 @@ import type {
 import { registry } from "./registry.js";
 import type { SidecarConfig } from "./config.js";
 
+const pluginEventListeners = new Map<string, Array<(...args: any[]) => any>>();
+
+export async function emitPluginEvent(event: string, ...args: any[]): Promise<void> {
+  for (const handler of pluginEventListeners.get(event) ?? []) {
+    try {
+      await Promise.resolve(handler(...args));
+    } catch (err) {
+      console.error(`[sidecar] event handler error for "${event}":`, err);
+    }
+  }
+}
+
 /**
  * Mini implementation of OpenClawPluginApi — the object passed to each
  * plugin's `register()` call. Implements only the subset that real channel
@@ -19,8 +31,6 @@ export class SidecarPluginApi implements OpenClawPluginApi {
   readonly config: any;
 
   /** Simple event emitter for plugin lifecycle events (before_tool_call, etc.). */
-  private listeners = new Map<string, Array<(...args: any[]) => void>>();
-
   constructor(
     private pluginId: string,
     private sidecarConfig: SidecarConfig,
@@ -43,21 +53,15 @@ export class SidecarPluginApi implements OpenClawPluginApi {
 
   /** Subscribe to plugin events (e.g. 'before_tool_call', 'after_tool_call'). */
   on(event: string, handler: (...args: any[]) => void): void {
-    if (!this.listeners.has(event)) {
-      this.listeners.set(event, []);
+    if (!pluginEventListeners.has(event)) {
+      pluginEventListeners.set(event, []);
     }
-    this.listeners.get(event)!.push(handler);
+    pluginEventListeners.get(event)!.push(handler);
   }
 
   /** Emit a plugin event. */
   emit(event: string, ...args: any[]): void {
-    for (const handler of this.listeners.get(event) ?? []) {
-      try {
-        handler(...args);
-      } catch (err) {
-        this.logger.error(`event handler error for "${event}":`, err);
-      }
-    }
+    void emitPluginEvent(event, ...args);
   }
 
   registerChannel(opts: { plugin: ChannelPlugin }): void {

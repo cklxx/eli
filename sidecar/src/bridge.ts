@@ -1,6 +1,13 @@
 import express from "express";
 import type { SidecarConfig } from "./config.js";
-import type { EliChannelMessage, InboundEnvelope, SessionContext } from "./types.js";
+import type {
+  ChannelPlugin,
+  EliChannelMessage,
+  InboundEnvelope,
+  SessionContext,
+  ToolCallLifecycleEvent,
+} from "./types.js";
+import { emitPluginEvent } from "./api.js";
 import { envelopeToEliMessage, parseOutboundTarget } from "./envelope.js";
 import { registry } from "./registry.js";
 import { pendingTyping, sessionContexts } from "./runtime.js";
@@ -30,6 +37,74 @@ let sidecarConfig: SidecarConfig;
 export function initBridge(config: SidecarConfig) {
   eliUrl = config.eli_url;
   sidecarConfig = config;
+}
+
+function buildChannelConfig(): { channels: SidecarConfig["channels"] } {
+  return { channels: sidecarConfig.channels };
+}
+
+function normalizeToolCallText(text: string | null | undefined): string | null {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function extractToolDescription(body: any): string | undefined {
+  const description = normalizeToolCallText(body?.description);
+  return description ?? undefined;
+}
+
+async function resolveToolCallText(
+  channelPlugin: ChannelPlugin,
+  event: ToolCallLifecycleEvent,
+): Promise<string | null> {
+  if (channelPlugin.lifecycle?.renderToolCallText) {
+    return normalizeToolCallText(await channelPlugin.lifecycle.renderToolCallText(event));
+  }
+  if (event.phase !== "before") {
+    return null;
+  }
+  return normalizeToolCallText(event.description);
+}
+
+function resolveToolNoticeTarget(
+  channelPlugin: ChannelPlugin,
+  sessionCtx: SessionContext,
+): string {
+  return (
+    sessionCtx.channelTarget ||
+    channelPlugin.lifecycle?.resolveOutboundTarget?.({}, sessionCtx.chatId) ||
+    sessionCtx.chatId
+  );
+}
+
+async function notifyToolCall(
+  channelPlugin: ChannelPlugin | undefined,
+  sessionCtx: SessionContext | null,
+  event: ToolCallLifecycleEvent,
+): Promise<void> {
+  if (!sessionCtx || !channelPlugin?.outbound?.sendText) {
+    return;
+  }
+
+  const text = await resolveToolCallText(channelPlugin, event);
+  if (!text) {
+    return;
+  }
+
+  try {
+    await channelPlugin.outbound.sendText({
+      cfg: buildChannelConfig(),
+      to: resolveToolNoticeTarget(channelPlugin, sessionCtx),
+      text,
+      accountId: sessionCtx.accountId,
+    });
+  } catch (err: any) {
+    console.error(
+      `[bridge] tool notice send failed for "${event.toolName}":`,
+      err?.message ?? err,
+    );
+  }
 }
 
 /**
@@ -190,26 +265,49 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
         return;
       }
 
+      const params = req.body?.params ?? req.body ?? {};
+      const id = req.body?.id ?? `call_${Date.now()}`;
+
+      // Find session context: prefer explicit session_id, fall back to most recent.
+      let sessionCtx: SessionContext | null = null;
+      const requestedSession = req.body?.session_id ?? req.body?.context?.session_id;
+      if (requestedSession) {
+        sessionCtx = sessionContexts.get(requestedSession) ?? null;
+      }
+      // No fallback — require explicit session_id to prevent cross-user
+      // auth leakage in multi-session scenarios.
+
+      const channelPlugin = sessionCtx ? registry.channels.get(sessionCtx.channel) : undefined;
+      const description = extractToolDescription(req.body);
+      const startedAt = Date.now();
+
+      const emitToolLifecycle = async (
+        phase: "before" | "after",
+        extras: Partial<ToolCallLifecycleEvent> = {},
+      ) => {
+        if (!sessionCtx) return;
+        const event: ToolCallLifecycleEvent = {
+          phase,
+          toolName: tool.name,
+          params,
+          session: sessionCtx,
+          description,
+          ...extras,
+        };
+        await emitPluginEvent(`${phase}_tool_call`, event);
+        await notifyToolCall(channelPlugin, sessionCtx, event);
+      };
+
+      await emitToolLifecycle("before");
+
       try {
-        const params = req.body?.params ?? req.body ?? {};
-        const id = req.body?.id ?? `call_${Date.now()}`;
-
-        // Find session context: prefer explicit session_id, fall back to most recent.
-        let sessionCtx: SessionContext | null = null;
-        const requestedSession = req.body?.session_id ?? req.body?.context?.session_id;
-        if (requestedSession) {
-          sessionCtx = sessionContexts.get(requestedSession) ?? null;
-        }
-        // No fallback — require explicit session_id to prevent cross-user
-        // auth leakage in multi-session scenarios.
-
         let result;
         if (sessionCtx) {
           // Try lifecycle hook first, then legacy fallback.
-          const channelPlugin = registry.channels.get(sessionCtx.channel);
-
           if (channelPlugin?.lifecycle?.wrapToolExecution) {
-            result = await channelPlugin.lifecycle.wrapToolExecution(sessionCtx, () => tool.execute(id, params));
+            result = await channelPlugin.lifecycle.wrapToolExecution(sessionCtx, () =>
+              tool.execute(id, params)
+            );
           } else {
             // Legacy fallback: try openclaw-lark LarkTicket wrapping.
             try {
@@ -232,11 +330,20 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
           result = await tool.execute(id, params);
         }
 
+        await emitToolLifecycle("after", {
+          durationMs: Date.now() - startedAt,
+          result,
+        });
         res.json(result);
       } catch (err: any) {
+        const errorMessage = err?.message ?? "tool execution failed";
+        await emitToolLifecycle("after", {
+          durationMs: Date.now() - startedAt,
+          error: errorMessage,
+        });
         console.error(`[bridge] tool "${req.params.name}" error:`, err);
         res.status(500).json({
-          content: [{ type: "text", text: `Error: ${err.message ?? "tool execution failed"}` }],
+          content: [{ type: "text", text: `Error: ${errorMessage}` }],
         });
       }
     });

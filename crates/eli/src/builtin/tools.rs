@@ -932,6 +932,10 @@ fn tool_sidecar() -> Tool {
                     "type": "string",
                     "description": "The sidecar tool name to execute (e.g. feishu_calendar_event)."
                 },
+                "description": {
+                    "type": "string",
+                    "description": "Brief user-facing status text to send before executing an external action when the channel supports it."
+                },
                 "params": {
                     "type": "object",
                     "description": "Parameters for the tool."
@@ -942,6 +946,10 @@ fn tool_sidecar() -> Tool {
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 let tool_name = get_str(&args, "tool").unwrap_or("").to_owned();
+                let description = get_str(&args, "description")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned);
                 let params = args.get("params").cloned().unwrap_or(serde_json::json!({}));
 
                 if tool_name.is_empty() {
@@ -969,10 +977,8 @@ fn tool_sidecar() -> Tool {
 
                 let tool_url = format!("{url}/tools/{tool_name}");
                 let client = reqwest::Client::new();
-                let mut payload = serde_json::json!({ "params": params });
-                if !session_id.is_empty() {
-                    payload["session_id"] = Value::String(session_id.to_owned());
-                }
+                let payload =
+                    build_sidecar_request_payload(params, description.as_deref(), session_id);
                 let resp = client
                     .post(&tool_url)
                     .json(&payload)
@@ -1006,6 +1012,21 @@ fn tool_sidecar() -> Tool {
             })
         },
     )
+}
+
+fn build_sidecar_request_payload(
+    params: Value,
+    description: Option<&str>,
+    session_id: &str,
+) -> Value {
+    let mut payload = serde_json::json!({ "params": params });
+    if let Some(description) = description.map(str::trim).filter(|s| !s.is_empty()) {
+        payload["description"] = Value::String(description.to_owned());
+    }
+    if !session_id.is_empty() {
+        payload["session_id"] = Value::String(session_id.to_owned());
+    }
+    payload
 }
 
 #[cfg(test)]
@@ -1080,5 +1101,21 @@ mod tests {
         let output = value.as_str().unwrap();
         assert!(output.contains("needle"));
         assert!(!output.contains("different"));
+    }
+
+    #[test]
+    fn test_build_sidecar_request_payload_uses_top_level_description_metadata() {
+        let payload = build_sidecar_request_payload(
+            json!({"action": "create", "description": "domain field"}),
+            Some("同步飞书日程"),
+            "session-1",
+        );
+
+        assert_eq!(payload["description"], json!("同步飞书日程"));
+        assert_eq!(payload["session_id"], json!("session-1"));
+        assert_eq!(
+            payload["params"],
+            json!({"action": "create", "description": "domain field"})
+        );
     }
 }

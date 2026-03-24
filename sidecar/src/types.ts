@@ -112,10 +112,24 @@ export interface SessionContext {
   channel: string;
   messageId: string;
   chatId: string;
+  channelTarget?: string;
   accountId: string;
   senderId: string;
   chatType: string;
   cfg: any;
+}
+
+export type ToolCallPhase = "before" | "after";
+
+export interface ToolCallLifecycleEvent {
+  phase: ToolCallPhase;
+  toolName: string;
+  params: any;
+  session: SessionContext;
+  description?: string;
+  durationMs?: number;
+  result?: unknown;
+  error?: string;
 }
 
 /**
@@ -134,6 +148,10 @@ export interface ChannelLifecycleHooks {
   wrapToolExecution?<T>(ctx: SessionContext, fn: () => Promise<T>): Promise<T>;
   /** Resolve outbound target from message context. Default: chatId. */
   resolveOutboundTarget?(context: Record<string, any>, chatId: string): string;
+  /** Render a human-facing tool progress message for the channel, or null to suppress it. */
+  renderToolCallText?(
+    event: ToolCallLifecycleEvent,
+  ): string | null | Promise<string | null>;
 }
 
 // ---------------------------------------------------------------------------

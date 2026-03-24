@@ -72,6 +72,7 @@ function buildPluginRuntime(config: SidecarConfig) {
             channel,
             senderId,
             chatId,
+            channelTarget: to,
             accountId,
             messageId,
             chatType: chatType === "group" ? "group" : "p2p",

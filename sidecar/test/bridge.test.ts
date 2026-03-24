@@ -11,7 +11,7 @@ import type { Server } from "node:http";
 import { registry } from "../src/registry.js";
 import { initBridge, sendToEli, startOutboundServer } from "../src/bridge.js";
 import { envelopeToEliMessage, parseOutboundTarget } from "../src/envelope.js";
-import { pendingTyping } from "../src/runtime.js";
+import { pendingTyping, sessionContexts } from "../src/runtime.js";
 import type { ChannelPlugin, InboundEnvelope, EliChannelMessage } from "../src/types.js";
 
 const MOCK_ELI_PORT = 13100;
@@ -79,6 +79,15 @@ beforeEach(() => {
   sentMessages = [];
   cleanupCalls = [];
   pendingTyping.clear();
+  sessionContexts.clear();
+  registry.tools.clear();
+  mockChannel.lifecycle = {
+    onOutboundReply: async ({ typingState, accountId }: any) => {
+      cleanupCalls.push({ typingState, accountId });
+    },
+  };
+  registry.channels.clear();
+  registry.registerChannel(mockChannel);
 });
 
 afterAll(() => {
@@ -212,6 +221,98 @@ describe("outbound: eli callback", () => {
       }),
     });
     expect(resp.status).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tool execution notices
+// ---------------------------------------------------------------------------
+
+describe("tool execution", () => {
+  it("sends top-level description back to the active channel before executing", async () => {
+    registry.registerTool({
+      name: "bash",
+      description: "Run shell",
+      parameters: {},
+      execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+    });
+
+    sessionContexts.set("mock-channel:default:user_1", {
+      channel: "mock-channel",
+      messageId: "msg_1",
+      chatId: "user_1",
+      channelTarget: "route:user_1",
+      accountId: "default",
+      senderId: "user_1",
+      chatType: "direct",
+      cfg: {},
+    });
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/tools/bash`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "mock-channel:default:user_1",
+        description: "查看当前工作目录",
+        params: {
+          cmd: "pwd",
+        },
+      }),
+    });
+
+    expect(resp.status).toBe(200);
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]).toEqual({
+      text: "查看当前工作目录",
+      chatId: "route:user_1",
+      accountId: "default",
+    });
+  });
+
+  it("lets channels override tool notice rendering", async () => {
+    mockChannel.lifecycle = {
+      onOutboundReply: async ({ typingState, accountId }: any) => {
+        cleanupCalls.push({ typingState, accountId });
+      },
+      renderToolCallText: async (event) =>
+        event.phase === "after" ? `完成 ${event.toolName}` : null,
+    };
+    registry.channels.clear();
+    registry.registerChannel(mockChannel);
+
+    registry.registerTool({
+      name: "custom_tool",
+      description: "Custom tool",
+      parameters: {},
+      execute: async () => ({ content: [{ type: "text", text: "done" }] }),
+    });
+
+    sessionContexts.set("mock-channel:default:user_2", {
+      channel: "mock-channel",
+      messageId: "msg_2",
+      chatId: "user_2",
+      accountId: "default",
+      senderId: "user_2",
+      chatType: "direct",
+      cfg: {},
+    });
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/tools/custom_tool`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "mock-channel:default:user_2",
+        params: { value: 1 },
+      }),
+    });
+
+    expect(resp.status).toBe(200);
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]).toEqual({
+      text: "完成 custom_tool",
+      chatId: "user_2",
+      accountId: "default",
+    });
   });
 });
 
