@@ -208,8 +208,8 @@ async fn wait_for_sidecar(sidecar_url: &str) -> anyhow::Result<()> {
     anyhow::bail!("sidecar not reachable at {sidecar_url}");
 }
 
-/// Start channel listeners (Telegram, Webhook, etc.).
-pub(crate) async fn gateway_command(enable_channels: Vec<String>) -> anyhow::Result<()> {
+/// Start channel listeners (Telegram, Webhook/Sidecar).
+pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     use std::collections::HashMap;
 
     use crate::channels::base::Channel;
@@ -220,57 +220,48 @@ pub(crate) async fn gateway_command(enable_channels: Vec<String>) -> anyhow::Res
     // Load .env so ELI_TELEGRAM_TOKEN (and others) are available.
     let _ = dotenvy::dotenv();
 
-    let should_enable = |name: &str| -> bool {
-        enable_channels.is_empty() || enable_channels.iter().any(|c| c == name || c == "all")
-    };
-
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     let mut channels: HashMap<String, Arc<dyn Channel>> = HashMap::new();
     let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     // -- Telegram --
-    if should_enable("telegram") {
-        let tg_settings = TelegramSettings::from_env();
-        if !tg_settings.token.is_empty() {
-            let tg = Arc::new(TelegramChannel::new(tx.clone(), tg_settings));
-            println!("Starting Telegram channel...");
-            let ch = tg.clone();
-            let c = cancel.clone();
-            tasks.push(tokio::spawn(async move {
-                if let Err(e) = Channel::start(&*ch, c).await {
-                    eprintln!("Telegram channel error: {e}");
-                }
-            }));
-            channels.insert("telegram".to_owned(), tg);
-        }
+    let tg_settings = TelegramSettings::from_env();
+    if !tg_settings.token.is_empty() {
+        let tg = Arc::new(TelegramChannel::new(tx.clone(), tg_settings));
+        println!("Starting Telegram channel...");
+        let ch = tg.clone();
+        let c = cancel.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = Channel::start(&*ch, c).await {
+                eprintln!("Telegram channel error: {e}");
+            }
+        }));
+        channels.insert("telegram".to_owned(), tg);
     }
 
-    // -- Webhook + Sidecar --
+    // -- Webhook + Sidecar (enabled when sidecar directory exists) --
     let mut sidecar_child: Option<std::process::Child> = None;
-    if should_enable("webhook") {
-        let wh_settings = WebhookSettings::from_env();
-        if wh_settings.is_configured() || should_enable("webhook") {
-            // Auto-start the Node sidecar if a sidecar directory is found.
-            sidecar_child = start_sidecar(&wh_settings);
+    let wh_settings = WebhookSettings::from_env();
+    if find_sidecar_dir().is_some() || wh_settings.is_configured() {
+        sidecar_child = start_sidecar(&wh_settings);
 
-            let wh = Arc::new(WebhookChannel::new(tx.clone(), wh_settings));
-            println!("Starting Webhook channel...");
-            let ch = wh.clone();
-            let c = cancel.clone();
-            tasks.push(tokio::spawn(async move {
-                if let Err(e) = Channel::start(&*ch, c).await {
-                    eprintln!("Webhook channel error: {e}");
-                }
-            }));
-            channels.insert("webhook".to_owned(), wh);
-        }
+        let wh = Arc::new(WebhookChannel::new(tx.clone(), wh_settings));
+        println!("Starting Webhook channel...");
+        let ch = wh.clone();
+        let c = cancel.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = Channel::start(&*ch, c).await {
+                eprintln!("Webhook channel error: {e}");
+            }
+        }));
+        channels.insert("webhook".to_owned(), wh);
     }
 
     if channels.is_empty() {
         anyhow::bail!(
             "No channels configured.\n\
-             Set ELI_TELEGRAM_TOKEN for Telegram, or ELI_WEBHOOK_PORT for Webhook."
+             Set ELI_TELEGRAM_TOKEN for Telegram, or add a sidecar/ directory."
         );
     }
 

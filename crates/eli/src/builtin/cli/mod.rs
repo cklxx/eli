@@ -83,12 +83,8 @@ pub enum CliCommand {
         /// Omit to show current model.
         name: Option<String>,
     },
-    /// Start message listeners (like telegram).
-    Gateway {
-        /// Channels to enable (default: all).
-        #[arg(long = "enable-channel")]
-        enable_channels: Vec<String>,
-    },
+    /// Start message listeners (Telegram, Webhook/Sidecar).
+    Gateway,
     /// Open the tape viewer web UI.
     Tape {
         /// HTTP port to bind to.
@@ -148,7 +144,7 @@ pub async fn execute(cmd: CliCommand) -> anyhow::Result<()> {
             hooks_command().await;
             Ok(())
         }
-        CliCommand::Gateway { enable_channels } => gateway::gateway_command(enable_channels).await,
+        CliCommand::Gateway => gateway::gateway_command().await,
         CliCommand::Tape { port, dir } => tape::tape_command(port, dir).await,
         CliCommand::Decisions { action } => match action {
             DecisionAction::List => decisions::list_command().await,

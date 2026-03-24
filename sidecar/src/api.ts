@@ -40,12 +40,15 @@ export async function emitPluginEvent(event: string, ...args: any[]): Promise<vo
 export class SidecarPluginApi implements OpenClawPluginApi {
   readonly logger: PluginLogger;
   readonly config: any;
+  readonly runtime: any;
 
   /** Simple event emitter for plugin lifecycle events (before_tool_call, etc.). */
   constructor(
     private pluginId: string,
     private sidecarConfig: SidecarConfig,
+    pluginRuntime?: any,
   ) {
+    this.runtime = pluginRuntime ?? null;
     const prefix = `[${pluginId}]`;
     this.logger = {
       info: (...args: any[]) => console.log(prefix, ...args),
