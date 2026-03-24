@@ -341,10 +341,7 @@ mod tests {
             "session-plugin"
         }
 
-        async fn resolve_session(
-            &self,
-            message: &Envelope,
-        ) -> Result<Option<String>, HookError> {
+        async fn resolve_session(&self, message: &Envelope) -> Result<Option<String>, HookError> {
             Ok(message
                 .as_object()
                 .and_then(|o| o.get("session_id"))

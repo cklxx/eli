@@ -574,7 +574,10 @@ impl HookRuntime {
     }
 
     /// Collect channels from all plugins.
-    pub fn call_provide_channels(&self, message_handler: MessageHandler) -> Vec<Box<dyn ChannelHook>> {
+    pub fn call_provide_channels(
+        &self,
+        message_handler: MessageHandler,
+    ) -> Vec<Box<dyn ChannelHook>> {
         let mut channels = Vec::new();
         for plugin in self.plugins.iter() {
             let name = plugin.plugin_name().to_owned();
@@ -644,10 +647,7 @@ mod tests {
             "high"
         }
 
-        async fn resolve_session(
-            &self,
-            _message: &Envelope,
-        ) -> Result<Option<String>, HookError> {
+        async fn resolve_session(&self, _message: &Envelope) -> Result<Option<String>, HookError> {
             Ok(Some("high-session".into()))
         }
 
@@ -674,10 +674,7 @@ mod tests {
             "low"
         }
 
-        async fn resolve_session(
-            &self,
-            _message: &Envelope,
-        ) -> Result<Option<String>, HookError> {
+        async fn resolve_session(&self, _message: &Envelope) -> Result<Option<String>, HookError> {
             Ok(Some("low-session".into()))
         }
 
@@ -706,7 +703,10 @@ mod tests {
         }
 
         async fn on_error(&self, stage: &str, _error: &anyhow::Error, _message: Option<&Envelope>) {
-            self.observed.lock().unwrap_or_else(|e| e.into_inner()).push(stage.to_owned());
+            self.observed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(stage.to_owned());
         }
     }
 
@@ -736,10 +736,7 @@ mod tests {
             "panic-session"
         }
 
-        async fn resolve_session(
-            &self,
-            _message: &Envelope,
-        ) -> Result<Option<String>, HookError> {
+        async fn resolve_session(&self, _message: &Envelope) -> Result<Option<String>, HookError> {
             panic!("resolve_session panic");
         }
     }
@@ -940,24 +937,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_load_state_propagates_panic_as_error() {
-        let rt = HookRuntime::new(vec![
-            Arc::new(PanicLoadStatePlugin) as Arc<dyn EliHookSpec>,
-        ]);
+        let rt = HookRuntime::new(vec![Arc::new(PanicLoadStatePlugin) as Arc<dyn EliHookSpec>]);
         let msg = json!({"content": "hello"});
         let result = rt.call_load_state(&msg, "s1").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), HookError::Panic(ref name) if name == "panic-load-state"));
+        assert!(
+            matches!(result.unwrap_err(), HookError::Panic(ref name) if name == "panic-load-state")
+        );
     }
 
     #[tokio::test]
     async fn test_call_load_state_propagates_plugin_error() {
-        let rt = HookRuntime::new(vec![
-            Arc::new(ErrorLoadStatePlugin) as Arc<dyn EliHookSpec>,
-        ]);
+        let rt = HookRuntime::new(vec![Arc::new(ErrorLoadStatePlugin) as Arc<dyn EliHookSpec>]);
         let msg = json!({"content": "hello"});
         let result = rt.call_load_state(&msg, "s1").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), HookError::Plugin { ref hook_point, .. } if *hook_point == "load_state"));
+        assert!(
+            matches!(result.unwrap_err(), HookError::Plugin { ref hook_point, .. } if *hook_point == "load_state")
+        );
     }
 
     // -- call_run_model error/panic handling ----------------------------------
@@ -1004,26 +1001,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_run_model_propagates_panic_as_error() {
-        let rt = HookRuntime::new(vec![
-            Arc::new(PanicRunModelPlugin) as Arc<dyn EliHookSpec>,
-        ]);
+        let rt = HookRuntime::new(vec![Arc::new(PanicRunModelPlugin) as Arc<dyn EliHookSpec>]);
         let prompt = PromptValue::Text("hello".into());
         let state = State::new();
         let result = rt.call_run_model(&prompt, "s1", &state).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), HookError::Panic(ref name) if name == "panic-run-model"));
+        assert!(
+            matches!(result.unwrap_err(), HookError::Panic(ref name) if name == "panic-run-model")
+        );
     }
 
     #[tokio::test]
     async fn test_call_run_model_propagates_plugin_error() {
-        let rt = HookRuntime::new(vec![
-            Arc::new(ErrorRunModelPlugin) as Arc<dyn EliHookSpec>,
-        ]);
+        let rt = HookRuntime::new(vec![Arc::new(ErrorRunModelPlugin) as Arc<dyn EliHookSpec>]);
         let prompt = PromptValue::Text("hello".into());
         let state = State::new();
         let result = rt.call_run_model(&prompt, "s1", &state).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), HookError::Plugin { ref hook_point, .. } if *hook_point == "run_model"));
+        assert!(
+            matches!(result.unwrap_err(), HookError::Plugin { ref hook_point, .. } if *hook_point == "run_model")
+        );
     }
 
     // -- call_build_prompt panic skipping ------------------------------------

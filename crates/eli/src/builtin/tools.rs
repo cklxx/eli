@@ -70,7 +70,11 @@ fn builtin_tools() -> Vec<Tool> {
         tool_quit(),
     ];
     // Only register the sidecar bridge tool if a sidecar URL is configured.
-    if crate::tools::SIDECAR_URL.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+    if crate::tools::SIDECAR_URL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+    {
         tools.push(tool_sidecar());
     }
     tools
@@ -172,7 +176,11 @@ async fn maybe_send_user_facing_notice(ctx: Option<&ToolContext>, args: &Value) 
     if session_id.trim().is_empty() {
         return;
     }
-    let Some(url) = crate::tools::SIDECAR_URL.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+    let Some(url) = crate::tools::SIDECAR_URL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    else {
         return;
     };
 
@@ -1062,7 +1070,7 @@ fn tool_subagent() -> Tool {
                         return Err(ConduitError::new(
                             ErrorKind::InvalidInput,
                             "missing required argument 'prompt'",
-                        ))
+                        ));
                     }
                 };
                 ok_val(format!("(subagent invoked with prompt: {prompt})"))
@@ -1162,7 +1170,9 @@ fn tool_sidecar() -> Tool {
                 let params = args.get("params").cloned().unwrap_or(serde_json::json!({}));
 
                 let url = {
-                    let u = crate::tools::SIDECAR_URL.lock().unwrap_or_else(|e| e.into_inner());
+                    let u = crate::tools::SIDECAR_URL
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     u.clone().unwrap_or_default()
                 };
                 if url.is_empty() {
@@ -1180,16 +1190,13 @@ fn tool_sidecar() -> Tool {
                 let tool_url = format!("{url}/tools/{tool_name}");
                 let payload =
                     build_sidecar_request_payload(params, description.as_deref(), session_id);
-                let mut req = HTTP_CLIENT
-                    .post(&tool_url)
-                    .json(&payload);
+                let mut req = HTTP_CLIENT.post(&tool_url).json(&payload);
                 if let Ok(token) = std::env::var("ELI_SIDECAR_TOKEN") {
                     req = req.bearer_auth(&token);
                 }
-                let resp = req.send().await
-                    .map_err(|e| {
-                        ConduitError::new(ErrorKind::Tool, format!("sidecar request failed: {e}"))
-                    })?;
+                let resp = req.send().await.map_err(|e| {
+                    ConduitError::new(ErrorKind::Tool, format!("sidecar request failed: {e}"))
+                })?;
 
                 if !resp.status().is_success() {
                     let status = resp.status();

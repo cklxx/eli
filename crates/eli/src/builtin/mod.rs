@@ -385,10 +385,7 @@ mod tests {
             "source_channel".to_owned(),
             Value::String("feishu".to_owned()),
         );
-        extra.insert(
-            "account_id".to_owned(),
-            Value::String("default".to_owned()),
-        );
+        extra.insert("account_id".to_owned(), Value::String("default".to_owned()));
         extra.insert(
             "channel_target".to_owned(),
             Value::String("user:ou_abc".to_owned()),
@@ -398,8 +395,7 @@ mod tests {
             .with_context(extra)
             .finalize();
 
-        let outbounds =
-            builtin.render_outbound(&message, "feishu:default:ou_abc", "reply text");
+        let outbounds = builtin.render_outbound(&message, "feishu:default:ou_abc", "reply text");
 
         assert_eq!(outbounds.len(), 1);
         assert_eq!(outbounds[0].content, "reply text");
