@@ -313,6 +313,17 @@ impl TapeFile {
                 format!("failed to remove tape file {}: {e}", self.path.display()),
             ));
         }
+        // Clean up the associated spill directory ({tape}.d/) if it exists.
+        let spill_dir = self.path.with_extension("d");
+        if spill_dir.is_dir()
+            && let Err(e) = fs::remove_dir_all(&spill_dir)
+        {
+            tracing::warn!(
+                error = %e,
+                path = %spill_dir.display(),
+                "failed to remove spill directory"
+            );
+        }
         self.reset_cache();
         Ok(())
     }
