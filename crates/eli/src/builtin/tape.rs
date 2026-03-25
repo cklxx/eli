@@ -300,10 +300,15 @@ impl TapeService {
     }
 }
 
-/// Find the most recent `run` event's `total_tokens` usage.
+/// Find the most recent agent run event's `total_tokens` usage.
 fn find_last_token_usage(entries: &[TapeEntry]) -> Option<i64> {
     entries.iter().rev().find_map(|entry| {
-        (entry.kind == "event" && entry.payload.get("name").and_then(|v| v.as_str()) == Some("run"))
+        let name = entry
+            .payload
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        (entry.kind == "event" && (name == "run" || name == "agent.run"))
             .then(|| {
                 entry
                     .payload

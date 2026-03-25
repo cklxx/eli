@@ -310,11 +310,22 @@ async fn record_run_event(
     elapsed_ms: i64,
     status: &str,
     error: Option<&str>,
+    usage: &[nexil::UsageEvent],
 ) {
+    let total_input: u64 = usage.iter().map(|u| u.input_tokens).sum();
+    let total_output: u64 = usage.iter().map(|u| u.output_tokens).sum();
+    let total_tokens = total_input + total_output;
+
     let mut event = serde_json::json!({
         "elapsed_ms": elapsed_ms,
         "status": status,
         "date": Utc::now().to_rfc3339(),
+        "usage": {
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "total_tokens": total_tokens,
+            "rounds": usage.len(),
+        },
     });
     if let Some(err) = error {
         event["error"] = Value::String(err.to_owned());
@@ -386,12 +397,12 @@ async fn process_agent_result(
 ) -> Result<String, ConduitError> {
     match result {
         Err(e) => {
-            record_run_event(tapes, tape_name, elapsed_ms, "error", Some(&e.message)).await;
+            record_run_event(tapes, tape_name, elapsed_ms, "error", Some(&e.message), &[]).await;
             Err(e)
         }
         Ok(ref output) if output.kind == ToolAutoResultKind::Text => {
             let text = output.text.clone().unwrap_or_default();
-            record_run_event(tapes, tape_name, elapsed_ms, "ok", None).await;
+            record_run_event(tapes, tape_name, elapsed_ms, "ok", None, &output.usage).await;
             maybe_auto_handoff(tapes, tape_name, output, &text, settings).await;
             Ok(text)
         }
@@ -401,8 +412,126 @@ async fn process_agent_result(
                 .as_ref()
                 .map(|e| format!("{}: {}", e.kind.as_str(), e.message))
                 .unwrap_or_else(|| "tool_auto_error: unknown".to_owned());
-            record_run_event(tapes, tape_name, elapsed_ms, "error", Some(&error_msg)).await;
+            record_run_event(
+                tapes,
+                tape_name,
+                elapsed_ms,
+                "error",
+                Some(&error_msg),
+                &output.usage,
+            )
+            .await;
             Err(ConduitError::new(ErrorKind::Unknown, error_msg))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builtin::store::{FileTapeStore, ForkTapeStore};
+    use nexil::{TapeQuery, UsageEvent};
+
+    fn make_tape_service() -> (tempfile::TempDir, TapeService) {
+        let tmp = tempfile::tempdir().unwrap();
+        let tapes_dir = tmp.path().join("tapes");
+        let store = ForkTapeStore::from_sync(FileTapeStore::new(tapes_dir.clone()));
+        (tmp, TapeService::new(tapes_dir, store))
+    }
+
+    fn make_usage(input: u64, output: u64) -> Vec<UsageEvent> {
+        vec![UsageEvent {
+            model: "test-model".into(),
+            input_tokens: input,
+            output_tokens: output,
+            attempt: 0,
+            success: true,
+            timestamp: "2026-01-01T00:00:00Z".into(),
+        }]
+    }
+
+    async fn fetch_run_event(tapes: &TapeService, tape_name: &str) -> Value {
+        let query = TapeQuery::new(tape_name).kinds(vec!["event".into()]);
+        let entries = tapes.store().fetch_all(&query).await.unwrap();
+        entries
+            .into_iter()
+            .find(|e| e.payload.get("name").and_then(|v| v.as_str()) == Some("agent.run"))
+            .map(|e| e.payload.clone())
+            .expect("agent.run event not found in tape")
+    }
+
+    #[tokio::test]
+    async fn test_record_run_event_writes_usage_to_tape() {
+        let (_tmp, tapes) = make_tape_service();
+        let tape_name = "test_tape";
+        tapes.ensure_bootstrap_anchor(tape_name).await.unwrap();
+
+        record_run_event(&tapes, tape_name, 500, "ok", None, &make_usage(1000, 200)).await;
+
+        let payload = fetch_run_event(&tapes, tape_name).await;
+        let usage = &payload["data"]["usage"];
+        assert_eq!(usage["input_tokens"], 1000);
+        assert_eq!(usage["output_tokens"], 200);
+        assert_eq!(usage["total_tokens"], 1200);
+        assert_eq!(usage["rounds"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_record_run_event_aggregates_multi_round_usage() {
+        let (_tmp, tapes) = make_tape_service();
+        let tape_name = "test_tape";
+        tapes.ensure_bootstrap_anchor(tape_name).await.unwrap();
+
+        let usage = vec![
+            UsageEvent {
+                model: "m".into(),
+                input_tokens: 500,
+                output_tokens: 100,
+                attempt: 0,
+                success: true,
+                timestamp: "2026-01-01T00:00:00Z".into(),
+            },
+            UsageEvent {
+                model: "m".into(),
+                input_tokens: 800,
+                output_tokens: 150,
+                attempt: 0,
+                success: true,
+                timestamp: "2026-01-01T00:00:01Z".into(),
+            },
+        ];
+        record_run_event(&tapes, tape_name, 1000, "ok", None, &usage).await;
+
+        let payload = fetch_run_event(&tapes, tape_name).await;
+        let usage = &payload["data"]["usage"];
+        assert_eq!(usage["input_tokens"], 1300);
+        assert_eq!(usage["output_tokens"], 250);
+        assert_eq!(usage["total_tokens"], 1550);
+        assert_eq!(usage["rounds"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_process_agent_result_ok_records_usage() {
+        let (_tmp, tapes) = make_tape_service();
+        let tape_name = "test_tape";
+        tapes.ensure_bootstrap_anchor(tape_name).await.unwrap();
+
+        let result = Ok(ToolAutoResult {
+            kind: ToolAutoResultKind::Text,
+            text: Some("hello".into()),
+            tool_calls: vec![],
+            tool_results: vec![],
+            error: None,
+            usage: make_usage(2000, 400),
+        });
+
+        let settings = AgentSettings::from_env();
+        let text = process_agent_result(&tapes, tape_name, result, 100, &settings)
+            .await
+            .unwrap();
+        assert_eq!(text, "hello");
+
+        let payload = fetch_run_event(&tapes, tape_name).await;
+        assert_eq!(payload["data"]["usage"]["total_tokens"], 2400);
     }
 }
