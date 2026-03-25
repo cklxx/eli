@@ -8,7 +8,7 @@ pub(crate) async fn chat_command(
     let session = session_id.unwrap_or_else(|| format!("cli:{chat_id}"));
     let framework = super::builtin_framework().await;
 
-    println!("Eli chat session (session: {session}). Type /quit to exit.");
+    println!("Eli chat session started. Type /quit to exit.");
 
     let stdin = tokio::io::stdin();
     let reader = tokio::io::BufReader::new(stdin);

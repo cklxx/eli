@@ -74,6 +74,27 @@ async fn index_handler() -> impl IntoResponse {
     )
 }
 
+/// Validate a tape name from the URL: must be non-empty, no path separators or
+/// parent-directory references.  Returns the resolved `.jsonl` path only if it
+/// lives inside `tapes_dir`.
+fn resolve_tape_path(tapes_dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.starts_with('.')
+    {
+        return None;
+    }
+    let path = tapes_dir.join(format!("{name}.jsonl"));
+    // Reject symlink escapes: the canonical parent must still be tapes_dir.
+    let canonical = path.canonicalize().ok()?;
+    if !canonical.starts_with(tapes_dir) {
+        return None;
+    }
+    Some(path)
+}
+
 async fn list_tapes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut tapes: Vec<TapeListItem> = fs::read_dir(&state.tapes_dir)
         .into_iter()
@@ -106,14 +127,13 @@ async fn get_tape_entries(
     Path(name): Path<String>,
     Query(params): Query<EntriesQuery>,
 ) -> impl IntoResponse {
-    let path = state.tapes_dir.join(format!("{name}.jsonl"));
-    if !path.exists() {
+    let Some(path) = resolve_tape_path(&state.tapes_dir, &name) else {
         return (
             StatusCode::NOT_FOUND,
             Json(Value::String("tape not found".into())),
         )
             .into_response();
-    }
+    };
 
     let all_entries = read_jsonl(&path);
     let offset = params.offset.unwrap_or(0);
@@ -163,14 +183,13 @@ async fn get_tape_info(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let path = state.tapes_dir.join(format!("{name}.jsonl"));
-    if !path.exists() {
+    let Some(path) = resolve_tape_path(&state.tapes_dir, &name) else {
         return (
             StatusCode::NOT_FOUND,
             Json(Value::String("tape not found".into())),
         )
             .into_response();
-    }
+    };
 
     let entries = read_jsonl(&path);
     let stats = compute_tape_stats(&entries);
@@ -271,14 +290,13 @@ async fn get_tape_context(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let path = state.tapes_dir.join(format!("{name}.jsonl"));
-    if !path.exists() {
+    let Some(path) = resolve_tape_path(&state.tapes_dir, &name) else {
         return (
             StatusCode::NOT_FOUND,
             Json(Value::String("tape not found".into())),
         )
             .into_response();
-    }
+    };
 
     let entries = read_jsonl(&path);
     let resp = build_context_response(&entries);

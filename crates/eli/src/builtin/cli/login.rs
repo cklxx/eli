@@ -115,8 +115,17 @@ async fn login_openai(
     .await
     .map_err(|e| anyhow::anyhow!("OpenAI OAuth login failed: {e}"))?;
 
-    let account_info = tokens.account_id.as_deref().unwrap_or("(unknown account)");
-    println!("Login successful! Account: {account_info}");
+    let account_info = tokens.account_id.as_deref().unwrap_or("unknown");
+    let masked = if account_info.len() > 6 {
+        format!(
+            "{}…{}",
+            &account_info[..3],
+            &account_info[account_info.len() - 3..]
+        )
+    } else {
+        account_info.to_string()
+    };
+    println!("Login successful! Account: {masked}");
     println!("Tokens saved to: {}", home.join("auth.json").display());
 
     post_login_save_profile("openai")?;

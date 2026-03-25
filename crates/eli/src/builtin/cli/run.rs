@@ -21,7 +21,7 @@ pub(crate) async fn run_command(
 
     match framework.process_inbound(inbound).await {
         Ok(result) => {
-            println!("[{}]", result.session_id);
+            tracing::debug!(session_id = %result.session_id, "run complete");
             super::print_cli_outbounds(&result.outbounds);
         }
         Err(e) => {

@@ -441,8 +441,12 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
       res.json({ ok: true, delivered: true });
     });
 
+    // Rate-limit setup endpoints (auth operations).
+    const { default: rateLimit } = await import("express-rate-limit");
+    const setupLimiter = rateLimit({ windowMs: 60_000, max: 5, standardHeaders: true });
+
     // Setup: start QR login for a channel.
-    app.post("/setup/:channel/start", async (req, res) => {
+    app.post("/setup/:channel/start", setupLimiter, async (req, res) => {
       const channelId = req.params.channel;
       const plugin = registry.channels.get(channelId);
       if (!plugin) {
@@ -465,7 +469,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
     });
 
     // Setup: wait for QR scan result.
-    app.post("/setup/:channel/wait", async (req, res) => {
+    app.post("/setup/:channel/wait", setupLimiter, async (req, res) => {
       const channelId = req.params.channel;
       const plugin = registry.channels.get(channelId);
       if (!plugin) {
