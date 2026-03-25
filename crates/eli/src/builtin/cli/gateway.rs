@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::channels::message::{ChannelMessage, MediaItem, MediaType};
 
+#[cfg(feature = "gateway")]
 fn find_sidecar_dir() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
 
@@ -22,6 +23,7 @@ fn find_sidecar_dir() -> Option<std::path::PathBuf> {
     .find(|d| d.join("start.cjs").exists())
 }
 
+#[cfg(feature = "gateway")]
 fn prompt_line(label: &str) -> String {
     use std::io::Write;
     print!("{label}");
@@ -31,6 +33,7 @@ fn prompt_line(label: &str) -> String {
     buf.trim().to_owned()
 }
 
+#[cfg(feature = "gateway")]
 fn ensure_sidecar_config(sidecar_dir: &std::path::Path) {
     let config_path = sidecar_dir.join("sidecar.json");
     if config_path.exists() {
@@ -54,6 +57,7 @@ fn ensure_sidecar_config(sidecar_dir: &std::path::Path) {
     println!("\n  Saved {}\n", config_path.display());
 }
 
+#[cfg(feature = "gateway")]
 fn infer_channel_id(plugin: &str) -> String {
     const KNOWN_CHANNELS: &[(&str, &str)] = &[
         ("lark", "feishu"),
@@ -69,6 +73,7 @@ fn infer_channel_id(plugin: &str) -> String {
         .unwrap_or_else(|| prompt_line("  Channel ID (e.g. feishu, slack): "))
 }
 
+#[cfg(feature = "gateway")]
 fn build_sidecar_channel_config(plugin: &str, channel_id: String) -> Value {
     println!("\n  Enter credentials for {channel_id}:");
     let app_id = prompt_line("  App ID: ");
@@ -107,6 +112,7 @@ fn build_sidecar_channel_config(plugin: &str, channel_id: String) -> Value {
     })
 }
 
+#[cfg(feature = "gateway")]
 fn start_sidecar(wh: &crate::channels::webhook::WebhookSettings) -> Option<std::process::Child> {
     let sidecar_dir = find_sidecar_dir().or_else(|| {
         println!("Sidecar directory not found, skipping");
@@ -125,6 +131,7 @@ fn start_sidecar(wh: &crate::channels::webhook::WebhookSettings) -> Option<std::
     spawn_sidecar_process(&sidecar_dir, wh)
 }
 
+#[cfg(feature = "gateway")]
 fn ensure_node_available() -> bool {
     let ok = std::process::Command::new("node")
         .arg("--version")
@@ -138,6 +145,7 @@ fn ensure_node_available() -> bool {
     ok
 }
 
+#[cfg(feature = "gateway")]
 fn ensure_sidecar_deps(sidecar_dir: &std::path::Path) -> bool {
     if sidecar_dir.join("node_modules").exists() {
         return true;
@@ -154,6 +162,7 @@ fn ensure_sidecar_deps(sidecar_dir: &std::path::Path) -> bool {
     ok
 }
 
+#[cfg(feature = "gateway")]
 fn spawn_sidecar_process(
     sidecar_dir: &std::path::Path,
     wh: &crate::channels::webhook::WebhookSettings,
@@ -190,10 +199,12 @@ fn spawn_sidecar_process(
     }
 }
 
+#[cfg(feature = "gateway")]
 fn sidecar_retry_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis((200u64 << attempt.min(4)).min(3000))
 }
 
+#[cfg(feature = "gateway")]
 async fn sidecar_is_ready(client: &reqwest::Client, sidecar_url: &str) -> bool {
     client
         .get(format!("{sidecar_url}/health"))
@@ -202,6 +213,7 @@ async fn sidecar_is_ready(client: &reqwest::Client, sidecar_url: &str) -> bool {
         .is_ok_and(|resp| resp.status().is_success())
 }
 
+#[cfg(feature = "gateway")]
 async fn wait_for_sidecar(sidecar_url: &str) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     for attempt in 0..15u32 {
@@ -264,16 +276,20 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     use std::collections::HashMap;
 
     use crate::channels::base::Channel;
+    #[cfg(feature = "telegram")]
     use crate::channels::telegram::{TelegramChannel, TelegramSettings};
+    #[cfg(feature = "gateway")]
     use crate::channels::webhook::{WebhookChannel, WebhookSettings};
     use tokio_util::sync::CancellationToken;
 
     // Load .env so ELI_TELEGRAM_TOKEN (and others) are available.
     let _ = dotenvy::dotenv();
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
-    let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ChannelMessage>(256);
+    #[allow(unused_variables, unused_mut)]
+    let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::unbounded_channel::<ChannelMessage>();
     let cancel = CancellationToken::new();
+    #[allow(unused_mut)]
     let mut channels: HashMap<String, Arc<dyn Channel>> = HashMap::new();
     let mut tasks = tokio::task::JoinSet::new();
     let mut workers = tokio::task::JoinSet::new();
@@ -300,35 +316,42 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         }
     });
 
-    let tg_settings = TelegramSettings::from_env();
-    if !tg_settings.token.is_empty() {
-        let tg = Arc::new(TelegramChannel::new(ingress_tx.clone(), tg_settings));
-        println!("Starting Telegram channel...");
-        let ch = tg.clone();
-        let c = cancel.clone();
-        tasks.spawn(async move {
-            if let Err(e) = Channel::start(&*ch, c).await {
-                eprintln!("Telegram channel error: {e}");
-            }
-        });
-        channels.insert("telegram".to_owned(), tg);
+    #[cfg(feature = "telegram")]
+    {
+        let tg_settings = TelegramSettings::from_env();
+        if !tg_settings.token.is_empty() {
+            let tg = Arc::new(TelegramChannel::new(ingress_tx.clone(), tg_settings));
+            println!("Starting Telegram channel...");
+            let ch = tg.clone();
+            let c = cancel.clone();
+            tasks.spawn(async move {
+                if let Err(e) = Channel::start(&*ch, c).await {
+                    eprintln!("Telegram channel error: {e}");
+                }
+            });
+            channels.insert("telegram".to_owned(), tg);
+        }
     }
 
+    #[cfg(feature = "gateway")]
     let mut sidecar_child: Option<std::process::Child> = None;
-    let wh_settings = WebhookSettings::from_env();
-    if find_sidecar_dir().is_some() || wh_settings.is_configured() {
-        sidecar_child = start_sidecar(&wh_settings);
+    #[cfg(feature = "gateway")]
+    {
+        let wh_settings = WebhookSettings::from_env();
+        if find_sidecar_dir().is_some() || wh_settings.is_configured() {
+            sidecar_child = start_sidecar(&wh_settings);
 
-        let wh = Arc::new(WebhookChannel::new(ingress_tx.clone(), wh_settings));
-        println!("Starting Webhook channel...");
-        let ch = wh.clone();
-        let c = cancel.clone();
-        tasks.spawn(async move {
-            if let Err(e) = Channel::start(&*ch, c).await {
-                eprintln!("Webhook channel error: {e}");
-            }
-        });
-        channels.insert("webhook".to_owned(), wh);
+            let wh = Arc::new(WebhookChannel::new(ingress_tx.clone(), wh_settings));
+            println!("Starting Webhook channel...");
+            let ch = wh.clone();
+            let c = cancel.clone();
+            tasks.spawn(async move {
+                if let Err(e) = Channel::start(&*ch, c).await {
+                    eprintln!("Webhook channel error: {e}");
+                }
+            });
+            channels.insert("webhook".to_owned(), wh);
+        }
     }
 
     if channels.is_empty() {
@@ -338,6 +361,7 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         );
     }
 
+    #[cfg(feature = "gateway")]
     if sidecar_child.is_some()
         && let Err(e) = wait_for_sidecar("http://127.0.0.1:3101").await
     {
@@ -482,6 +506,7 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
 
     drain_processing_tasks(&mut workers).await;
 
+    #[cfg(feature = "gateway")]
     if let Some(mut child) = sidecar_child {
         let pid = child.id();
         println!("Stopping sidecar (pgid={pid})...");

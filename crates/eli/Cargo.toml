@@ -30,8 +30,7 @@ futures = "0.3"
 tokio-util = { version = "0.7", features = ["rt"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
-ratatui = "0.29"
-teloxide = { version = "0.13", features = ["macros"] }
+teloxide = { version = "0.13", features = ["macros"], optional = true }
 md5 = "0.7"
 dirs = "6"
 dotenvy = "0.15"
@@ -44,7 +43,23 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 open = "5"
-axum = "0.8"
+axum = { version = "0.8", optional = true }
+
+[features]
+default = ["telegram", "gateway", "tape-viewer"]
+telegram = ["dep:teloxide"]
+gateway = ["dep:axum"]
+tape-viewer = ["dep:axum"]
+
+[[example]]
+name = "custom_tool"
+
+[[example]]
+name = "hook_plugin"
 
 [dev-dependencies]
 tempfile = "3"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

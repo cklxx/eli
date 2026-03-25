@@ -8,6 +8,7 @@ pub mod settings;
 pub mod shell_manager;
 pub mod store;
 pub mod tape;
+#[cfg(feature = "tape-viewer")]
 pub mod tape_viewer;
 pub mod tools;
 

@@ -7,6 +7,7 @@ mod login;
 mod model;
 mod profile;
 mod run;
+#[cfg(feature = "tape-viewer")]
 mod tape;
 
 use std::path::PathBuf;
@@ -86,6 +87,7 @@ pub enum CliCommand {
     /// Start message listeners (Telegram, Webhook/Sidecar).
     Gateway,
     /// Open the tape viewer web UI.
+    #[cfg(feature = "tape-viewer")]
     Tape {
         /// HTTP port to bind to.
         #[arg(long, default_value_t = 7700)]
@@ -145,6 +147,7 @@ pub async fn execute(cmd: CliCommand) -> anyhow::Result<()> {
             Ok(())
         }
         CliCommand::Gateway => gateway::gateway_command().await,
+        #[cfg(feature = "tape-viewer")]
         CliCommand::Tape { port, dir } => tape::tape_command(port, dir).await,
         CliCommand::Decisions { action } => match action {
             DecisionAction::List => decisions::list_command().await,
