@@ -78,8 +78,8 @@ def run_eli(*args: str, timeout: int = TIMEOUT, env_override: dict | None = None
 # Image fixture generators
 # ---------------------------------------------------------------------------
 
-def _make_solid_png(r: int, g: int, b: int, size: int = 8) -> str:
-    """Generate a solid-color PNG and return as base64 string."""
+def _make_solid_png(r: int, g: int, b: int, size: int = 16) -> str:
+    """Generate a solid-color 16x16 RGB PNG and return as base64 string."""
     def chunk(chunk_type: bytes, data: bytes) -> bytes:
         c = chunk_type + data
         crc = struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
@@ -88,7 +88,9 @@ def _make_solid_png(r: int, g: int, b: int, size: int = 8) -> str:
     ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)  # 8-bit RGB
     raw = b""
     for _ in range(size):
-        raw += b"\x00" + struct.pack("BBB", r, g, b) * size
+        raw += b"\x00"  # filter byte per row
+        for _ in range(size):
+            raw += bytes([r, g, b])
     idat = chunk(b"IDAT", zlib.compress(raw))
     png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + idat + chunk(b"IEND", b"")
     return base64.b64encode(png).decode()
