@@ -4,6 +4,16 @@ use std::path::PathBuf;
 
 use crate::builtin::config::{EliConfig, Profile, default_model_for_provider, normalize_provider};
 
+/// Mask an account ID for display: show first 3 and last 3 chars only.
+fn mask_account_id(id: Option<&str>) -> String {
+    let s = id.unwrap_or("unknown");
+    if s.len() > 6 {
+        format!("{}…{}", &s[..3], &s[s.len() - 3..])
+    } else {
+        s.to_string()
+    }
+}
+
 /// Login to a provider.
 pub(crate) async fn login_command(
     provider: String,
@@ -115,17 +125,10 @@ async fn login_openai(
     .await
     .map_err(|e| anyhow::anyhow!("OpenAI OAuth login failed: {e}"))?;
 
-    let account_info = tokens.account_id.as_deref().unwrap_or("unknown");
-    let masked = if account_info.len() > 6 {
-        format!(
-            "{}…{}",
-            &account_info[..3],
-            &account_info[account_info.len() - 3..]
-        )
-    } else {
-        account_info.to_string()
-    };
-    println!("Login successful! Account: {masked}");
+    println!(
+        "Login successful! Account: {}",
+        mask_account_id(tokens.account_id.as_deref())
+    );
     println!("Tokens saved to: {}", home.join("auth.json").display());
 
     post_login_save_profile("openai")?;
