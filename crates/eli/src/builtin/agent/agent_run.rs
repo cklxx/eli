@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use conduit::core::results::ToolAutoResultKind;
-use conduit::{ConduitError, ErrorKind, TapeContext, TapeEntry, ToolAutoResult};
+use conduit::{AnchorSelector, ConduitError, ErrorKind, TapeContext, TapeEntry, ToolAutoResult};
 use serde_json::Value;
 
 use crate::builtin::settings::AgentSettings;
@@ -14,10 +14,51 @@ use crate::builtin::tape::TapeService;
 use crate::builtin::tools::with_tape_runtime;
 use crate::types::PromptValue;
 
-use super::agent_command::{args_to_json, parse_args, parse_internal_command};
 use super::agent_request::{
     build_system_prompt, build_tool_context, create_llm, lookup_registered_tool, run_tools_once,
 };
+
+// ---------------------------------------------------------------------------
+// Command parsing (inlined from agent_command)
+// ---------------------------------------------------------------------------
+
+fn parse_internal_command(line: &str) -> (String, Vec<String>) {
+    let parts: Vec<String> = shell_words::split(line)
+        .unwrap_or_else(|_| line.split_whitespace().map(|s| s.to_owned()).collect());
+    if parts.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let name = parts[0].clone();
+    let rest = parts[1..].to_vec();
+    (name, rest)
+}
+
+/// Parse arg tokens into a JSON object. Keyword args (`key=value`) become
+/// object fields; bare positional args are joined under a `"value"` key.
+fn parse_args_to_json(tokens: &[String]) -> Value {
+    let mut map = serde_json::Map::new();
+    let mut positional: Vec<&str> = Vec::new();
+    let mut seen_kwarg = false;
+
+    for token in tokens {
+        if let Some(eq_pos) = token.find('=') {
+            map.insert(
+                token[..eq_pos].to_owned(),
+                Value::String(token[eq_pos + 1..].to_owned()),
+            );
+            seen_kwarg = true;
+        } else if seen_kwarg {
+            tracing::warn!("positional argument '{}' after keyword arguments", token);
+        } else {
+            positional.push(token);
+        }
+    }
+
+    if !positional.is_empty() && map.is_empty() {
+        map.insert("value".to_owned(), Value::String(positional.join(" ")));
+    }
+    Value::Object(map)
+}
 
 // ---------------------------------------------------------------------------
 // Internal command execution
@@ -39,9 +80,8 @@ pub(super) async fn run_command(
     let result = with_tape_runtime(tapes.clone(), async {
         let tool = lookup_registered_tool(&name);
         if let Some(tool) = tool {
-            let args = parse_args(&arg_tokens);
+            let json_args = parse_args_to_json(&arg_tokens);
             let ctx = build_tool_context("run_command", tape_name, tool_state);
-            let json_args = args_to_json(&args);
             if tool.context {
                 tool.run(json_args, Some(ctx)).await
             } else {
@@ -96,42 +136,6 @@ pub(super) async fn run_command(
 }
 
 // ---------------------------------------------------------------------------
-// Result resolution
-// ---------------------------------------------------------------------------
-
-pub(super) struct ToolAutoOutcome {
-    pub kind: String,
-    pub text: String,
-    pub error: String,
-}
-
-pub(super) fn resolve_tool_auto_result(output: &ToolAutoResult) -> ToolAutoOutcome {
-    match output.kind {
-        ToolAutoResultKind::Text => ToolAutoOutcome {
-            kind: "text".to_owned(),
-            text: output.text.clone().unwrap_or_default(),
-            error: String::new(),
-        },
-        ToolAutoResultKind::Tools => ToolAutoOutcome {
-            kind: "continue".to_owned(),
-            text: String::new(),
-            error: String::new(),
-        },
-        ToolAutoResultKind::Error => {
-            let error_msg = match &output.error {
-                Some(e) => format!("{}: {}", e.kind.as_str(), e.message),
-                None => "tool_auto_error: unknown".to_owned(),
-            };
-            ToolAutoOutcome {
-                kind: "error".to_owned(),
-                text: String::new(),
-                error: error_msg,
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Agent loop helpers
 // ---------------------------------------------------------------------------
 
@@ -167,7 +171,7 @@ async fn resolve_tape_context_override(
                 "auto-handoff grace: using prev anchor"
             );
             Some(TapeContext {
-                anchor: conduit::AnchorSelector::Named(prev_anchor.clone()),
+                anchor: AnchorSelector::Named(prev_anchor.clone()),
                 ..TapeContext::default()
             })
         }
@@ -175,51 +179,50 @@ async fn resolve_tape_context_override(
     }
 }
 
-/// Handle auto-handoff state machine after a successful text response.
-async fn handle_auto_handoff(
+/// Handle auto-handoff: decrement grace period or place a new handoff anchor
+/// when context approaches the limit.
+async fn maybe_auto_handoff(
     tapes: &TapeService,
     tape_name: &str,
     output: &ToolAutoResult,
-    outcome: &ToolAutoOutcome,
+    response_text: &str,
     settings: &AgentSettings,
 ) {
-    if let Ok(Some((remaining, prev_anchor))) = tapes.auto_handoff_grace(tape_name).await {
-        if remaining > 0 {
-            let new_remaining = remaining - 1;
-            let _ = tapes
-                .append_event(
-                    tape_name,
-                    "auto-handoff.grace",
-                    serde_json::json!({
-                        "remaining": new_remaining,
-                        "prev_anchor": prev_anchor,
-                    }),
-                )
-                .await;
-            if new_remaining == 0 {
-                tracing::info!(
-                    tape = tape_name,
-                    "auto-handoff grace ended, context will be trimmed next turn"
-                );
-            }
+    // Decrement existing grace period if active.
+    if let Ok(Some((remaining, prev_anchor))) = tapes.auto_handoff_grace(tape_name).await
+        && remaining > 0
+    {
+        let new_remaining = remaining - 1;
+        let _ = tapes
+            .append_event(
+                tape_name,
+                "auto-handoff.grace",
+                serde_json::json!({
+                    "remaining": new_remaining,
+                    "prev_anchor": prev_anchor,
+                }),
+            )
+            .await;
+        if new_remaining == 0 {
+            tracing::info!(
+                tape = tape_name,
+                "auto-handoff grace ended, context will be trimmed next turn"
+            );
         }
-    } else if !output.usage.is_empty() {
-        let input_tokens = output.usage.last().map(|u| u.input_tokens).unwrap_or(0) as usize;
-        let threshold = settings.context_window * 70 / 100;
-        if input_tokens >= threshold {
-            trigger_auto_handoff(tapes, tape_name, input_tokens, outcome, settings).await;
-        }
+        return;
     }
-}
 
-/// Place an auto-handoff anchor when context approaches the limit.
-async fn trigger_auto_handoff(
-    tapes: &TapeService,
-    tape_name: &str,
-    input_tokens: usize,
-    outcome: &ToolAutoOutcome,
-    settings: &AgentSettings,
-) {
+    // Check whether context is approaching the limit.
+    if output.usage.is_empty() {
+        return;
+    }
+    let input_tokens = output.usage.last().map(|u| u.input_tokens).unwrap_or(0) as usize;
+    let threshold = settings.context_window * 70 / 100;
+    if input_tokens < threshold {
+        return;
+    }
+
+    // Place handoff anchor.
     let prev_anchor_name = tapes
         .last_anchor_name(tape_name)
         .await
@@ -227,7 +230,7 @@ async fn trigger_auto_handoff(
         .flatten()
         .unwrap_or_default();
 
-    let summary: String = outcome.text.chars().take(500).collect();
+    let summary: String = response_text.chars().take(500).collect();
     let anchor_state = serde_json::json!({
         "reason": "auto-handoff: context approaching limit",
         "input_tokens": input_tokens,
@@ -243,7 +246,7 @@ async fn trigger_auto_handoff(
     }
 
     let sys_entry = TapeEntry::system(
-        &format!("[Context summary from auto-handoff]\n{}", summary),
+        &format!("[Context summary from auto-handoff]\n{summary}"),
         Value::Object(Default::default()),
     );
     if let Err(e) = tapes.store().append(tape_name, &sys_entry).await {
@@ -272,10 +275,23 @@ async fn trigger_auto_handoff(
     );
 }
 
-/// Record a run event to the tape.
-async fn record_run_event(tapes: &TapeService, tape_name: &str, elapsed_ms: i64, event: Value) {
+/// Record a run event to the tape with standardised fields.
+async fn record_run_event(
+    tapes: &TapeService,
+    tape_name: &str,
+    elapsed_ms: i64,
+    status: &str,
+    error: Option<&str>,
+) {
+    let mut event = serde_json::json!({
+        "elapsed_ms": elapsed_ms,
+        "status": status,
+        "date": Utc::now().to_rfc3339(),
+    });
+    if let Some(err) = error {
+        event["error"] = Value::String(err.to_owned());
+    }
     let _ = tapes.append_event(tape_name, "agent.run", event).await;
-    let _ = elapsed_ms; // used by caller for the event payload
 }
 
 // ---------------------------------------------------------------------------
@@ -332,39 +348,24 @@ pub(super) async fn agent_loop(
 
     match result {
         Err(e) => {
-            let event = serde_json::json!({
-                "elapsed_ms": elapsed_ms,
-                "status": "error",
-                "error": e.message,
-                "date": Utc::now().to_rfc3339(),
-            });
-            record_run_event(tapes, tape_name, elapsed_ms, event).await;
+            record_run_event(tapes, tape_name, elapsed_ms, "error", Some(&e.message)).await;
             Err(e)
         }
-        Ok(ref output) => {
-            let outcome = resolve_tool_auto_result(output);
-            match outcome.kind.as_str() {
-                "text" => {
-                    let event = serde_json::json!({
-                        "elapsed_ms": elapsed_ms,
-                        "status": "ok",
-                        "date": Utc::now().to_rfc3339(),
-                    });
-                    record_run_event(tapes, tape_name, elapsed_ms, event).await;
-                    handle_auto_handoff(tapes, tape_name, output, &outcome, settings).await;
-                    Ok(outcome.text)
-                }
-                _ => {
-                    let event = serde_json::json!({
-                        "elapsed_ms": elapsed_ms,
-                        "status": "error",
-                        "error": outcome.error,
-                        "date": Utc::now().to_rfc3339(),
-                    });
-                    record_run_event(tapes, tape_name, elapsed_ms, event).await;
-                    Err(ConduitError::new(ErrorKind::Unknown, outcome.error))
-                }
+        Ok(ref output) => match output.kind {
+            ToolAutoResultKind::Text => {
+                let text = output.text.clone().unwrap_or_default();
+                record_run_event(tapes, tape_name, elapsed_ms, "ok", None).await;
+                maybe_auto_handoff(tapes, tape_name, output, &text, settings).await;
+                Ok(text)
             }
-        }
+            _ => {
+                let error_msg = match &output.error {
+                    Some(e) => format!("{}: {}", e.kind.as_str(), e.message),
+                    None => "tool_auto_error: unknown".to_owned(),
+                };
+                record_run_event(tapes, tape_name, elapsed_ms, "error", Some(&error_msg)).await;
+                Err(ConduitError::new(ErrorKind::Unknown, error_msg))
+            }
+        },
     }
 }
