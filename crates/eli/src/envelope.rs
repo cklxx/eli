@@ -4,68 +4,92 @@ use serde_json::Value;
 
 use crate::types::Envelope;
 
-/// Read a field from an envelope (must be a JSON object).
-/// Returns the value at `key`, or `default` if not present or not an object.
-pub fn field_of(message: &Envelope, key: &str, default: Option<&Value>) -> Option<Value> {
-    match message.as_object() {
-        Some(obj) => match obj.get(key) {
-            Some(v) => Some(v.clone()),
-            None => default.cloned(),
-        },
-        None => default.cloned(),
-    }
+/// Project-specific convenience methods for JSON envelopes.
+pub trait ValueExt {
+    /// Read a field from an envelope (must be a JSON object).
+    fn field(&self, key: &str, default: Option<&Value>) -> Option<Value>;
+
+    /// Read a field as a string, with an optional default.
+    fn field_str(&self, key: &str, default: &str) -> String;
+
+    /// Get textual content from any envelope shape.
+    fn content_text(&self) -> String;
+
+    /// Convert an arbitrary envelope to a mutable JSON object.
+    fn normalize_envelope(&self) -> Value;
+
+    /// Normalize one `render_outbound` return value to a flat list of envelopes.
+    fn unpack_batch(&self) -> Vec<Envelope>;
 }
 
-/// Convenience: read a field as a string, with an optional default.
-pub fn field_of_str(message: &Envelope, key: &str, default: &str) -> String {
-    match message.as_object() {
-        Some(obj) => match obj.get(key) {
-            Some(Value::String(s)) => s.clone(),
-            Some(v) => v.to_string(),
-            None => default.to_string(),
-        },
-        None => default.to_string(),
+impl ValueExt for Value {
+    fn field(&self, key: &str, default: Option<&Value>) -> Option<Value> {
+        self.as_object()
+            .and_then(|obj| obj.get(key).cloned())
+            .or_else(|| default.cloned())
     }
-}
 
-/// Get textual content from any envelope shape.
-pub fn content_of(message: &Envelope) -> String {
-    match message.as_object() {
-        Some(obj) => match obj.get("content") {
-            Some(Value::String(s)) => s.clone(),
-            Some(v) => v.to_string(),
-            None => String::new(),
-        },
-        None => match message {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        },
+    fn field_str(&self, key: &str, default: &str) -> String {
+        self.as_object()
+            .and_then(|obj| obj.get(key))
+            .map(value_to_string)
+            .unwrap_or_else(|| default.to_owned())
     }
-}
 
-/// Convert an arbitrary envelope to a mutable JSON object.
-/// If the envelope is already an object, it is cloned.
-/// If it has some other shape, it is wrapped as `{"content": "<string>"}`.
-pub fn normalize_envelope(message: &Envelope) -> Value {
-    match message {
-        Value::Object(_) => message.clone(),
-        Value::String(s) => {
-            serde_json::json!({ "content": s })
-        }
-        other => {
-            serde_json::json!({ "content": other.to_string() })
+    fn content_text(&self) -> String {
+        match self.as_object() {
+            Some(obj) => obj.get("content").map(value_to_string).unwrap_or_default(),
+            None => value_to_string(self),
         }
     }
+
+    fn normalize_envelope(&self) -> Value {
+        match self {
+            Value::Object(_) => self.clone(),
+            Value::String(content) => serde_json::json!({ "content": content }),
+            other => serde_json::json!({ "content": other.to_string() }),
+        }
+    }
+
+    fn unpack_batch(&self) -> Vec<Envelope> {
+        match self {
+            Value::Null => Vec::new(),
+            Value::Array(items) => items.clone(),
+            other => vec![other.clone()],
+        }
+    }
 }
 
-/// Normalize one `render_outbound` return value to a flat list of envelopes.
-/// Handles `null`, single objects, and arrays.
-pub fn unpack_batch(batch: &Value) -> Vec<Envelope> {
-    match batch {
-        Value::Null => Vec::new(),
-        Value::Array(arr) => arr.clone(),
-        other => vec![other.clone()],
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
     }
+}
+
+#[cfg(test)]
+fn field_of(message: &Envelope, key: &str, default: Option<&Value>) -> Option<Value> {
+    message.field(key, default)
+}
+
+#[cfg(test)]
+fn field_of_str(message: &Envelope, key: &str, default: &str) -> String {
+    message.field_str(key, default)
+}
+
+#[cfg(test)]
+fn content_of(message: &Envelope) -> String {
+    message.content_text()
+}
+
+#[cfg(test)]
+fn normalize_envelope(message: &Envelope) -> Value {
+    message.normalize_envelope()
+}
+
+#[cfg(test)]
+fn unpack_batch(batch: &Value) -> Vec<Envelope> {
+    batch.unpack_batch()
 }
 
 /// Unpack a value that may itself be a batch (Vec) into a flat list of envelopes.
@@ -108,7 +132,7 @@ impl OutboundMessage {
             .and_then(|v| v.as_str())
             .unwrap_or("default");
 
-        let content = content_of(envelope);
+        let content = envelope.content_text();
 
         let context = envelope
             .get("context")

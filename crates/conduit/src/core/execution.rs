@@ -47,6 +47,19 @@ pub struct LLMCore {
     error_classifier: Option<Box<dyn Fn(&ConduitError) -> Option<ErrorKind> + Send + Sync>>,
 }
 
+fn split_model_id<'a>(
+    model: &'a str,
+    message: &'static str,
+) -> Result<(&'a str, &'a str), ConduitError> {
+    let (provider, model_id) = model
+        .split_once(':')
+        .ok_or_else(|| ConduitError::new(ErrorKind::InvalidInput, message))?;
+    if provider.is_empty() || model_id.is_empty() {
+        return Err(ConduitError::new(ErrorKind::InvalidInput, message));
+    }
+    Ok((provider, model_id))
+}
+
 impl LLMCore {
     /// Create a new `LLMCore` instance.
     #[allow(clippy::too_many_arguments)]
@@ -152,32 +165,15 @@ impl LLMCore {
             }
             return Ok((p.to_owned(), model.to_owned()));
         }
-        if !model.contains(':') {
-            return Err(ConduitError::new(
-                ErrorKind::InvalidInput,
-                "Model must be in 'provider:model' format.",
-            ));
-        }
-        let (prov, mdl) = model.split_once(':').unwrap();
-        if prov.is_empty() || mdl.is_empty() {
-            return Err(ConduitError::new(
-                ErrorKind::InvalidInput,
-                "Model must be in 'provider:model' format.",
-            ));
-        }
+        let (prov, mdl) = split_model_id(model, "Model must be in 'provider:model' format.")?;
         Ok((prov.to_owned(), mdl.to_owned()))
     }
 
     /// Resolve a fallback model string into `(provider, model)`.
     pub fn resolve_fallback(&self, model: &str) -> Result<(String, String), ConduitError> {
         if model.contains(':') {
-            let (prov, mdl) = model.split_once(':').unwrap();
-            if prov.is_empty() || mdl.is_empty() {
-                return Err(ConduitError::new(
-                    ErrorKind::InvalidInput,
-                    "Fallback models must be in 'provider:model' format.",
-                ));
-            }
+            let (prov, mdl) =
+                split_model_id(model, "Fallback models must be in 'provider:model' format.")?;
             return Ok((prov.to_owned(), mdl.to_owned()));
         }
         if !self.provider.is_empty() {

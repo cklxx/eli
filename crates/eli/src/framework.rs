@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
-use crate::envelope::{content_of, field_of, field_of_str, unpack_batch_vec};
+use crate::envelope::{ValueExt, unpack_batch_vec};
 use crate::hooks::{ChannelHook, EliHookSpec, HookRuntime, TapeStoreKind};
 use crate::types::{
     Envelope, MessageHandler, OutboundChannelRouter, PromptValue, State, TurnResult,
@@ -190,7 +190,7 @@ impl EliFramework {
             .await
         {
             Some(p) => p,
-            None => PromptValue::Text(content_of(&inbound)),
+            None => PromptValue::Text(inbound.content_text()),
         };
 
         // 4. Run model
@@ -314,8 +314,8 @@ impl EliFramework {
         {
             return sid.clone();
         }
-        let channel = field_of_str(message, "channel", "default");
-        let chat_id = field_of_str(message, "chat_id", "default");
+        let channel = message.field_str("channel", "default");
+        let chat_id = message.field_str("chat_id", "default");
         format!("{channel}:{chat_id}")
     }
 
@@ -347,10 +347,10 @@ impl EliFramework {
             Value::String(session_id.to_string()),
         );
 
-        if let Some(channel) = field_of(message, "channel", None) {
+        if let Some(channel) = message.field("channel", None) {
             fallback.insert("channel".to_string(), channel);
         }
-        if let Some(chat_id) = field_of(message, "chat_id", None) {
+        if let Some(chat_id) = message.field("chat_id", None) {
             fallback.insert("chat_id".to_string(), chat_id);
         }
 

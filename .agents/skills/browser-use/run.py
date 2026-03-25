@@ -71,7 +71,7 @@ class McpSession:
             env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] = token
 
         self.proc = subprocess.Popen(
-            ["npx", "-y", "@playwright/mcp@latest", "--extension"],
+            ["node", "/Users/bytedance/.npm/_npx/86170c4cd1c5da32/node_modules/@playwright/mcp/cli.js", "--extension"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             env=env, text=True,
         )

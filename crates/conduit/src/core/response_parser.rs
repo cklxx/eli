@@ -48,11 +48,13 @@ fn merge_tool_call_delta(map: &mut BTreeMap<u64, serde_json::Map<String, Value>>
     let Some(fd) = delta.get("function").and_then(|f| f.as_object()) else {
         return;
     };
-    let fn_obj = entry
+    let Some(fn_obj) = entry
         .entry("function")
         .or_insert_with(|| Value::Object(serde_json::Map::new()))
         .as_object_mut()
-        .unwrap();
+    else {
+        return;
+    };
     if let Some(n) = fd.get("name").and_then(|n| n.as_str()) {
         fn_obj.entry("name").or_insert(Value::String(n.to_owned()));
     }
@@ -178,11 +180,10 @@ fn parse_messages_sse(buffer: &str) -> Result<Value, ConduitError> {
     }
     blocks.extend(tool_use_blocks);
     let mut result = serde_json::json!({"role": "assistant", "content": blocks});
-    if let Some(u) = usage {
-        result
-            .as_object_mut()
-            .unwrap()
-            .insert("usage".to_owned(), u);
+    if let Some(u) = usage
+        && let Value::Object(obj) = &mut result
+    {
+        obj.insert("usage".to_owned(), u);
     }
     Ok(result)
 }

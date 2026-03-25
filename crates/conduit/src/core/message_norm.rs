@@ -123,7 +123,10 @@ pub(crate) fn prune_orphan_tool_messages(messages: Vec<Value>) -> Vec<Value> {
 
         if role == "assistant" && msg.get("tool_calls").and_then(|c| c.as_array()).is_some() {
             let mut msg = msg;
-            let obj = msg.as_object_mut().unwrap();
+            let Some(obj) = msg.as_object_mut() else {
+                filtered.push(msg);
+                continue;
+            };
             let calls = obj
                 .get("tool_calls")
                 .and_then(|c| c.as_array())

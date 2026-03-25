@@ -243,11 +243,10 @@ impl LLMCore {
             "attempt": attempt + 1,
             "max_attempts": self.max_attempts(),
         });
-        if let Some(status) = http_status {
-            details
-                .as_object_mut()
-                .unwrap()
-                .insert("http_status".to_owned(), Value::Number(status.into()));
+        if let Some(status) = http_status
+            && let Value::Object(obj) = &mut details
+        {
+            obj.insert("http_status".to_owned(), Value::Number(status.into()));
         }
         ErrorPayload::new(error.kind, &error.message).with_details(details)
     }

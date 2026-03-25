@@ -129,13 +129,14 @@ pub fn normalize_messages(messages: Vec<Value>) -> Vec<Value> {
             .to_owned();
 
         if !merged.is_empty() && role == last_role {
-            let last = merged.last_mut().unwrap();
-            let existing = last.get("content").cloned().unwrap_or(Value::Null);
-            let new_content = msg.get("content").cloned().unwrap_or(Value::Null);
-            last["content"] = Value::Array(merge_blocks(existing, new_content));
-        } else {
-            merged.push(msg);
+            if let Some(last) = merged.last_mut() {
+                let existing = last.get("content").cloned().unwrap_or(Value::Null);
+                let new_content = msg.get("content").cloned().unwrap_or(Value::Null);
+                last["content"] = Value::Array(merge_blocks(existing, new_content));
+            }
+            continue;
         }
+        merged.push(msg);
     }
 
     if merged.first().map(message_role) != Some("user") {
