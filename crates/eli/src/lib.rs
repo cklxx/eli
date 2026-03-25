@@ -15,7 +15,6 @@ pub mod smart_router;
 pub mod tool_middleware;
 pub mod tools;
 pub mod types;
-pub mod utils;
 
 // Re-export key types at the crate root for convenience.
 pub use framework::EliFramework;

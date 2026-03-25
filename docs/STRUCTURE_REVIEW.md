@@ -257,14 +257,12 @@ eli/src/
 ├── framework.rs        (508 lines)  — turn pipeline
 ├── envelope.rs         (382 lines)  — envelope construction/helpers
 ├── skills.rs           (495 lines)  — skill loading/execution
-├── tools.rs            (179 lines)  — tool integration
-├── utils.rs            (178 lines)  — 4 well-tested helper functions
+├── tools.rs            (tool registry + logging helpers)
 ├── builtin/
 │   ├── mod.rs          (428 lines)  — BuiltinImpl + envelope conversion
 │   ├── agent.rs        (1059 lines) — 959 code, 100 tests; agent loop + PromptInput
 │   ├── config.rs       (598 lines)
 │   ├── settings.rs     (681 lines)  — includes MODEL_SPECS table
-│   ├── context.rs      (small)
 │   ├── shell_manager.rs (small)
 │   ├── store.rs        (1014 lines) — 485 code, 529 tests; well-tested tape stores
 │   ├── tape.rs         (313 lines)

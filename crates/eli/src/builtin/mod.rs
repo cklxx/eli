@@ -3,7 +3,6 @@
 pub mod agent;
 pub mod cli;
 pub mod config;
-pub mod context;
 mod model_specs;
 pub mod settings;
 pub mod shell_manager;

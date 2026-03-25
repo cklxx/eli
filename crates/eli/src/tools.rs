@@ -35,26 +35,6 @@ pub fn model_tools(tools: &[Tool]) -> Vec<Tool> {
         .collect()
 }
 
-/// Render a human-readable description of tools for model prompts.
-pub fn render_tools_prompt<'a>(tools: impl IntoIterator<Item = &'a Tool>) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    for tool in tools {
-        let name = to_model_name(&tool.name);
-        if tool.description.is_empty() {
-            lines.push(format!("- {name}"));
-        } else {
-            lines.push(format!("- {name}: {}", tool.description));
-        }
-    }
-    if lines.is_empty() {
-        return String::new();
-    }
-    format!(
-        "<available_tools>\n{}\n</available_tools>",
-        lines.join("\n")
-    )
-}
-
 /// Shorten a text string for logging.
 pub fn shorten_text(text: &str, width: usize) -> String {
     if text.len() <= width {
@@ -111,34 +91,6 @@ mod tests {
     fn test_model_tools_empty() {
         let rewritten = model_tools(&[]);
         assert!(rewritten.is_empty());
-    }
-
-    // -- render_tools_prompt --------------------------------------------------
-
-    #[test]
-    fn test_render_tools_prompt_with_description() {
-        let t1 = make_tool("tests.prompt_one", "First tool");
-        let t2 = make_tool("tests.prompt_two", "");
-        let rendered = render_tools_prompt([&t1, &t2]);
-        assert_eq!(
-            rendered,
-            "<available_tools>\n- tests_prompt_one: First tool\n- tests_prompt_two\n</available_tools>"
-        );
-    }
-
-    #[test]
-    fn test_render_tools_prompt_empty_returns_empty_string() {
-        let rendered = render_tools_prompt(std::iter::empty::<&Tool>());
-        assert_eq!(rendered, "");
-    }
-
-    #[test]
-    fn test_render_tools_prompt_single_tool() {
-        let t = make_tool("my.tool", "does stuff");
-        let rendered = render_tools_prompt([&t]);
-        assert!(rendered.contains("- my_tool: does stuff"));
-        assert!(rendered.starts_with("<available_tools>"));
-        assert!(rendered.ends_with("</available_tools>"));
     }
 
     // -- REGISTRY -------------------------------------------------------------

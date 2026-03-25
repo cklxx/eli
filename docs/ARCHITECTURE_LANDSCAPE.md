@@ -293,9 +293,8 @@ eli/src/
 ├── smart_router.rs                 SmartRouter — greeting detection (15 triggers)
 ├── skill_matcher.rs                Multi-signal skill activation (intent/tool/keyword)
 ├── skills.rs                       SkillMetadata discovery (project > global)
-├── tools.rs                        REGISTRY, model_tools(), render_tools_prompt()
+├── tools.rs                        REGISTRY, model_tools(), shorten_text()
 ├── tool_middleware.rs              CircuitBreaker, MetricsCollector, MiddlewareChain
-├── utils.rs                        exclude_none, workspace_from_state
 ├── channels/
 │   ├── base.rs                     Channel trait (name, start, stop, send)
 │   ├── cli.rs                      CliChannel — REPL with crossterm colored output
