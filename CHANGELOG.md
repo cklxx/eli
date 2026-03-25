@@ -13,6 +13,26 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [0.3.2] — 2026-03-25
+
+eli 0.3.2 · conduit 0.6.2
+
+WeChat channel support, agent module refactor, and a full integration test suite hitting real LLM APIs.
+
+### Added
+- **WeChat channel** — `openclaw-weixin` plugin via sidecar, supports text messaging through WeChat Work (企业微信)
+- **Integration test suite** — 31 Python tests across CLI + gateway, hitting real OpenAI and Anthropic APIs
+  - `test_basic.py` (15 tests): smoke, text chat, provider switching, unicode, error handling
+  - `test_vision.py` (7 tests): multimodal single/multi-image, hallucination detection
+  - `test_gateway.py` (9 tests): full IM pipeline via sidecar mock channel — InboundEnvelope → sidecar → eli → LLM → sidecar → mock plugin
+- **Sidecar test harness** — mock channel plugin + `/test/*` endpoints for end-to-end gateway testing
+- **Integration test rules** in CLAUDE.md — new features require CLI integration tests
+
+### Changed
+- **Agent module split** — monolithic `agent.rs` (1400+ lines) refactored into `agent_request`, `agent_run`, `agent_command` modules
+
+---
+
 ## [0.3.1] — 2026-03-25
 
 eli 0.3.1 · conduit 0.6.1

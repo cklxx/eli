@@ -29,7 +29,7 @@ eli> /quit
 | **Binary** | Single static binary | pip install + deps | pip install + deps | pip install + deps |
 | **Architecture** | Hook pipeline (12 points) | Chain/graph | Role-based crew | Multi-agent conversation |
 | **Extensibility** | Last-registered-wins hooks | Callbacks + chains | Custom agents | Custom agents |
-| **Channels** | CLI, Telegram, Feishu, Slack, Discord | None (library) | None (library) | None (library) |
+| **Channels** | CLI, Telegram, Feishu, WeChat, Slack, Discord | None (library) | None (library) | None (library) |
 | **Memory** | Tape (append-only, forkable) | Various memory classes | Shared memory | Chat history |
 | **Deploy** | `cargo install` or Docker | Python environment | Python environment | Python environment |
 
@@ -52,7 +52,7 @@ eli gateway                 # multi-channel listener
 ## Features
 
 - **Hook-based pipeline** — 12 hook points, last-registered-wins. Builtins register first, your plugins override
-- **Multi-channel** — CLI REPL, Telegram bot, Feishu/DingTalk/Discord/Slack via OpenClaw sidecar
+- **Multi-channel** — CLI REPL, Telegram bot, Feishu/WeChat/DingTalk/Discord/Slack via OpenClaw sidecar
 - **Provider-agnostic LLM** — OpenAI, Anthropic Claude, GitHub Copilot, DeepSeek, Ollama, custom endpoints
 - **21 builtin tools** — shell, filesystem, web fetch, subagent, tape operations, decisions
 - **Skills** — Markdown-defined capabilities (`SKILL.md`) with project/global precedence
@@ -80,7 +80,7 @@ eli gateway                 # multi-channel listener
 # Telegram
 ELI_TELEGRAM_TOKEN=xxx eli gateway
 
-# Feishu / DingTalk / Discord (via OpenClaw sidecar — auto-starts)
+# Feishu / WeChat / DingTalk / Discord (via OpenClaw sidecar — auto-starts)
 eli gateway
 ```
 
@@ -101,8 +101,8 @@ The sidecar launches a Node.js bridge that loads any OpenClaw channel plugin. Fi
 
 | Crate | Version | Role |
 |-------|---------|------|
-| **conduit** | 0.6.0 | Provider-agnostic LLM toolkit — streaming, tool calls, tape storage, embeddings, OAuth |
-| **eli** | 0.3.0 | Hook-first agent framework — pipeline, channels, tools, skills, decisions |
+| **conduit** | 0.6.2 | Provider-agnostic LLM toolkit — streaming, tool calls, tape storage, embeddings, OAuth |
+| **eli** | 0.3.2 | Hook-first agent framework — pipeline, channels, tools, skills, decisions |
 | **eli-sidecar** | 0.2.0 | Node.js bridge — loads OpenClaw plugins, exposes channels + tools over HTTP or MCP |
 
 ## Configuration
