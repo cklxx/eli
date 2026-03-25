@@ -423,7 +423,17 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
 
                                 let channel = match chs.get(out_ch) {
                                     Some(ch) => ch.clone(),
-                                    None => continue,
+                                    None => {
+                                        // Fallback: try `channel` field when output_channel doesn't match
+                                        let fallback = outbound
+                                            .get("channel")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        match chs.get(fallback) {
+                                            Some(ch) => ch.clone(),
+                                            None => continue,
+                                        }
+                                    }
                                 };
 
                                 let content = super::outbound_string_field(outbound, "content");

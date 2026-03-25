@@ -476,7 +476,6 @@ fn build_channel_message(
         .with_chat_id(&chat_id)
         .with_is_active(is_active)
         .with_media(media_items)
-        .with_output_channel("null")
         .finalize()
 }
 
