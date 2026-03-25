@@ -118,7 +118,10 @@ fn str_field_of<'a>(message: &'a Envelope, key: &'a str) -> Option<&'a str> {
 }
 
 #[cfg(test)]
-fn required_str_field_of<'a>(message: &'a Envelope, key: &'a str) -> Result<&'a str, anyhow::Error> {
+fn required_str_field_of<'a>(
+    message: &'a Envelope,
+    key: &'a str,
+) -> Result<&'a str, anyhow::Error> {
     message.require_str_field(key)
 }
 
