@@ -5,7 +5,7 @@ mod vision;
 use std::env;
 use std::time::Duration;
 
-use conduit::{ApiFormat, LLMBuilder};
+use conduit::{ApiFormat, LLM, LLMBuilder};
 
 // ---------------------------------------------------------------------------
 // Provider matrix
@@ -14,23 +14,34 @@ use conduit::{ApiFormat, LLMBuilder};
 pub struct TestProvider {
     pub name: &'static str,
     pub model: &'static str,
-    pub env_key: &'static str,
+    pub key_names: &'static [&'static str],
     pub api_format: Option<ApiFormat>,
+}
+
+/// Resolve an API key by trying multiple env var names in order.
+fn resolve_key(names: &[&str]) -> Option<String> {
+    let _ = dotenvy::dotenv();
+    for name in names {
+        if let Ok(val) = env::var(name) {
+            if !val.is_empty() {
+                return Some(val);
+            }
+        }
+    }
+    None
 }
 
 /// Try to build an OpenAI test provider.  Returns `None` when the key is absent.
 pub fn openai_provider() -> Option<TestProvider> {
-    let _ = dotenvy::dotenv();
-    let key = env::var("ELI_OPENAI_API_KEY")
-        .or_else(|_| env::var("ELI_API_KEY"))
-        .ok()?;
-    if key.is_empty() {
-        return None;
-    }
+    resolve_key(&[
+        "ELI_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+        "ELI_API_KEY",
+    ])?;
     Some(TestProvider {
         name: "openai",
         model: "gpt-4o-mini",
-        env_key: "ELI_OPENAI_API_KEY",
+        key_names: &["ELI_OPENAI_API_KEY", "OPENAI_API_KEY", "ELI_API_KEY"],
         // Responses transport silently drops multimodal content — force Completion.
         api_format: Some(ApiFormat::Completion),
     })
@@ -38,15 +49,14 @@ pub fn openai_provider() -> Option<TestProvider> {
 
 /// Try to build an Anthropic test provider.  Returns `None` when the key is absent.
 pub fn anthropic_provider() -> Option<TestProvider> {
-    let _ = dotenvy::dotenv();
-    let key = env::var("ELI_ANTHROPIC_API_KEY").ok()?;
-    if key.is_empty() {
-        return None;
-    }
+    resolve_key(&[
+        "ELI_ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEY",
+    ])?;
     Some(TestProvider {
         name: "anthropic",
         model: "claude-haiku-3-5-20241022",
-        env_key: "ELI_ANTHROPIC_API_KEY",
+        key_names: &["ELI_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
         api_format: None, // Auto → Messages (correct for Anthropic)
     })
 }
@@ -56,9 +66,7 @@ pub fn anthropic_provider() -> Option<TestProvider> {
 // ---------------------------------------------------------------------------
 
 pub fn build_llm(provider: &TestProvider) -> LLM {
-    let _ = dotenvy::dotenv();
-    let key = env::var(provider.env_key)
-        .or_else(|_| env::var("ELI_API_KEY"))
+    let key = resolve_key(provider.key_names)
         .expect("API key must be set (checked before calling build_llm)");
 
     let model_str = format!("{}:{}", provider.name, provider.model);
@@ -79,11 +87,9 @@ pub fn build_llm(provider: &TestProvider) -> LLM {
 // Image fixtures — 8×8 solid-color PNGs, base64-encoded
 // ---------------------------------------------------------------------------
 
-pub const RED_PNG_BASE64: &str =
-    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGP4z8CAFWEXHbQSACj/P8Fu7N9hAAAAAElFTkSuQmCC";
+pub const RED_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGP4z8CAFWEXHbQSACj/P8Fu7N9hAAAAAElFTkSuQmCC";
 
-pub const BLUE_PNG_BASE64: &str =
-    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg==";
+pub const BLUE_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg==";
 
 // ---------------------------------------------------------------------------
 // Assertion helpers
