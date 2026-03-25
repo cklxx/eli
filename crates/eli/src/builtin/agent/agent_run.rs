@@ -576,4 +576,154 @@ mod tests {
         })
         .await;
     }
+
+    #[tokio::test]
+    async fn test_extract_outbound_media_from_tool_results() {
+        use crate::control_plane::drain_outbound_media;
+
+        // Create a real temp file so path.exists() passes.
+        let tmp = tempfile::NamedTempFile::with_suffix(".png").unwrap();
+        let path = tmp.path().to_str().unwrap().to_owned();
+
+        with_turn_context(test_turn_context(), async {
+            let results = vec![serde_json::json!({
+                "success": true,
+                "image_path": path,
+            })];
+            extract_outbound_media(&results);
+
+            let media = drain_outbound_media();
+            assert_eq!(media.len(), 1);
+            assert_eq!(media[0].path, path);
+            assert_eq!(media[0].media_type, "image");
+            assert_eq!(media[0].mime_type, "image/png");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_extract_outbound_media_ignores_failed_results() {
+        use crate::control_plane::drain_outbound_media;
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".png").unwrap();
+        let path = tmp.path().to_str().unwrap().to_owned();
+
+        with_turn_context(test_turn_context(), async {
+            let results = vec![serde_json::json!({
+                "success": false,
+                "image_path": path,
+            })];
+            extract_outbound_media(&results);
+
+            assert!(
+                drain_outbound_media().is_empty(),
+                "failed results must be ignored"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_extract_outbound_media_ignores_missing_files() {
+        use crate::control_plane::drain_outbound_media;
+
+        with_turn_context(test_turn_context(), async {
+            let results = vec![serde_json::json!({
+                "success": true,
+                "image_path": "/tmp/nonexistent_file_12345.png",
+            })];
+            extract_outbound_media(&results);
+
+            assert!(
+                drain_outbound_media().is_empty(),
+                "non-existent files must be skipped"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_extract_outbound_media_handles_path_key() {
+        use crate::control_plane::drain_outbound_media;
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".mp4").unwrap();
+        let path = tmp.path().to_str().unwrap().to_owned();
+
+        with_turn_context(test_turn_context(), async {
+            let results = vec![serde_json::json!({
+                "success": true,
+                "path": path,
+            })];
+            extract_outbound_media(&results);
+
+            let media = drain_outbound_media();
+            assert_eq!(media.len(), 1);
+            assert_eq!(media[0].media_type, "video");
+            assert_eq!(media[0].mime_type, "video/mp4");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_extract_outbound_media_from_stringified_json() {
+        use crate::control_plane::drain_outbound_media;
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".jpg").unwrap();
+        let path = tmp.path().to_str().unwrap().to_owned();
+
+        with_turn_context(test_turn_context(), async {
+            // Tool results can be stringified JSON.
+            let results = vec![Value::String(
+                serde_json::to_string(&serde_json::json!({
+                    "success": true,
+                    "image_path": path,
+                }))
+                .unwrap(),
+            )];
+            extract_outbound_media(&results);
+
+            let media = drain_outbound_media();
+            assert_eq!(media.len(), 1);
+            assert_eq!(media[0].mime_type, "image/jpeg");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_process_agent_result_extracts_media() {
+        use crate::control_plane::drain_outbound_media;
+
+        let (_tmp_dir, tapes) = make_tape_service();
+        let tape_name = "test_media_tape";
+        tapes.ensure_bootstrap_anchor(tape_name).await.unwrap();
+
+        // Create a real temp file.
+        let tmp = tempfile::NamedTempFile::with_suffix(".png").unwrap();
+        let path = tmp.path().to_str().unwrap().to_owned();
+
+        with_turn_context(test_turn_context(), async {
+            let result = Ok(ToolAutoResult {
+                kind: ToolAutoResultKind::Text,
+                text: Some("Generated an image".into()),
+                tool_calls: vec![],
+                tool_results: vec![serde_json::json!({
+                    "success": true,
+                    "image_path": path,
+                })],
+                error: None,
+                usage: make_usage(1000, 200),
+            });
+
+            let settings = AgentSettings::from_env();
+            let text = process_agent_result(&tapes, tape_name, result, 100, &settings)
+                .await
+                .unwrap();
+            assert_eq!(text, "Generated an image");
+
+            let media = drain_outbound_media();
+            assert_eq!(media.len(), 1, "media must be extracted from tool_results");
+            assert_eq!(media[0].path, path);
+        })
+        .await;
+    }
 }

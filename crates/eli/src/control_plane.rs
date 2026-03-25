@@ -322,4 +322,85 @@ mod tests {
         assert!(turn_cancellation().is_none());
         assert!(turn_wrap_tools().is_none());
     }
+
+    #[tokio::test]
+    async fn outbound_media_push_and_drain() {
+        let ctx = TurnContext {
+            cancellation: CancellationToken::new(),
+            wrap_tools: None,
+            usage: Default::default(),
+            save_events: Default::default(),
+            dispatch: None,
+            outbound_media: Default::default(),
+        };
+        with_turn_context(ctx, async {
+            push_outbound_media(OutboundMedia {
+                path: "/tmp/a.png".into(),
+                media_type: "image".into(),
+                mime_type: "image/png".into(),
+            });
+            push_outbound_media(OutboundMedia {
+                path: "/tmp/b.mp4".into(),
+                media_type: "video".into(),
+                mime_type: "video/mp4".into(),
+            });
+
+            let drained = drain_outbound_media();
+            assert_eq!(drained.len(), 2);
+            assert_eq!(drained[0].path, "/tmp/a.png");
+            assert_eq!(drained[1].path, "/tmp/b.mp4");
+
+            // Drain again — should be empty.
+            assert!(drain_outbound_media().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn outbound_media_drain_without_context_returns_empty() {
+        // No TurnContext set — drain should safely return empty vec.
+        assert!(drain_outbound_media().is_empty());
+    }
+
+    #[test]
+    fn mime_from_extension_known_types() {
+        assert_eq!(
+            mime_from_extension(std::path::Path::new("/tmp/photo.png")),
+            "image/png"
+        );
+        assert_eq!(
+            mime_from_extension(std::path::Path::new("file.jpg")),
+            "image/jpeg"
+        );
+        assert_eq!(
+            mime_from_extension(std::path::Path::new("video.mp4")),
+            "video/mp4"
+        );
+        assert_eq!(
+            mime_from_extension(std::path::Path::new("doc.pdf")),
+            "application/pdf"
+        );
+    }
+
+    #[test]
+    fn mime_from_extension_unknown_fallback() {
+        assert_eq!(
+            mime_from_extension(std::path::Path::new("file.xyz")),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            mime_from_extension(std::path::Path::new("noext")),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn media_type_from_mime_categorizes() {
+        assert_eq!(media_type_from_mime("image/png"), "image");
+        assert_eq!(media_type_from_mime("image/jpeg"), "image");
+        assert_eq!(media_type_from_mime("video/mp4"), "video");
+        assert_eq!(media_type_from_mime("audio/mpeg"), "audio");
+        assert_eq!(media_type_from_mime("application/pdf"), "document");
+        assert_eq!(media_type_from_mime("application/octet-stream"), "document");
+    }
 }

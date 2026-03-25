@@ -540,6 +540,249 @@ describe("tool execution", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Outbound media pipeline
+// ---------------------------------------------------------------------------
+
+describe("outbound media", () => {
+  it("calls sendMedia for each item in context.outbound_media", async () => {
+    let mediaCalls: Array<{ mediaPath: string; mediaType: string }> = [];
+    const mediaChannel: ChannelPlugin = {
+      meta: { id: "media-channel", label: "Media Channel" },
+      config: { listAccountIds: () => ["default"], resolveAccount: () => ({}) },
+      capabilities: { chatTypes: ["direct"] },
+      outbound: {
+        deliveryMode: "direct",
+        sendText: async ({ text, to, accountId }: any) => {
+          sentMessages.push({ text, chatId: to, accountId });
+          return { ok: true };
+        },
+        sendMedia: async (params: any) => {
+          mediaCalls.push({ mediaPath: params.mediaPath, mediaType: params.mediaType });
+          return { ok: true };
+        },
+      },
+    };
+    registry.channels.clear();
+    registry.registerChannel(mediaChannel);
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "media-channel:default:user_m",
+        channel: "webhook",
+        content: "Here is the image",
+        chat_id: "user_m",
+        context: {
+          source_channel: "media-channel",
+          account_id: "default",
+          outbound_media: [
+            { path: "/tmp/test.png", media_type: "image", mime_type: "image/png" },
+          ],
+        },
+        output_channel: "webhook",
+      }),
+    });
+
+    expect(resp.status).toBe(200);
+    // Text must be sent.
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0].text).toBe("Here is the image");
+
+    // Give fire-and-forget media a moment to dispatch.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mediaCalls).toHaveLength(1);
+    expect(mediaCalls[0].mediaPath).toBe("/tmp/test.png");
+    expect(mediaCalls[0].mediaType).toBe("image");
+  });
+
+  it("sends text even when no outbound_media present (backward compatible)", async () => {
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "mock-channel:default:user_compat",
+        channel: "webhook",
+        content: "Normal text reply",
+        chat_id: "user_compat",
+        context: {
+          source_channel: "mock-channel",
+          account_id: "default",
+        },
+        output_channel: "webhook",
+      }),
+    });
+
+    expect(resp.status).toBe(200);
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0].text).toBe("Normal text reply");
+  });
+
+  it("sendText errors still return 500 (not swallowed)", async () => {
+    const failChannel: ChannelPlugin = {
+      meta: { id: "fail-channel", label: "Fail Channel" },
+      config: { listAccountIds: () => ["default"], resolveAccount: () => ({}) },
+      capabilities: { chatTypes: ["direct"] },
+      outbound: {
+        deliveryMode: "direct",
+        sendText: async () => { throw new Error("sendText boom"); },
+      },
+    };
+    registry.channels.clear();
+    registry.registerChannel(failChannel);
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "fail-channel:default:user_err",
+        channel: "webhook",
+        content: "Will fail",
+        chat_id: "user_err",
+        context: {
+          source_channel: "fail-channel",
+          account_id: "default",
+        },
+        output_channel: "webhook",
+      }),
+    });
+
+    expect(resp.status).toBe(500);
+    const body = (await resp.json()) as any;
+    expect(body.error).toContain("sendText boom");
+  });
+
+  it("sendMedia failure does not block text delivery", async () => {
+    let mediaCalled = false;
+    const mixedChannel: ChannelPlugin = {
+      meta: { id: "mixed-channel", label: "Mixed Channel" },
+      config: { listAccountIds: () => ["default"], resolveAccount: () => ({}) },
+      capabilities: { chatTypes: ["direct"] },
+      outbound: {
+        deliveryMode: "direct",
+        sendText: async ({ text, to, accountId }: any) => {
+          sentMessages.push({ text, chatId: to, accountId });
+          return { ok: true };
+        },
+        sendMedia: async () => {
+          mediaCalled = true;
+          throw new Error("sendMedia boom");
+        },
+      },
+    };
+    registry.channels.clear();
+    registry.registerChannel(mixedChannel);
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "mixed-channel:default:user_mix",
+        channel: "webhook",
+        content: "Text should still arrive",
+        chat_id: "user_mix",
+        context: {
+          source_channel: "mixed-channel",
+          account_id: "default",
+          outbound_media: [
+            { path: "/tmp/broken.png", media_type: "image", mime_type: "image/png" },
+          ],
+        },
+        output_channel: "webhook",
+      }),
+    });
+
+    // Text must succeed with 200.
+    expect(resp.status).toBe(200);
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0].text).toBe("Text should still arrive");
+
+    // Media was attempted but failed — should not affect response.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mediaCalled).toBe(true);
+  });
+
+  it("skips sendMedia when channel does not support it", async () => {
+    // mock-channel has no sendMedia.
+    registry.channels.clear();
+    registry.registerChannel(mockChannel);
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "mock-channel:default:user_nosm",
+        channel: "webhook",
+        content: "Text with media in context",
+        chat_id: "user_nosm",
+        context: {
+          source_channel: "mock-channel",
+          account_id: "default",
+          outbound_media: [
+            { path: "/tmp/ignored.png", media_type: "image", mime_type: "image/png" },
+          ],
+        },
+        output_channel: "webhook",
+      }),
+    });
+
+    // Must still succeed — media is just ignored.
+    expect(resp.status).toBe(200);
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0].text).toBe("Text with media in context");
+  });
+
+  it("adapts params for feishu channel (mediaUrl instead of mediaPath)", async () => {
+    let feishuMediaParams: any = null;
+    const feishuChannel: ChannelPlugin = {
+      meta: { id: "openclaw-lark", label: "Feishu" },
+      config: { listAccountIds: () => ["default"], resolveAccount: () => ({}) },
+      capabilities: { chatTypes: ["direct"] },
+      outbound: {
+        deliveryMode: "direct",
+        sendText: async ({ text, to, accountId }: any) => {
+          sentMessages.push({ text, chatId: to, accountId });
+          return { ok: true };
+        },
+        sendMedia: async (params: any) => {
+          feishuMediaParams = params;
+          return { ok: true };
+        },
+      },
+    };
+    registry.channels.clear();
+    registry.registerChannel(feishuChannel);
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "openclaw-lark:default:user_fs",
+        channel: "webhook",
+        content: "Feishu reply with image",
+        chat_id: "user_fs",
+        context: {
+          source_channel: "openclaw-lark",
+          account_id: "default",
+          outbound_media: [
+            { path: "/tmp/feishu.png", media_type: "image", mime_type: "image/png" },
+          ],
+        },
+        output_channel: "webhook",
+      }),
+    });
+
+    expect(resp.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(feishuMediaParams).not.toBeNull();
+    // Feishu uses mediaUrl, not mediaPath.
+    expect(feishuMediaParams.mediaUrl).toBe("/tmp/feishu.png");
+    expect(feishuMediaParams.mediaLocalRoots).toEqual(["/tmp"]);
+    expect(feishuMediaParams.mediaPath).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Envelope conversion
 // ---------------------------------------------------------------------------
 

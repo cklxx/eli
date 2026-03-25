@@ -681,6 +681,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_render_outbound_attaches_outbound_media_from_turn_context() {
+        use crate::control_plane::{
+            OutboundMedia, TurnContext, push_outbound_media, with_turn_context,
+        };
+
+        let ctx = TurnContext {
+            cancellation: nexil::CancellationToken::new(),
+            wrap_tools: None,
+            usage: Default::default(),
+            save_events: Default::default(),
+            dispatch: None,
+            outbound_media: Default::default(),
+        };
+        with_turn_context(ctx, async {
+            // Simulate tool producing media during the turn.
+            push_outbound_media(OutboundMedia {
+                path: "/tmp/test_image.png".into(),
+                media_type: "image".into(),
+                mime_type: "image/png".into(),
+            });
+
+            let builtin = BuiltinImpl::new();
+            let message = ChannelMessage::new("s1", "webhook", "hello")
+                .with_chat_id("u1")
+                .finalize();
+
+            let outbounds = builtin.render_outbound(&message, "s1", "here is the image");
+
+            assert_eq!(outbounds.len(), 1);
+            assert_eq!(outbounds[0].content, "here is the image");
+
+            // Must have outbound_media in context.
+            let media = outbounds[0]
+                .context
+                .get("outbound_media")
+                .and_then(|v| v.as_array())
+                .expect("outbound_media must be present in context");
+            assert_eq!(media.len(), 1);
+            assert_eq!(media[0]["path"], "/tmp/test_image.png");
+            assert_eq!(media[0]["media_type"], "image");
+            assert_eq!(media[0]["mime_type"], "image/png");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_render_outbound_no_media_omits_outbound_media_key() {
+        use crate::control_plane::{TurnContext, with_turn_context};
+
+        let ctx = TurnContext {
+            cancellation: nexil::CancellationToken::new(),
+            wrap_tools: None,
+            usage: Default::default(),
+            save_events: Default::default(),
+            dispatch: None,
+            outbound_media: Default::default(),
+        };
+        with_turn_context(ctx, async {
+            let builtin = BuiltinImpl::new();
+            let message = ChannelMessage::new("s1", "webhook", "hello")
+                .with_chat_id("u1")
+                .finalize();
+
+            let outbounds = builtin.render_outbound(&message, "s1", "text only reply");
+
+            assert_eq!(outbounds.len(), 1);
+            assert_eq!(outbounds[0].content, "text only reply");
+            // No outbound_media key when no media was produced.
+            assert!(outbounds[0].context.get("outbound_media").is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_build_user_prompt_with_media_parts() {
         let builtin = BuiltinImpl::new();
         let envelope = serde_json::json!({
