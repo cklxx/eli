@@ -33,6 +33,10 @@ pub struct EliConfig {
     /// Named profiles mapping name -> provider+model.
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
+    /// Send tool description notices to the channel during the tool loop.
+    /// Default: false.
+    #[serde(default)]
+    pub tool_notices: bool,
 }
 
 impl EliConfig {

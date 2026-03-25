@@ -192,11 +192,7 @@ fn extract_notice_params<'a>(
     ctx: Option<&'a ToolContext>,
     args: &'a Value,
 ) -> Option<(&'a str, &'a str, String)> {
-    // Controlled by ELI_TOOL_NOTICES env var, default false.
-    if !std::env::var("ELI_TOOL_NOTICES")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
-    {
+    if !crate::builtin::config::EliConfig::load().tool_notices {
         return None;
     }
     let description = get_notice_description(args)?;
