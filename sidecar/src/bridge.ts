@@ -240,21 +240,13 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
         return;
       }
 
+      if (!cleanupOnly && !channelPlugin.outbound?.sendText) {
+        log.error("outbound: channel has no sendText", { channel: sourceChannel });
+        res.status(501).json({ error: `channel "${sourceChannel}" cannot send text` });
+        return;
+      }
       const sendText = channelPlugin.outbound?.sendText;
       const sendMedia = channelPlugin.outbound?.sendMedia;
-      const mediaItems: Array<{ path: string; media_type: string; mime_type: string }> =
-        Array.isArray(msg.context?.outbound_media) ? msg.context.outbound_media : [];
-
-      const hasText = !cleanupOnly && msg.content?.trim();
-      const hasMedia = !cleanupOnly && mediaItems.length > 0 && sendMedia;
-
-      if (!cleanupOnly && !hasText && !hasMedia) {
-        if (!sendText) {
-          log.error("outbound: channel has no sendText", { channel: sourceChannel });
-          res.status(501).json({ error: `channel "${sourceChannel}" cannot send text` });
-          return;
-        }
-      }
 
       try {
         // Build the cfg object in the shape OpenClaw plugins expect:
@@ -270,6 +262,9 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
             to = msg.context?.channel_target || msg.context?.feishu_to || chatId;
           }
         }
+
+        const mediaItems: Array<{ path: string; media_type: string; mime_type: string }> =
+          Array.isArray(msg.context?.outbound_media) ? msg.context.outbound_media : [];
 
         log.info("outbound", {
           channel: sourceChannel, to, account_id: accountId,
@@ -288,20 +283,22 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
           res.json({ ok: true, cleanup_only: true });
           return;
         }
-
-        // Fire text and media independently — "有什么发什么".
-        const promises: Promise<any>[] = [];
-
-        if (hasText && sendText) {
-          promises.push(
-            sendText({ cfg, to, text: msg.content, accountId })
-              .catch((err: any) => ({ ok: false, error: err?.message, kind: "text" }))
-          );
+        if (!sendText) {
+          res.status(501).json({ error: `channel "${sourceChannel}" cannot send text` });
+          return;
         }
 
-        if (hasMedia && sendMedia) {
+        // Send text — original path, errors propagate to caller.
+        const result = await sendText({
+          cfg,
+          to,
+          text: msg.content,
+          accountId,
+        });
+
+        // Send media independently — fire-and-forget, errors logged but don't fail the response.
+        if (mediaItems.length > 0 && sendMedia) {
           for (const item of mediaItems) {
-            // Adapt params per channel plugin.
             const isFeishu = sourceChannel === "openclaw-lark" || sourceChannel === "feishu";
             const mediaParams = isFeishu
               ? { cfg, to, text: undefined, mediaUrl: item.path, mediaLocalRoots: ["/tmp"], accountId }
@@ -313,33 +310,16 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
                   config: cfg,
                   accountId,
                 };
-            promises.push(
-              sendMedia(mediaParams as any)
-                .catch((err: any) => ({ ok: false, error: err?.message, kind: "media", path: item.path }))
-            );
+            sendMedia(mediaParams as any).catch((err: any) => {
+              log.error("outbound sendMedia error", { path: item.path, err: String(err) });
+            });
           }
         }
 
-        if (promises.length === 0) {
-          res.json({ ok: true });
-          return;
-        }
-
-        const results = await Promise.allSettled(promises);
-        const errors = results.filter(
-          (r) => r.status === "rejected" || (r.status === "fulfilled" && r.value?.ok === false)
-        );
-        if (errors.length > 0) {
-          log.error("outbound partial failure", { errors: errors.map((e) => e.status === "fulfilled" ? e.value : String((e as any).reason)) });
-        }
-
-        res.json({
-          ok: errors.length === 0,
-          results: results.map((r) => r.status === "fulfilled" ? r.value : { ok: false, error: String((r as any).reason) }),
-        });
+        res.json(result);
       } catch (err: any) {
-        log.error("outbound error", { err: String(err) });
-        res.status(500).json({ error: err.message ?? "outbound failed" });
+        log.error("outbound sendText error", { err: String(err) });
+        res.status(500).json({ error: err.message ?? "sendText failed" });
       }
     });
 
