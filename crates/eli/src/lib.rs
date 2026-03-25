@@ -5,6 +5,7 @@
 
 pub mod builtin;
 pub mod channels;
+pub mod control_plane;
 pub mod envelope;
 pub mod framework;
 pub mod hooks;

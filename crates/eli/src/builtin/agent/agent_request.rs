@@ -236,7 +236,6 @@ pub(super) async fn run_tools_once(
     settings: &AgentSettings,
     allowed_tools: Option<&HashSet<String>>,
     tape_context: Option<&TapeContext>,
-    wrap_tools_fn: Option<&(dyn Fn(Vec<Tool>) -> Vec<Tool> + Send + Sync)>,
 ) -> Result<ToolAutoResult, ConduitError> {
     let mut tools: Vec<Tool> = {
         let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
@@ -249,7 +248,9 @@ pub(super) async fn run_tools_once(
             reg.values().cloned().collect()
         }
     };
-    if let Some(wrap_fn) = wrap_tools_fn {
+
+    // Apply tool wrapping from the turn context (set by framework).
+    if let Some(wrap_fn) = crate::control_plane::turn_wrap_tools() {
         tools = wrap_fn(tools);
     }
 
@@ -268,6 +269,8 @@ pub(super) async fn run_tools_once(
 
     let tool_ctx = build_tool_context("agent_loop", tape_name, tool_state);
 
+    let cancellation = crate::control_plane::turn_cancellation();
+
     let result = llm
         .run_tools(ChatRequest {
             prompt: prompt_ref,
@@ -278,6 +281,7 @@ pub(super) async fn run_tools_once(
             tool_context: Some(&tool_ctx),
             tape: Some(tape_name),
             tape_context,
+            cancellation,
             ..Default::default()
         })
         .await?;

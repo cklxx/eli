@@ -369,7 +369,6 @@ pub(super) async fn agent_loop(
             settings,
             allowed_tools,
             tape_ctx_override.as_ref(),
-            None,
         ),
     )
     .await;

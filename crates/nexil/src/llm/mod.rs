@@ -30,6 +30,7 @@ use crate::tape::{
 use crate::tools::context::ToolContext;
 use crate::tools::executor::{ToolCallResponse, ToolExecutor};
 use crate::tools::schema::ToolSet;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -65,6 +66,9 @@ pub struct ChatRequest<'a> {
     pub tool_context: Option<&'a ToolContext>,
     pub tape: Option<&'a str>,
     pub tape_context: Option<&'a TapeContext>,
+    /// Optional cancellation token. When cancelled, `run_tools` returns partial
+    /// results at the next iteration boundary.
+    pub cancellation: Option<CancellationToken>,
 }
 
 // ---------------------------------------------------------------------------
@@ -621,6 +625,7 @@ impl LLM {
             tool_context: context,
             tape,
             tape_context,
+            cancellation,
         } = req;
         let tools = tools.ok_or_else(|| {
             ConduitError::new(ErrorKind::InvalidInput, "run_tools requires tools")
@@ -660,6 +665,19 @@ impl LLM {
 
         loop {
             iteration += 1;
+
+            if cancellation.as_ref().is_some_and(|t| t.is_cancelled()) {
+                tracing::info!(iteration, "run_tools cancelled");
+                return Ok(ToolAutoResult {
+                    kind: ToolAutoResultKind::Text,
+                    text: Some("[Cancelled]".to_owned()),
+                    tool_calls: all_tool_calls,
+                    tool_results: all_tool_results,
+                    error: None,
+                    usage: usage_events,
+                });
+            }
+
             if iteration > max_iterations {
                 return Err(ConduitError::new(
                     ErrorKind::Unknown,

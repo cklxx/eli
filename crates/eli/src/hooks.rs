@@ -310,6 +310,31 @@ impl HookRuntime {
         self.plugins.push(plugin);
     }
 
+    /// Return a closure that applies all plugins' `wrap_tool` hooks.
+    /// Captures a snapshot of the current plugin list.
+    pub fn wrap_tools_fn(&self) -> crate::control_plane::WrapToolsFn {
+        let plugins: Vec<Arc<dyn EliHookSpec>> = self.plugins.clone();
+        Arc::new(move |tools| {
+            let mut result = tools;
+            for plugin in &plugins {
+                result = result
+                    .into_iter()
+                    .filter_map(|tool| {
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            plugin.wrap_tool(&tool)
+                        })) {
+                            Ok(nexil::ToolAction::Keep) => Some(tool),
+                            Ok(nexil::ToolAction::Remove) => None,
+                            Ok(nexil::ToolAction::Replace(wrapped)) => Some(wrapped),
+                            Err(_) => Some(tool),
+                        }
+                    })
+                    .collect();
+            }
+            result
+        })
+    }
+
     /// Return an iterator over plugins in **reverse** registration order (last-registered first).
     fn reversed(&self) -> impl Iterator<Item = &Arc<dyn EliHookSpec>> {
         self.plugins.iter().rev()

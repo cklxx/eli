@@ -7,6 +7,9 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
+use nexil::CancellationToken;
+
+use crate::control_plane::{BudgetLedger, TurnContext, with_turn_context};
 use crate::envelope::{ValueExt, unpack_batch_vec};
 use crate::hooks::{ChannelHook, EliHookSpec, HookRuntime, TapeStoreKind};
 use crate::types::{
@@ -38,6 +41,8 @@ pub struct EliFramework {
     plugin_status: RwLock<HashMap<String, PluginStatus>>,
     /// Optional router for outbound message dispatch.
     outbound_router: RwLock<Option<Arc<dyn OutboundChannelRouter>>>,
+    /// Token budget ledger (control plane infrastructure).
+    pub budget: BudgetLedger,
 }
 
 impl EliFramework {
@@ -48,6 +53,7 @@ impl EliFramework {
             hook_runtime: RwLock::new(HookRuntime::new(Vec::new())),
             plugin_status: RwLock::new(HashMap::new()),
             outbound_router: RwLock::new(None),
+            budget: BudgetLedger::new(),
         }
     }
 
@@ -58,6 +64,7 @@ impl EliFramework {
             hook_runtime: RwLock::new(HookRuntime::new(Vec::new())),
             plugin_status: RwLock::new(HashMap::new()),
             outbound_router: RwLock::new(None),
+            budget: BudgetLedger::new(),
         }
     }
 
@@ -111,31 +118,40 @@ impl EliFramework {
             return Ok(result);
         }
 
-        let session_id = self.resolve_session_id(&rt, &inbound).await;
-        Self::inject_session_id(&mut inbound, &session_id);
+        // Build turn context: cancellation token + tool wrapping from hooks.
+        let turn_ctx = TurnContext {
+            cancellation: CancellationToken::new(),
+            wrap_tools: Some(rt.wrap_tools_fn()),
+        };
 
-        let state = self
-            .build_state(&rt, &inbound, &session_id, &workspace)
-            .await;
-        let prompt = Self::build_prompt(&rt, &inbound, &session_id, &state).await;
-        let model_output = Self::run_model(&rt, &prompt, &session_id, &state, &inbound).await;
+        with_turn_context(turn_ctx, async {
+            let session_id = self.resolve_session_id(&rt, &inbound).await;
+            Self::inject_session_id(&mut inbound, &session_id);
 
-        rt.call_save_state(&session_id, &state, &inbound, &model_output)
-            .await;
+            let state = self
+                .build_state(&rt, &inbound, &session_id, &workspace)
+                .await;
+            let prompt = Self::build_prompt(&rt, &inbound, &session_id, &state).await;
+            let model_output = Self::run_model(&rt, &prompt, &session_id, &state, &inbound).await;
 
-        let outbounds = self
-            .collect_outbounds(&rt, &inbound, &session_id, &state, &model_output)
-            .await;
-        for outbound in &outbounds {
-            rt.call_dispatch_outbound(outbound).await;
-        }
+            rt.call_save_state(&session_id, &state, &inbound, &model_output)
+                .await;
 
-        Ok(TurnResult {
-            session_id,
-            prompt,
-            model_output,
-            outbounds,
+            let outbounds = self
+                .collect_outbounds(&rt, &inbound, &session_id, &state, &model_output)
+                .await;
+            for outbound in &outbounds {
+                rt.call_dispatch_outbound(outbound).await;
+            }
+
+            Ok(TurnResult {
+                session_id,
+                prompt,
+                model_output,
+                outbounds,
+            })
         })
+        .await
     }
 
     fn strip_internal_context(inbound: &mut Envelope) {
