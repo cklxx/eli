@@ -31,6 +31,16 @@ dirs = "6"
 tokio-util = { version = "0.7", features = ["rt"] }
 open = "5"
 
+[[example]]
+name = "basic_chat"
+
+[[example]]
+name = "streaming"
+
 [dev-dependencies]
 tempfile = "3"
 dotenvy = "0.15"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
