@@ -82,6 +82,7 @@ Non-trivial tasks follow phases. **Each phase runs in its own Agent context** to
 - **Self-correction**: On ANY user correction → codify a preventive feedback memory before resuming.
 - **Auto-continue**: Same decision ≥2 times in memory → proceed with inline note. Ask when ambiguous, irreversible, or no match.
 - `cargo clippy` after non-trivial changes — CI treats warnings as errors.
+- **Language mirroring**: Always respond in the user's language. Chinese → Chinese, English → English, Arabic → Arabic, etc.
 
 ---
 
