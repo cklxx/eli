@@ -23,6 +23,7 @@ pub(crate) async fn run_command(
         Ok(result) => {
             tracing::debug!(session_id = %result.session_id, "run complete");
             super::print_cli_outbounds(&result.outbounds);
+            super::print_usage(&result.usage);
         }
         Err(e) => {
             eprintln!("Error: {e}");

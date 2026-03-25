@@ -20,10 +20,37 @@ tokio::task_local! {
     static TURN_CTX: TurnContext;
 }
 
+/// Per-turn usage accumulator (input, output tokens).
+#[derive(Clone, Default)]
+pub struct TurnUsage {
+    input: Arc<AtomicU64>,
+    output: Arc<AtomicU64>,
+}
+
+impl TurnUsage {
+    pub fn record(&self, input_tokens: u64, output_tokens: u64) {
+        self.input.fetch_add(input_tokens, Ordering::Relaxed);
+        self.output.fetch_add(output_tokens, Ordering::Relaxed);
+    }
+
+    pub fn input_tokens(&self) -> u64 {
+        self.input.load(Ordering::Relaxed)
+    }
+
+    pub fn output_tokens(&self) -> u64 {
+        self.output.load(Ordering::Relaxed)
+    }
+
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens() + self.output_tokens()
+    }
+}
+
 /// Per-turn context set by the framework, read by agent internals.
 pub struct TurnContext {
     pub cancellation: CancellationToken,
     pub wrap_tools: Option<WrapToolsFn>,
+    pub usage: TurnUsage,
 }
 
 /// Run `fut` with the given [`TurnContext`] bound to the current task.
@@ -37,6 +64,16 @@ where
 /// Read the cancellation token from the current turn, if any.
 pub fn turn_cancellation() -> Option<CancellationToken> {
     TURN_CTX.try_with(|ctx| ctx.cancellation.clone()).ok()
+}
+
+/// Read the usage accumulator from the current turn, if any.
+pub fn turn_usage() -> Option<TurnUsage> {
+    TURN_CTX.try_with(|ctx| ctx.usage.clone()).ok()
+}
+
+/// Record token usage into the current turn context.
+pub fn record_turn_usage(input_tokens: u64, output_tokens: u64) {
+    let _ = TURN_CTX.try_with(|ctx| ctx.usage.record(input_tokens, output_tokens));
 }
 
 /// Read the tool-wrapping function from the current turn, if any.
@@ -163,6 +200,7 @@ mod tests {
         let ctx = TurnContext {
             cancellation: token,
             wrap_tools: None,
+            usage: Default::default(),
         };
         let result = with_turn_context(ctx, async {
             let t = turn_cancellation().unwrap();

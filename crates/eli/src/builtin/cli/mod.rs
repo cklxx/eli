@@ -203,6 +203,15 @@ fn print_cli_outbounds(outbounds: &[Value]) {
     }
 }
 
+fn print_usage(usage: &crate::types::TurnUsageInfo) {
+    if usage.total_tokens > 0 {
+        eprintln!(
+            "\x1b[2m[tokens: {} in + {} out = {}]\x1b[0m",
+            usage.input_tokens, usage.output_tokens, usage.total_tokens,
+        );
+    }
+}
+
 fn outbound_string_field(outbound: &Value, key: &str) -> String {
     match outbound.get(key) {
         Some(Value::String(s)) => s.to_owned(),

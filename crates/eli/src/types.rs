@@ -32,6 +32,14 @@ pub trait OutboundChannelRouter: Send + Sync {
     async fn quit(&self, session_id: &str);
 }
 
+/// Token usage from a single turn.
+#[derive(Debug, Clone, Default)]
+pub struct TurnUsageInfo {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
+
 /// Result of one complete message turn through the framework.
 #[derive(Debug, Clone)]
 pub struct TurnResult {
@@ -39,6 +47,7 @@ pub struct TurnResult {
     pub prompt: PromptValue,
     pub model_output: String,
     pub outbounds: Vec<Envelope>,
+    pub usage: TurnUsageInfo,
 }
 
 /// A prompt can be plain text or a list of multimodal content parts.
@@ -118,6 +127,7 @@ mod tests {
             prompt: PromptValue::Text("hello".into()),
             model_output: "world".into(),
             outbounds: vec![json!({"content": "world"})],
+            usage: TurnUsageInfo::default(),
         };
         assert_eq!(result.session_id, "cli:default");
         assert_eq!(result.model_output, "world");
@@ -131,6 +141,7 @@ mod tests {
             prompt: PromptValue::Text("p".into()),
             model_output: "o".into(),
             outbounds: vec![],
+            usage: TurnUsageInfo::default(),
         };
         let cloned = result.clone();
         assert_eq!(cloned.session_id, "s1");

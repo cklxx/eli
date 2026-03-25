@@ -316,6 +316,8 @@ async fn record_run_event(
     let total_output: u64 = usage.iter().map(|u| u.output_tokens).sum();
     let total_tokens = total_input + total_output;
 
+    crate::control_plane::record_turn_usage(total_input, total_output);
+
     let mut event = serde_json::json!({
         "elapsed_ms": elapsed_ms,
         "status": status,

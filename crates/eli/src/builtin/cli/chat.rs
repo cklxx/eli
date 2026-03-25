@@ -42,7 +42,10 @@ pub(crate) async fn chat_command(
         });
 
         match framework.process_inbound(inbound).await {
-            Ok(result) => super::print_cli_outbounds(&result.outbounds),
+            Ok(result) => {
+                super::print_cli_outbounds(&result.outbounds);
+                super::print_usage(&result.usage);
+            }
             Err(e) => eprintln!("Error: {e}"),
         }
     }

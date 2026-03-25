@@ -9,11 +9,11 @@ use tokio::sync::RwLock;
 
 use nexil::CancellationToken;
 
-use crate::control_plane::{BudgetLedger, TurnContext, with_turn_context};
+use crate::control_plane::{BudgetLedger, TurnContext, turn_usage, with_turn_context};
 use crate::envelope::{ValueExt, unpack_batch_vec};
 use crate::hooks::{ChannelHook, EliHookSpec, HookRuntime, TapeStoreKind};
 use crate::types::{
-    Envelope, MessageHandler, OutboundChannelRouter, PromptValue, State, TurnResult,
+    Envelope, MessageHandler, OutboundChannelRouter, PromptValue, State, TurnResult, TurnUsageInfo,
 };
 
 // ---------------------------------------------------------------------------
@@ -122,6 +122,7 @@ impl EliFramework {
         let turn_ctx = TurnContext {
             cancellation: CancellationToken::new(),
             wrap_tools: Some(rt.wrap_tools_fn()),
+            usage: Default::default(),
         };
 
         with_turn_context(turn_ctx, async {
@@ -144,11 +145,20 @@ impl EliFramework {
                 rt.call_dispatch_outbound(outbound).await;
             }
 
+            let usage = turn_usage()
+                .map(|u| TurnUsageInfo {
+                    input_tokens: u.input_tokens(),
+                    output_tokens: u.output_tokens(),
+                    total_tokens: u.total_tokens(),
+                })
+                .unwrap_or_default();
+
             Ok(TurnResult {
                 session_id,
                 prompt,
                 model_output,
                 outbounds,
+                usage,
             })
         })
         .await
@@ -184,6 +194,7 @@ impl EliFramework {
             prompt: PromptValue::Text(String::new()),
             model_output: reply.clone(),
             outbounds: vec![outbound],
+            usage: TurnUsageInfo::default(),
         })
     }
 
