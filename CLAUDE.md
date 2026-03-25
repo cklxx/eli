@@ -124,6 +124,24 @@ eli run "prompt"            # one-shot
 eli gateway                 # channel listener (Telegram)
 ```
 
+### Integration Tests (Python)
+
+```bash
+python3 -m pytest tests/ -v              # all integration tests (requires API keys)
+python3 -m pytest tests/test_basic.py -v # basic: smoke, text chat, provider switch
+python3 -m pytest tests/test_vision.py -v # vision: multimodal image tests
+```
+
+**Prerequisites:** `eli` binary in PATH, authenticated providers (`eli login`).
+
+**Rules:**
+- Tests hit **real LLM APIs** — they cost money and take time (~1min for vision suite).
+- Each test switches provider explicitly via `eli use <profile>` — no shared state.
+- Vision tests write temp PNG files, reference them in prompts, and verify the model describes the correct color.
+- Assertions are fuzzy (keyword lists, not exact match) because LLM output is nondeterministic.
+- Add new tests in `tests/test_<feature>.py`. Use `conftest.py` helpers (`run_eli`, `switch_profile`, `assert_response_contains`).
+- **New feature = new integration test.** Every user-facing capability should have a CLI test that exercises the real API path.
+
 ---
 
 ## Key References
