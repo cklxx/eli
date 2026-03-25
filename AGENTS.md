@@ -63,7 +63,7 @@ No wrapper structs for one field. No builders unless >4 params. Transform pipeli
 | Trigger | Load |
 |---|---|
 | Non-trivial staged execution | CLAUDE.md Execution Workflow; create `docs/plans/*` |
-| Architecture boundaries (`crates/**`) | Architecture section in CLAUDE.md + key references |
+| Architecture boundaries (`crates/**`) | Architecture section in CLAUDE.md + key references + `docs/rust-conventions.md` |
 | Hook/trait changes | List all implementors, mark blast radius before editing |
 | Memory/history retrieval | Auto memory + `docs/experience/` summaries first |
 | Large mechanical edits | Agent tool: explore → plan → execute → review, max 2 retries |
@@ -106,4 +106,4 @@ No trigger → do not load.
 
 ## 6. Detail Sources (trigger-gated only)
 
-`CLAUDE.md` · `docs/plans/` · `docs/experience/errors/` · `docs/experience/wins/`
+`CLAUDE.md` · `docs/rust-conventions.md` · `docs/plans/` · `docs/experience/errors/` · `docs/experience/wins/`

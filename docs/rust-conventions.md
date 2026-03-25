@@ -634,3 +634,318 @@ cargo fmt --all -- --check
 ```
 
 All must pass before moving to the next module.
+
+---
+
+## 7. Advanced Patterns
+
+### 7.1 Tower-Style Middleware — Composable Async Layers
+
+Wrap services with generic middleware. Each layer adds one concern (timeout, logging, retry) without coupling.
+
+```rust
+use std::task::{Context, Poll};
+use std::time::Duration;
+use tower::Service;
+
+struct Timeout<S> {
+    inner: S,
+    duration: Duration,
+}
+
+impl<S, Req> Service<Req> for Timeout<S>
+where
+    S: Service<Req>,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    type Response = S::Response;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+    type Future = TimeoutFuture<S::Future>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx).map_err(Into::into)
+    }
+
+    fn call(&mut self, req: Req) -> Self::Future {
+        TimeoutFuture {
+            inner: self.inner.call(req),
+            sleep: tokio::time::sleep(self.duration),
+        }
+    }
+}
+
+// Stack layers: Timeout<Retry<RateLimit<MyService>>>
+// Each layer is independent, testable, reusable.
+```
+
+**Rule**: One concern per layer. Compose via wrapping, not inheritance.
+
+### 7.2 GATs — Lifetime-Bound Associated Types
+
+Generic Associated Types enable zero-allocation lending patterns.
+
+```rust
+trait LendingIterator {
+    type Item<'a> where Self: 'a;
+    fn next(&mut self) -> Option<Self::Item<'_>>;
+}
+
+// Zero-copy CSV parser: yields borrowed slices from internal buffer
+struct CsvParser<'input> {
+    remaining: &'input str,
+}
+
+impl<'input> LendingIterator for CsvParser<'input> {
+    type Item<'a> = &'a str where 'input: 'a;
+
+    fn next(&mut self) -> Option<Self::Item<'_>> {
+        let (field, rest) = self.remaining.split_once(',')?;
+        self.remaining = rest;
+        Some(field)
+    }
+}
+
+// Pre-GATs this required boxing or collecting into Vec.
+```
+
+**Use when**: Iterator items borrow from the iterator itself. Avoids allocation.
+
+### 7.3 Arena Allocation — Batch Allocate, Single Free
+
+Pre-allocate a region. Bump-allocate many objects. Free all at once when the arena drops.
+
+```rust
+use bumpalo::Bump;
+
+fn parse_document(input: &str) -> Vec<&Node> {
+    let arena = Bump::new();
+
+    // Thousands of small allocations — O(1) each, no individual frees
+    let nodes: Vec<&Node> = input.lines()
+        .map(|line| arena.alloc(parse_node(line)))
+        .collect();
+
+    process(&nodes);
+    nodes
+    // arena drops here — single deallocation for all nodes
+}
+```
+
+**Use when**: Many short-lived objects with shared lifetime (compilers, parsers, per-request state).
+**Don't use**: Long-lived objects with independent lifetimes.
+
+### 7.4 Lock-Free Atomics — Wait-Free Progress
+
+Atomic CAS loops for high-contention counters and flags. No mutex, no blocking.
+
+```rust
+use std::sync::atomic::{AtomicU64, Ordering};
+
+struct Stats {
+    requests: AtomicU64,
+    errors: AtomicU64,
+}
+
+impl Stats {
+    fn record_request(&self) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_error(&self) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> (u64, u64) {
+        // Acquire ensures we see all prior writes
+        let req = self.requests.load(Ordering::Acquire);
+        let err = self.errors.load(Ordering::Acquire);
+        (req, err)
+    }
+}
+
+// Ordering cheat sheet:
+// Relaxed  — atomicity only, fastest (counters, flags)
+// Acquire  — see all writes before the paired Release
+// Release  — make all prior writes visible to Acquire readers
+// SeqCst   — total order, slowest (rarely needed)
+```
+
+**Rule**: `Relaxed` for independent counters. `Acquire`/`Release` pairs for synchronization. `SeqCst` only when total ordering is required.
+
+### 7.5 Pin + pin_project — Safe Self-Referential Futures
+
+Use `pin_project` crate to safely project pinned fields. Never write raw `Pin::new_unchecked`.
+
+```rust
+use pin_project::pin_project;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+#[pin_project]
+struct TimedFuture<F> {
+    start: std::time::Instant,
+    #[pin]  // pinned: cannot move after first poll
+    inner: F,
+}
+
+impl<F: Future> Future for TimedFuture<F> {
+    type Output = (F::Output, std::time::Duration);
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();  // safe pin projection
+        match this.inner.poll(cx) {
+            Poll::Ready(output) => {
+                Poll::Ready((output, this.start.elapsed()))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+```
+
+**Rule**: `#[pin]` on fields that are `!Unpin` (futures, streams). Use `pin_project` — never raw unsafe pinning.
+
+### 7.6 Const Generics — Compile-Time Parameterization
+
+Types parameterized by constant values. Zero-cost, no heap.
+
+```rust
+struct RingBuffer<T, const N: usize> {
+    data: [Option<T>; N],
+    head: usize,
+    len: usize,
+}
+
+impl<T, const N: usize> RingBuffer<T, N> {
+    const fn new() -> Self
+    where
+        T: Copy,
+    {
+        RingBuffer {
+            data: [None; N],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, item: T) {
+        let idx = (self.head + self.len) % N;
+        self.data[idx] = Some(item);
+        if self.len < N { self.len += 1; }
+        else { self.head = (self.head + 1) % N; }
+    }
+}
+
+// Different sizes = different types, checked at compile time
+let small: RingBuffer<u8, 16> = RingBuffer::new();
+let large: RingBuffer<u8, 4096> = RingBuffer::new();
+```
+
+**Use when**: Fixed-size containers, compile-time feature flags, dimensional analysis.
+
+### 7.7 Phantom Types — Zero-Cost Type Tags
+
+Tag types with metadata that exists only at compile time. Zero runtime cost.
+
+```rust
+use std::marker::PhantomData;
+
+struct Meters;
+struct Seconds;
+
+struct Quantity<Unit> {
+    value: f64,
+    _unit: PhantomData<Unit>,
+}
+
+impl<U> Quantity<U> {
+    fn new(value: f64) -> Self {
+        Quantity { value, _unit: PhantomData }
+    }
+}
+
+// Type-safe operations
+fn speed(distance: Quantity<Meters>, time: Quantity<Seconds>) -> f64 {
+    distance.value / time.value
+}
+
+let d = Quantity::<Meters>::new(100.0);
+let t = Quantity::<Seconds>::new(9.58);
+let v = speed(d, t);
+
+// speed(t, d) → compile error: expected Meters, got Seconds
+```
+
+**Beyond typestate**: Phantom types tag units, permissions, ownership, format — any compile-time distinction.
+
+### 7.8 Procedural Macros — Compile-Time Code Generation
+
+Derive macros eliminate boilerplate. Use `syn` + `quote` for robust codegen.
+
+```rust
+// In a proc-macro crate
+use proc_macro::TokenStream;
+use quote::quote;
+use syn::{parse_macro_input, DeriveInput, Data, Fields};
+
+#[proc_macro_derive(Validate)]
+pub fn derive_validate(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+
+    let validations = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => fields.named.iter().map(|f| {
+                let field_name = &f.ident;
+                quote! {
+                    if self.#field_name.is_empty() {
+                        errors.push(format!("{} is empty", stringify!(#field_name)));
+                    }
+                }
+            }).collect::<Vec<_>>(),
+            _ => vec![],
+        },
+        _ => vec![],
+    };
+
+    let expanded = quote! {
+        impl #name {
+            pub fn validate(&self) -> Result<(), Vec<String>> {
+                let mut errors = Vec::new();
+                #(#validations)*
+                if errors.is_empty() { Ok(()) } else { Err(errors) }
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+// Usage:
+// #[derive(Validate)]
+// struct User { name: String, email: String }
+// user.validate()?;
+```
+
+**Rule**: Prefer derive macros over attribute macros. Keep generated code inspectable (`cargo expand`).
+
+---
+
+## Pattern Selection Guide
+
+| Problem | Pattern | Section |
+|---------|---------|---------|
+| Sequential API constraints | Typestate | 1.1 |
+| Methods on foreign types | Extension trait | 1.2 |
+| Raw string IDs getting mixed up | Newtype | 1.4 |
+| Runtime validation repeated everywhere | Parse, don't validate | 5.2 |
+| Optional fields that are mutually exclusive | Enum variants | 5.3 |
+| Composable async middleware | Tower Service | 7.1 |
+| Zero-copy iteration | GATs / LendingIterator | 7.2 |
+| Many short-lived allocations | Arena | 7.3 |
+| High-contention counters | Lock-free atomics | 7.4 |
+| Custom futures / self-ref types | Pin + pin_project | 7.5 |
+| Fixed-size containers | Const generics | 7.6 |
+| Compile-time unit/tag safety | Phantom types | 7.7 |
+| Boilerplate elimination | Proc macros | 7.8 |

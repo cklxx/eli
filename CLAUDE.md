@@ -146,7 +146,7 @@ python3 -m pytest tests/test_vision.py -v # vision: multimodal image tests
 
 ## Key References
 
-[Turn pipeline](crates/eli/src/framework.rs) · [Hook contract](crates/eli/src/hooks.rs) · [Builtin plugins](crates/eli/src/builtin/) · [LLM client](crates/conduit/src/llm.rs) · [Channel trait](crates/eli/src/channels/base.rs)
+[Turn pipeline](crates/eli/src/framework.rs) · [Hook contract](crates/eli/src/hooks.rs) · [Builtin plugins](crates/eli/src/builtin/) · [LLM client](crates/conduit/src/llm.rs) · [Channel trait](crates/eli/src/channels/base.rs) · [Rust coding conventions](docs/rust-conventions.md)
 
 ---
 
@@ -168,7 +168,7 @@ Every stage is a hook (`EliHookSpec`, 12 points). Builtins register first. **Las
 
 ## Patterns
 
-- **Envelope** = `serde_json::Value`. Helpers: `field_of`, `content_of`, `normalize_envelope` in `envelope.rs`.
+- **Envelope** = `serde_json::Value`. Helpers via `ValueExt` trait: `.field()`, `.content_text()`, `.normalize_envelope()` in `envelope.rs`.
 - **Channels**: `Channel` trait → CLI + Telegram. Shared `InboundProcessor` path. `ChannelManager` handles debounce and shutdown.
 - **Tools**: dot-named (`fs.read`), underscores for LLM APIs. Global `REGISTRY`.
 - **Skills**: `SKILL.md` with YAML frontmatter. Precedence: project > global > builtin.
