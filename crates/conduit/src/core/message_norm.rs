@@ -121,20 +121,47 @@ pub(crate) fn prune_orphan_tool_messages(messages: Vec<Value>) -> Vec<Value> {
             }
         }
 
-        if role == "assistant"
-            && let Some(calls) = msg.get("tool_calls").and_then(|c| c.as_array())
-        {
-            // Check if ALL tool_calls have matching results
-            let all_have_results = calls.iter().all(|call| {
-                call.get("id")
-                    .and_then(|v| v.as_str())
-                    .map(|id| tool_result_ids.contains(id))
-                    .unwrap_or(false)
-            });
-            if !all_have_results && !calls.is_empty() {
-                // Drop assistant message with orphan tool_calls
+        if role == "assistant" && msg.get("tool_calls").and_then(|c| c.as_array()).is_some() {
+            let mut msg = msg;
+            let obj = msg.as_object_mut().unwrap();
+            let calls = obj
+                .get("tool_calls")
+                .and_then(|c| c.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            // Keep only tool_calls that have a matching tool result
+            let valid_calls: Vec<Value> = calls
+                .into_iter()
+                .filter(|call| {
+                    call.get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|id| tool_result_ids.contains(id))
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            let has_text = obj
+                .get("content")
+                .map(|c| {
+                    c.as_str().map(|s| !s.is_empty()).unwrap_or(false)
+                        || c.as_array().map(|a| !a.is_empty()).unwrap_or(false)
+                })
+                .unwrap_or(false);
+
+            if valid_calls.is_empty() && !has_text {
+                // No valid tool_calls and no text content → drop entirely
                 continue;
+            } else if valid_calls.is_empty() {
+                // Text content exists but no valid tool_calls → remove tool_calls key
+                obj.remove("tool_calls");
+            } else {
+                // Update tool_calls to only the valid ones
+                obj.insert("tool_calls".to_owned(), Value::Array(valid_calls));
             }
+
+            filtered.push(msg);
+            continue;
         }
 
         filtered.push(msg);

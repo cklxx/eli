@@ -297,7 +297,15 @@ impl TapeStore for InMemoryTapeStore {
         );
 
         let mut tapes = self.tapes.write().unwrap_or_else(|e| e.into_inner());
-        tapes.entry(tape.into()).or_default().push(stored);
+        let entries = tapes.entry(tape.into()).or_default();
+        entries.push(stored);
+
+        const MAX_ENTRIES_PER_TAPE: usize = 10_000;
+        if entries.len() > MAX_ENTRIES_PER_TAPE {
+            let excess = entries.len() - MAX_ENTRIES_PER_TAPE;
+            entries.drain(..excess);
+        }
+
         Ok(())
     }
 }

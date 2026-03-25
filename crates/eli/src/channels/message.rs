@@ -207,12 +207,9 @@ impl ChannelMessage {
     /// Uses the *last* message as the template; content is newline-joined and
     /// media items are concatenated.
     ///
-    /// # Panics
-    ///
-    /// Panics when `batch` is empty.
-    pub fn from_batch(batch: &[ChannelMessage]) -> ChannelMessage {
-        assert!(!batch.is_empty(), "batch cannot be empty");
-        let template = batch.last().unwrap();
+    /// Returns `None` when `batch` is empty.
+    pub fn from_batch(batch: &[ChannelMessage]) -> Option<ChannelMessage> {
+        let template = batch.last()?;
         let content = batch
             .iter()
             .map(|m| m.content.as_str())
@@ -223,7 +220,7 @@ impl ChannelMessage {
         let mut merged = template.clone();
         merged.content = content;
         merged.media = media;
-        merged
+        Some(merged)
     }
 }
 
@@ -310,7 +307,7 @@ mod tests {
     #[test]
     fn test_from_batch_single() {
         let msg = ChannelMessage::new("s1", "telegram", "hello");
-        let merged = ChannelMessage::from_batch(&[msg]);
+        let merged = ChannelMessage::from_batch(&[msg]).unwrap();
         assert_eq!(merged.content, "hello");
         assert_eq!(merged.channel, "telegram");
     }
@@ -319,16 +316,15 @@ mod tests {
     fn test_from_batch_multiple_joins_content() {
         let m1 = ChannelMessage::new("s1", "telegram", "line1");
         let m2 = ChannelMessage::new("s1", "telegram", "line2");
-        let merged = ChannelMessage::from_batch(&[m1, m2]);
+        let merged = ChannelMessage::from_batch(&[m1, m2]).unwrap();
         assert_eq!(merged.content, "line1\nline2");
         // Template is the last message
         assert_eq!(merged.channel, "telegram");
     }
 
     #[test]
-    #[should_panic(expected = "batch cannot be empty")]
-    fn test_from_batch_empty_panics() {
-        let _merged = ChannelMessage::from_batch(&[]);
+    fn test_from_batch_empty_returns_none() {
+        assert!(ChannelMessage::from_batch(&[]).is_none());
     }
 
     #[test]

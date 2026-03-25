@@ -365,42 +365,19 @@ impl ChannelManager {
             let task_id_clean = task_id;
             let session_id_clean = session_id;
             tokio::spawn(async move {
-                // Wait for the handle to be inserted, then poll until it completes.
-                loop {
-                    let maybe_handle = {
-                        let handles = mgr.task_handles.lock().await;
-                        handles.contains_key(&task_id_clean)
-                    };
-                    if !maybe_handle {
-                        break;
+                // The handle was just inserted above; yield to ensure visibility.
+                tokio::task::yield_now().await;
+                let handle = { mgr.task_handles.lock().await.remove(&task_id_clean) };
+                if let Some(h) = handle {
+                    let _ = h.await;
+                }
+                // Clean up ongoing_tasks.
+                let mut ongoing = mgr.ongoing_tasks.lock().await;
+                if let Some(set) = ongoing.get_mut(&session_id_clean) {
+                    set.remove(&task_id_clean);
+                    if set.is_empty() {
+                        ongoing.remove(&session_id_clean);
                     }
-                    // Check if the task is finished by trying to await it.
-                    tokio::task::yield_now().await;
-                    let finished = {
-                        let handles = mgr.task_handles.lock().await;
-                        match handles.get(&task_id_clean) {
-                            Some(h) => h.is_finished(),
-                            None => true,
-                        }
-                    };
-                    if finished {
-                        let handle = {
-                            let mut handles = mgr.task_handles.lock().await;
-                            handles.remove(&task_id_clean)
-                        };
-                        if let Some(h) = handle {
-                            let _ = h.await;
-                        }
-                        let mut ongoing = mgr.ongoing_tasks.lock().await;
-                        if let Some(set) = ongoing.get_mut(&session_id_clean) {
-                            set.remove(&task_id_clean);
-                            if set.is_empty() {
-                                ongoing.remove(&session_id_clean);
-                            }
-                        }
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
             });
         }

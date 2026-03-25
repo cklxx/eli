@@ -284,7 +284,10 @@ impl LLMCore {
     }
 
     /// Build the JSON body for a completion-format request.
-    pub fn build_completion_body(request: &TransportCallRequest, provider_name: &str) -> Value {
+    pub fn build_completion_body(
+        request: &TransportCallRequest,
+        provider_name: &str,
+    ) -> Result<Value, ConduitError> {
         let mut adapter_request = request.clone();
         adapter_request.provider_name = provider_name.to_owned();
         providers::adapter_for_transport(TransportKind::Completion)
@@ -292,13 +295,13 @@ impl LLMCore {
     }
 
     /// Build the JSON body for an Anthropic Messages-format request.
-    pub fn build_messages_body(request: &TransportCallRequest) -> Value {
+    pub fn build_messages_body(request: &TransportCallRequest) -> Result<Value, ConduitError> {
         providers::adapter_for_transport(TransportKind::Messages)
             .build_request_body(request, TransportKind::Messages)
     }
 
     /// Build the JSON body for a responses-format request.
-    pub fn build_responses_body(request: &TransportCallRequest) -> Value {
+    pub fn build_responses_body(request: &TransportCallRequest) -> Result<Value, ConduitError> {
         providers::adapter_for_transport(TransportKind::Responses)
             .build_request_body(request, TransportKind::Responses)
     }

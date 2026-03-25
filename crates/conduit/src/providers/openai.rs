@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use crate::adapter::ProviderAdapter;
 use crate::clients::parsing::TransportKind;
+use crate::core::errors::{ConduitError, ErrorKind};
 use crate::core::execution::LLMCore;
 use crate::core::request_builder::TransportCallRequest;
 
@@ -23,11 +24,14 @@ impl ProviderAdapter for OpenAIAdapter {
         &self,
         request: &TransportCallRequest,
         transport: TransportKind,
-    ) -> Value {
+    ) -> Result<Value, ConduitError> {
         match transport {
-            TransportKind::Completion => self.build_completion_body(request),
-            TransportKind::Responses => self.build_responses_body(request),
-            TransportKind::Messages => panic!("openai adapter does not support messages transport"),
+            TransportKind::Completion => Ok(self.build_completion_body(request)),
+            TransportKind::Responses => Ok(self.build_responses_body(request)),
+            TransportKind::Messages => Err(ConduitError::new(
+                ErrorKind::Config,
+                "openai adapter does not support messages transport",
+            )),
         }
     }
 }

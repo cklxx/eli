@@ -196,7 +196,7 @@ fn start_sidecar(wh: &crate::channels::webhook::WebhookSettings) -> Option<std::
 async fn wait_for_sidecar(sidecar_url: &str) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
 
-    for attempt in 0..15 {
+    for attempt in 0..15u32 {
         match client.get(format!("{sidecar_url}/health")).send().await {
             Ok(resp) if resp.status().is_success() => {
                 *crate::tools::SIDECAR_URL.lock().unwrap() = Some(sidecar_url.to_owned());
@@ -205,7 +205,9 @@ async fn wait_for_sidecar(sidecar_url: &str) -> anyhow::Result<()> {
             }
             _ => {
                 if attempt < 14 {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    // Exponential backoff: 200, 400, 800, 1600, 3000, 3000... ms
+                    let delay_ms = (200u64 << (attempt).min(4)).min(3000);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
             }
         }
@@ -366,24 +368,32 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
 
                 let combined_media: Vec<MediaItem> =
                     [msg.media.as_slice(), media_from_context.as_slice()].concat();
-                let media_parts = resolve_image_media(&combined_media).await;
+                let resolved = resolve_image_media(&combined_media).await;
                 tracing::debug!(
                     session = %msg.session_id,
-                    parts = media_parts.len(),
+                    parts = resolved.parts.len(),
+                    errors = resolved.errors.len(),
                     "resolved image media parts"
                 );
+
+                // Append media errors to content so the user sees download failures.
+                let content = if resolved.errors.is_empty() {
+                    msg.content.clone()
+                } else {
+                    format!("{}\n{}", msg.content, resolved.errors.join("\n"))
+                };
 
                 let mut inbound = serde_json::json!({
                     "session_id": msg.session_id,
                     "channel": msg.channel,
                     "chat_id": msg.chat_id,
-                    "content": msg.content,
+                    "content": content,
                     "context": msg.context,
                     "kind": msg.kind,
                     "output_channel": output_channel,
                 });
-                if !media_parts.is_empty() {
-                    inbound["media_parts"] = serde_json::json!(media_parts);
+                if !resolved.parts.is_empty() {
+                    inbound["media_parts"] = serde_json::json!(resolved.parts);
                 }
 
                 // Spawn processing so the main loop stays responsive to cancel.
@@ -502,13 +512,23 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
 /// Maximum raw image size to embed (20 MB).
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
+/// Result of resolving image media: successfully encoded parts and any errors.
+struct ResolvedMedia {
+    parts: Vec<Value>,
+    errors: Vec<String>,
+}
+
 /// Resolve image `MediaItem`s into provider-agnostic base64 content blocks.
 ///
 /// Returns blocks of the form `{"type": "image_base64", "mime_type": "…", "data": "…"}`.
 /// Conduit's `normalize_image_content_blocks` rewrites these to the correct
 /// provider format (Anthropic or OpenAI) before the API call.
-async fn resolve_image_media(media: &[MediaItem]) -> Vec<Value> {
+///
+/// Any download failures or size-limit violations are collected in `errors`
+/// so the caller can surface them to the user.
+async fn resolve_image_media(media: &[MediaItem]) -> ResolvedMedia {
     let mut parts = Vec::new();
+    let mut errors = Vec::new();
     for item in media {
         if item.media_type != MediaType::Image {
             continue;
@@ -516,9 +536,11 @@ async fn resolve_image_media(media: &[MediaItem]) -> Vec<Value> {
         let Some(ref fetcher) = item.data_fetcher else {
             continue;
         };
+        let label = item.filename.as_deref().unwrap_or(&item.mime_type);
         let bytes = fetcher().await;
         if bytes.is_empty() {
             tracing::warn!(mime = %item.mime_type, "image fetch returned empty bytes, skipping");
+            errors.push(format!("[Media download failed: {label}]"));
             continue;
         }
         if bytes.len() > MAX_IMAGE_BYTES {
@@ -527,6 +549,10 @@ async fn resolve_image_media(media: &[MediaItem]) -> Vec<Value> {
                 limit = MAX_IMAGE_BYTES,
                 "image exceeds size limit, skipping"
             );
+            errors.push(format!(
+                "[Media too large ({:.1} MB): {label}]",
+                bytes.len() as f64 / (1024.0 * 1024.0)
+            ));
             continue;
         }
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -536,7 +562,7 @@ async fn resolve_image_media(media: &[MediaItem]) -> Vec<Value> {
             "data": b64,
         }));
     }
-    parts
+    ResolvedMedia { parts, errors }
 }
 
 #[cfg(test)]
@@ -564,12 +590,13 @@ mod tests {
     #[tokio::test]
     async fn resolve_image_happy_path() {
         let media = vec![image_item("image/jpeg", vec![0xFF, 0xD8, 0xFF])];
-        let parts = resolve_image_media(&media).await;
-        assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0]["type"], "image_base64");
-        assert_eq!(parts[0]["mime_type"], "image/jpeg");
+        let resolved = resolve_image_media(&media).await;
+        assert_eq!(resolved.parts.len(), 1);
+        assert!(resolved.errors.is_empty());
+        assert_eq!(resolved.parts[0]["type"], "image_base64");
+        assert_eq!(resolved.parts[0]["mime_type"], "image/jpeg");
         // Verify base64 round-trips.
-        let b64 = parts[0]["data"].as_str().unwrap();
+        let b64 = resolved.parts[0]["data"].as_str().unwrap();
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(b64)
             .unwrap();
@@ -587,23 +614,28 @@ mod tests {
                     as Pin<Box<dyn std::future::Future<Output = Vec<u8>> + Send>>
             })),
         };
-        let parts = resolve_image_media(&[audio]).await;
-        assert!(parts.is_empty());
+        let resolved = resolve_image_media(&[audio]).await;
+        assert!(resolved.parts.is_empty());
+        assert!(resolved.errors.is_empty());
     }
 
     #[tokio::test]
     async fn resolve_image_skips_empty_bytes() {
         let media = vec![image_item("image/png", vec![])];
-        let parts = resolve_image_media(&media).await;
-        assert!(parts.is_empty());
+        let resolved = resolve_image_media(&media).await;
+        assert!(resolved.parts.is_empty());
+        assert_eq!(resolved.errors.len(), 1);
+        assert!(resolved.errors[0].contains("Media download failed"));
     }
 
     #[tokio::test]
     async fn resolve_image_skips_oversized() {
         let big = vec![0u8; MAX_IMAGE_BYTES + 1];
         let media = vec![image_item("image/png", big)];
-        let parts = resolve_image_media(&media).await;
-        assert!(parts.is_empty());
+        let resolved = resolve_image_media(&media).await;
+        assert!(resolved.parts.is_empty());
+        assert_eq!(resolved.errors.len(), 1);
+        assert!(resolved.errors[0].contains("Media too large"));
     }
 
     #[tokio::test]
@@ -614,8 +646,9 @@ mod tests {
             filename: None,
             data_fetcher: None,
         };
-        let parts = resolve_image_media(&[item]).await;
-        assert!(parts.is_empty());
+        let resolved = resolve_image_media(&[item]).await;
+        assert!(resolved.parts.is_empty());
+        assert!(resolved.errors.is_empty());
     }
 
     #[tokio::test]
@@ -630,19 +663,20 @@ mod tests {
             },
             image_item("image/png", vec![3, 4, 5]),
         ];
-        let parts = resolve_image_media(&media).await;
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0]["mime_type"], "image/jpeg");
-        assert_eq!(parts[1]["mime_type"], "image/png");
+        let resolved = resolve_image_media(&media).await;
+        assert_eq!(resolved.parts.len(), 2);
+        assert_eq!(resolved.parts[0]["mime_type"], "image/jpeg");
+        assert_eq!(resolved.parts[1]["mime_type"], "image/png");
     }
 
     #[tokio::test]
     async fn resolve_image_exactly_at_size_limit() {
         let exact = vec![0u8; MAX_IMAGE_BYTES];
         let media = vec![image_item("image/png", exact)];
-        let parts = resolve_image_media(&media).await;
+        let resolved = resolve_image_media(&media).await;
         // Exactly at limit should be accepted (only > limit is rejected).
-        assert_eq!(parts.len(), 1);
+        assert_eq!(resolved.parts.len(), 1);
+        assert!(resolved.errors.is_empty());
     }
 
     #[tokio::test]
@@ -651,9 +685,9 @@ mod tests {
             image_item("image/webp", vec![1]),
             image_item("image/gif", vec![2]),
         ];
-        let parts = resolve_image_media(&media).await;
-        assert_eq!(parts[0]["mime_type"], "image/webp");
-        assert_eq!(parts[1]["mime_type"], "image/gif");
+        let resolved = resolve_image_media(&media).await;
+        assert_eq!(resolved.parts[0]["mime_type"], "image/webp");
+        assert_eq!(resolved.parts[1]["mime_type"], "image/gif");
     }
 
     #[tokio::test]
@@ -663,17 +697,20 @@ mod tests {
             image_item("image/png", vec![0u8; MAX_IMAGE_BYTES + 1]),
             image_item("image/gif", vec![4, 5]),
         ];
-        let parts = resolve_image_media(&media).await;
+        let resolved = resolve_image_media(&media).await;
         // Only the oversized one should be skipped.
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0]["mime_type"], "image/jpeg");
-        assert_eq!(parts[1]["mime_type"], "image/gif");
+        assert_eq!(resolved.parts.len(), 2);
+        assert_eq!(resolved.parts[0]["mime_type"], "image/jpeg");
+        assert_eq!(resolved.parts[1]["mime_type"], "image/gif");
+        assert_eq!(resolved.errors.len(), 1);
+        assert!(resolved.errors[0].contains("Media too large"));
     }
 
     #[tokio::test]
     async fn resolve_image_empty_media_list() {
-        let parts = resolve_image_media(&[]).await;
-        assert!(parts.is_empty());
+        let resolved = resolve_image_media(&[]).await;
+        assert!(resolved.parts.is_empty());
+        assert!(resolved.errors.is_empty());
     }
 
     #[tokio::test]
@@ -698,7 +735,8 @@ mod tests {
                 data_fetcher: None,
             },
         ];
-        let parts = resolve_image_media(&media).await;
-        assert!(parts.is_empty());
+        let resolved = resolve_image_media(&media).await;
+        assert!(resolved.parts.is_empty());
+        assert!(resolved.errors.is_empty());
     }
 }

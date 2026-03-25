@@ -10,7 +10,7 @@ use teloxide::dispatching::{Dispatcher, UpdateFilterExt};
 use teloxide::net::Download;
 use teloxide::prelude::*;
 use teloxide::types::{ChatKind, MediaKind, MessageKind as TgMessageKind, ParseMode, Update};
-use teloxide::update_listeners;
+use teloxide::update_listeners::Polling;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -682,7 +682,13 @@ impl Channel for TelegramChannel {
                 }
             });
 
-            let listener = update_listeners::polling_default(bot_for_handler.clone()).await;
+            // Use a 5-second long-poll timeout so the select loop can
+            // respond to cancellation within a few seconds at most.
+            let listener = Polling::builder(bot_for_handler.clone())
+                .timeout(std::time::Duration::from_secs(5))
+                .delete_webhook()
+                .await
+                .build();
             let error_handler = Arc::new(|error: teloxide::RequestError| {
                 warn!("telegram update listener: {error}");
                 async {}

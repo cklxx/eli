@@ -17,6 +17,8 @@ use crate::tools::{REGISTRY, shorten_text};
 
 const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 10;
+const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10MB
+const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024; // 50MB
 
 static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(reqwest::Client::new);
@@ -474,6 +476,20 @@ fn tool_fs_read() -> Tool {
 
                 let state = ctx.map(|c| c.state).unwrap_or_default();
                 let resolved = resolve_path(&state, &raw_path)?;
+
+                let meta = std::fs::metadata(&resolved)
+                    .map_err(|e| ConduitError::new(ErrorKind::Tool, format!("read failed: {e}")))?;
+                if meta.len() > MAX_FILE_BYTES {
+                    return Err(ConduitError::new(
+                        ErrorKind::Tool,
+                        format!(
+                            "file too large ({} bytes, limit {})",
+                            meta.len(),
+                            MAX_FILE_BYTES
+                        ),
+                    ));
+                }
+
                 let text = std::fs::read_to_string(&resolved)
                     .map_err(|e| ConduitError::new(ErrorKind::Tool, format!("read failed: {e}")))?;
 
@@ -1021,9 +1037,20 @@ fn tool_web_fetch() -> Tool {
                         format!("HTTP {status} for {url}"),
                     ));
                 }
-                let text = response.text().await.map_err(|e| {
+                let bytes = response.bytes().await.map_err(|e| {
                     ConduitError::new(ErrorKind::Tool, format!("read body failed: {e}"))
                 })?;
+                if bytes.len() > MAX_RESPONSE_BYTES {
+                    return Err(ConduitError::new(
+                        ErrorKind::Tool,
+                        format!(
+                            "response too large ({} bytes, limit {})",
+                            bytes.len(),
+                            MAX_RESPONSE_BYTES
+                        ),
+                    ));
+                }
+                let text = String::from_utf8_lossy(&bytes).into_owned();
                 ok_val(text)
             })
         },
@@ -1037,7 +1064,7 @@ fn tool_web_fetch() -> Tool {
 fn tool_subagent() -> Tool {
     Tool::with_context(
         "subagent",
-        "Spawn an isolated sub-agent with its own context.\n\nExamples: parallelize independent research, delegate a focused coding subtask, explore a codebase without polluting the main tape. Configure model, session strategy, and tool/skill allowlists.",
+        "[EXPERIMENTAL] Spawn an isolated sub-agent with its own context.\n\nExamples: parallelize independent research, delegate a focused coding subtask, explore a codebase without polluting the main tape. Configure model, session strategy, and tool/skill allowlists. Currently returns prompt acknowledgement only — full isolation not yet implemented.",
         serde_json::json!({
             "type": "object",
             "properties": {

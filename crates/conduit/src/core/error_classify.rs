@@ -78,8 +78,66 @@ pub fn classify_by_text_signature(message: &str) -> Option<ErrorKind> {
     None
 }
 
+/// Mask sensitive tokens in text to prevent API key leakage in logs.
+///
+/// Masks `Bearer <token>` patterns and common API key prefixes (`sk-`, `key-`,
+/// `token-`).  Uses simple string scanning to avoid a `regex` dependency.
+fn mask_sensitive(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let bytes = text.as_bytes();
+
+    while i < bytes.len() {
+        // Mask "Bearer <token>"
+        if text[i..].starts_with("Bearer ") {
+            out.push_str("Bearer [MASKED]");
+            i += 7; // skip "Bearer "
+            // skip the token characters
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Mask common key prefixes: sk-..., key-..., token-...
+        let prefixes = ["sk-", "key-", "token-"];
+        let mut matched = false;
+        for prefix in &prefixes {
+            if text[i..].starts_with(prefix) {
+                // Check there are enough alphanumeric chars after the prefix to
+                // look like a real key (at least 20 chars).
+                let start = i + prefix.len();
+                let mut end = start;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric()
+                        || bytes[end] == b'_'
+                        || bytes[end] == b'-')
+                {
+                    end += 1;
+                }
+                if end - start >= 20 {
+                    out.push_str("[MASKED_KEY]");
+                    i = end;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if matched {
+            continue;
+        }
+
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
 impl LLMCore {
     /// Log an error at the warning level if verbose mode is enabled.
+    ///
+    /// Error messages are sanitized to mask Bearer tokens and API key patterns
+    /// before logging.
     pub fn log_error(&self, error: &ConduitError, provider: &str, model: &str, attempt: u32) {
         if self.verbose() == 0 {
             return;
@@ -91,10 +149,17 @@ impl LLMCore {
             attempt + 1,
             self.max_attempts()
         );
+        let sanitized = mask_sensitive(&error.to_string());
         if let Some(ref cause) = error.cause {
-            tracing::warn!("{} failed: {} (cause={:?})", prefix, error, cause);
+            let sanitized_cause = mask_sensitive(&format!("{cause:?}"));
+            tracing::warn!(
+                "{} failed: {} (cause={})",
+                prefix,
+                sanitized,
+                sanitized_cause
+            );
         } else {
-            tracing::warn!("{} failed: {}", prefix, error);
+            tracing::warn!("{} failed: {}", prefix, sanitized);
         }
     }
 
@@ -185,5 +250,76 @@ impl LLMCore {
                 .insert("http_status".to_owned(), Value::Number(status.into()));
         }
         ErrorPayload::new(error.kind, &error.message).with_details(details)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mask_bearer_token() {
+        let input = "Authorization: Bearer sk-abc123def456ghi789jkl0 failed";
+        let masked = mask_sensitive(input);
+        assert!(masked.contains("Bearer [MASKED]"));
+        assert!(!masked.contains("sk-abc123"));
+    }
+
+    #[test]
+    fn mask_sk_key() {
+        let input = "invalid api key: sk-proj-abcdefghijklmnopqrstuvwx";
+        let masked = mask_sensitive(input);
+        assert!(masked.contains("[MASKED_KEY]"));
+        assert!(!masked.contains("sk-proj-abcdefgh"));
+    }
+
+    #[test]
+    fn no_mask_short_prefix() {
+        // Short strings after prefix should NOT be masked (not a real key).
+        let input = "sk-short is fine";
+        let masked = mask_sensitive(input);
+        assert_eq!(masked, input);
+    }
+
+    #[test]
+    fn no_mask_normal_text() {
+        let input = "rate limit exceeded, please retry";
+        let masked = mask_sensitive(input);
+        assert_eq!(masked, input);
+    }
+
+    #[test]
+    fn mask_multiple_keys() {
+        let input = "key-aaaaaaaaaaaaaaaaaaaaaaaaa and token-bbbbbbbbbbbbbbbbbbbbbbbbb";
+        let masked = mask_sensitive(input);
+        assert_eq!(
+            masked.matches("[MASKED_KEY]").count(),
+            2,
+            "should mask both keys: {masked}"
+        );
+    }
+
+    #[test]
+    fn classify_auth_error() {
+        assert_eq!(
+            classify_by_text_signature("unauthorized access"),
+            Some(ErrorKind::Config)
+        );
+    }
+
+    #[test]
+    fn classify_rate_limit() {
+        assert_eq!(
+            classify_by_text_signature("rate limit exceeded"),
+            Some(ErrorKind::Temporary)
+        );
+    }
+
+    #[test]
+    fn classify_no_match() {
+        assert_eq!(
+            classify_by_text_signature("something random happened"),
+            None
+        );
     }
 }

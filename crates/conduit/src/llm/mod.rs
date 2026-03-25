@@ -25,7 +25,7 @@ use crate::core::tool_calls::{normalize_message_tool_calls, normalize_tool_calls
 use crate::tape::entries::TapeEntry;
 use crate::tape::{
     AnchorSelector, AsyncTapeManager, AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore,
-    TapeContext, TapeManager, build_messages as tape_build_messages,
+    TapeContext, build_messages as tape_build_messages,
 };
 use crate::tools::context::ToolContext;
 use crate::tools::executor::{ToolCallResponse, ToolExecutor};
@@ -252,22 +252,17 @@ impl LLMBuilder {
 
         let context = self.context;
 
-        let (tape, async_tape) = if let Some(custom_store) = self.tape_store {
-            let tape = TapeManager::new(None, context.clone());
-            let async_tape = AsyncTapeManager::new(Some(custom_store), context);
-            (tape, async_tape)
+        let async_tape = if let Some(custom_store) = self.tape_store {
+            AsyncTapeManager::new(Some(custom_store), context)
         } else {
             let shared_tape_store = InMemoryTapeStore::new();
-            let async_store = AsyncTapeStoreAdapter::new(shared_tape_store.clone());
-            let tape = TapeManager::new(Some(Box::new(shared_tape_store)), context.clone());
-            let async_tape = AsyncTapeManager::new(Some(Box::new(async_store)), context);
-            (tape, async_tape)
+            let async_store = AsyncTapeStoreAdapter::new(shared_tape_store);
+            AsyncTapeManager::new(Some(Box::new(async_store)), context)
         };
 
         Ok(LLM {
             core,
             tool_executor: ToolExecutor::new(),
-            tape,
             async_tape,
             stream_filter: self.stream_filter,
         })
@@ -288,8 +283,6 @@ impl Default for LLMBuilder {
 pub struct LLM {
     core: LLMCore,
     tool_executor: ToolExecutor,
-    #[allow(dead_code)]
-    tape: TapeManager,
     async_tape: AsyncTapeManager,
     stream_filter: Option<StreamEventFilter>,
 }
@@ -350,15 +343,12 @@ impl LLM {
         );
 
         let shared_tape_store = InMemoryTapeStore::new();
-        let async_store = AsyncTapeStoreAdapter::new(shared_tape_store.clone());
-
-        let tape = TapeManager::new(Some(Box::new(shared_tape_store)), context.clone());
+        let async_store = AsyncTapeStoreAdapter::new(shared_tape_store);
         let async_tape = AsyncTapeManager::new(Some(Box::new(async_store)), context);
 
         Ok(Self {
             core,
             tool_executor: ToolExecutor::new(),
-            tape,
             async_tape,
             stream_filter: None,
         })
@@ -403,13 +393,12 @@ impl LLM {
 
     /// Set the tape context used for conversation history selection.
     pub fn set_context(&mut self, context: TapeContext) {
-        self.tape.set_default_context(context.clone());
         self.async_tape.set_default_context(context);
     }
 
     /// Return a reference to the current tape context, if one is set.
     pub fn context(&self) -> Option<&TapeContext> {
-        Some(self.tape.default_context())
+        Some(self.async_tape.default_context())
     }
 
     /// Append a raw tape entry to the named tape (async).

@@ -148,6 +148,15 @@ pub enum TapeStoreKind {
 ///
 /// All methods have default implementations that return `None` / empty so that
 /// plugins only need to override the hooks they care about.
+///
+/// # Panic Safety
+///
+/// Hooks are classified into two categories:
+/// - **Chain-aborting** (`resolve_session`, `load_state`, `run_model`): a panic
+///   causes `HookError::Panic` to propagate to the caller. These hooks are
+///   critical to the turn pipeline and cannot be skipped.
+/// - **Best-effort** (all others): a panic is caught and logged, then execution
+///   continues to the next plugin.
 #[async_trait]
 #[allow(unused_variables)]
 pub trait EliHookSpec: Send + Sync {

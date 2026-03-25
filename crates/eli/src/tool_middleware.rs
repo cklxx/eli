@@ -50,7 +50,7 @@ pub struct CircuitState {
 pub struct CircuitBreaker {
     max_failures: u32,
     reset_timeout: Duration,
-    states: Mutex<HashMap<String, CircuitState>>,
+    states: Arc<Mutex<HashMap<String, CircuitState>>>,
 }
 
 impl CircuitBreaker {
@@ -58,7 +58,7 @@ impl CircuitBreaker {
         Self {
             max_failures,
             reset_timeout,
-            states: Mutex::new(HashMap::new()),
+            states: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -79,33 +79,6 @@ impl CircuitBreaker {
         }
         false
     }
-
-    fn record_success(&self, tool_name: &str) {
-        let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
-        states.insert(tool_name.to_owned(), CircuitState::default());
-    }
-
-    fn record_failure(&self, tool_name: &str) {
-        let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
-        let state = states.entry(tool_name.to_owned()).or_default();
-
-        // Auto-reset if timeout passed.
-        if let Some(tripped_at) = state.tripped_at
-            && tripped_at.elapsed() >= self.reset_timeout
-        {
-            *state = CircuitState::default();
-        }
-
-        state.consecutive_failures += 1;
-        if state.consecutive_failures >= self.max_failures {
-            state.tripped_at = Some(Instant::now());
-            tracing::warn!(
-                tool = tool_name,
-                failures = state.consecutive_failures,
-                "circuit breaker tripped"
-            );
-        }
-    }
 }
 
 impl ToolMiddleware for CircuitBreaker {
@@ -122,20 +95,26 @@ impl ToolMiddleware for CircuitBreaker {
         }
 
         let name = tool_name.to_owned();
-        // We need to record success/failure after the call completes.
-        // Since we can't hold &self across await, snapshot the Arc pointers.
-        let states = unsafe {
-            // SAFETY: CircuitBreaker lives for the duration of the middleware chain,
-            // and MiddlewareChain holds Arc<dyn ToolMiddleware>. We clone the inner data.
-            &*(self as *const Self)
-        };
+        // Clone the Arc to safely move state into the async block.
+        let states = self.states.clone();
+        let max_failures = self.max_failures;
         let fut = next(args, ctx);
         let name_clone = name.clone();
         Box::pin(async move {
             let result = fut.await;
             match &result {
-                Ok(_) => states.record_success(&name_clone),
-                Err(_) => states.record_failure(&name_clone),
+                Ok(_) => {
+                    let mut s = states.lock().unwrap_or_else(|e| e.into_inner());
+                    s.insert(name_clone, CircuitState::default());
+                }
+                Err(_) => {
+                    let mut s = states.lock().unwrap_or_else(|e| e.into_inner());
+                    let state = s.entry(name_clone).or_default();
+                    state.consecutive_failures += 1;
+                    if state.consecutive_failures >= max_failures {
+                        state.tripped_at = Some(Instant::now());
+                    }
+                }
             }
             result
         })

@@ -304,10 +304,10 @@ impl LLMCore {
 
                 let url = Self::build_request_url(&resolved_api_base, transport);
                 let body = match transport {
-                    TransportKind::Responses => Self::build_responses_body(&request),
-                    TransportKind::Messages => Self::build_messages_body(&request),
+                    TransportKind::Responses => Self::build_responses_body(&request)?,
+                    TransportKind::Messages => Self::build_messages_body(&request)?,
                     TransportKind::Completion => {
-                        Self::build_completion_body(&request, provider_name)
+                        Self::build_completion_body(&request, provider_name)?
                     }
                 };
 
@@ -512,10 +512,10 @@ impl LLMCore {
 
                 let url = Self::build_request_url(&resolved_api_base, transport);
                 let body = match transport {
-                    TransportKind::Responses => Self::build_responses_body(&request),
-                    TransportKind::Messages => Self::build_messages_body(&request),
+                    TransportKind::Responses => Self::build_responses_body(&request)?,
+                    TransportKind::Messages => Self::build_messages_body(&request)?,
                     TransportKind::Completion => {
-                        Self::build_completion_body(&request, provider_name)
+                        Self::build_completion_body(&request, provider_name)?
                     }
                 };
 
@@ -744,7 +744,7 @@ mod tests {
             is_anthropic_oauth: false,
         };
 
-        let body = LLMCore::build_messages_body(&request);
+        let body = LLMCore::build_messages_body(&request).unwrap();
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[1]["role"], "assistant");

@@ -114,20 +114,31 @@ impl ShellManager {
     }
 
     /// Get a snapshot of a shell's current state.
+    /// If the shell has finished (exit code present), it is removed from the
+    /// map to prevent memory leaks.
     pub async fn get_output(
         &self,
         shell_id: &str,
     ) -> anyhow::Result<(String, Option<i32>, String)> {
-        let shells = self.shells.lock().await;
-        let shell_arc = shells
-            .get(shell_id)
-            .ok_or_else(|| anyhow::anyhow!("unknown shell id: {shell_id}"))?;
+        let shell_arc = {
+            let shells = self.shells.lock().await;
+            shells
+                .get(shell_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown shell id: {shell_id}"))?
+                .clone()
+        };
         let shell = shell_arc.lock().await;
-        Ok((
+        let result = (
             shell.output(),
             shell.returncode(),
             shell.status().to_owned(),
-        ))
+        );
+        // Auto-cleanup: if the shell has exited, remove it from the map.
+        if result.1.is_some() {
+            drop(shell);
+            self.shells.lock().await.remove(shell_id);
+        }
+        Ok(result)
     }
 
     /// Get the shell ID, output, return code.

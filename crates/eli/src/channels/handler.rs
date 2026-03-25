@@ -147,8 +147,9 @@ impl BufferedMessageHandler {
                     let batch: Vec<ChannelMessage> = guard.pending.drain(..).collect();
                     drop(guard);
 
-                    let merged = ChannelMessage::from_batch(&batch);
-                    if sink.send(merged).is_err() {
+                    if let Some(merged) = ChannelMessage::from_batch(&batch)
+                        && sink.send(merged).is_err()
+                    {
                         warn!("buffered handler: sink closed, dropping batch");
                     }
                 }

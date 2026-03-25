@@ -3,6 +3,7 @@ use serde_json::Value;
 use crate::adapter::ProviderAdapter;
 use crate::clients::parsing::TransportKind;
 use crate::core::anthropic_messages;
+use crate::core::errors::{ConduitError, ErrorKind};
 use crate::core::request_builder::TransportCallRequest;
 
 pub static ANTHROPIC_ADAPTER: AnthropicAdapter = AnthropicAdapter;
@@ -11,6 +12,9 @@ pub struct AnthropicAdapter;
 
 impl ProviderAdapter for AnthropicAdapter {
     fn build_request_url(&self, api_base: &str, transport: TransportKind) -> String {
+        // build_request_url doesn't return Result, so keep the debug_assert
+        // as a development-time guard. Callers should not reach here with a
+        // wrong transport because build_request_body validates first.
         debug_assert_eq!(transport, TransportKind::Messages);
         format!("{}/messages", api_base.trim_end_matches('/'))
     }
@@ -19,8 +23,13 @@ impl ProviderAdapter for AnthropicAdapter {
         &self,
         request: &TransportCallRequest,
         transport: TransportKind,
-    ) -> Value {
-        debug_assert_eq!(transport, TransportKind::Messages);
+    ) -> Result<Value, ConduitError> {
+        if transport != TransportKind::Messages {
+            return Err(ConduitError::new(
+                ErrorKind::Config,
+                "anthropic adapter only supports messages transport",
+            ));
+        }
 
         let mut body = serde_json::Map::new();
         body.insert("model".to_owned(), Value::String(request.model_id.clone()));
@@ -100,6 +109,6 @@ impl ProviderAdapter for AnthropicAdapter {
             body.entry(key.clone()).or_insert(value.clone());
         }
 
-        Value::Object(body)
+        Ok(Value::Object(body))
     }
 }
