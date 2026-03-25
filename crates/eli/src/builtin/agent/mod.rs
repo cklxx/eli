@@ -1,0 +1,246 @@
+//! Conduit-driven runtime engine to process prompts.
+
+mod agent_command;
+mod agent_request;
+mod agent_run;
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+
+use conduit::{ConduitError, ErrorKind};
+use serde_json::Value;
+
+use crate::builtin::settings::AgentSettings;
+use crate::builtin::store::{FileTapeStore, ForkTapeStore};
+use crate::builtin::tape::TapeService;
+use crate::types::PromptValue;
+
+use agent_request::{build_system_prompt, build_tool_state};
+use agent_run::{agent_loop, run_command};
+
+/// Default HTTP headers sent with OpenRouter requests.
+#[allow(dead_code)]
+const DEFAULT_ELI_HEADERS: [(&str, &str); 2] = [
+    ("HTTP-Referer", "https://eliagent.github.io/"),
+    ("X-Title", "Eli"),
+];
+
+// ---------------------------------------------------------------------------
+// Agent
+// ---------------------------------------------------------------------------
+
+/// Agent that processes prompts using hooks and tools. Backed by conduit.
+pub struct Agent {
+    pub settings: AgentSettings,
+    tapes: Option<TapeService>,
+}
+
+#[allow(clippy::new_without_default)]
+impl Agent {
+    /// Create a new agent with settings loaded from the environment.
+    pub fn new() -> Self {
+        Self {
+            settings: AgentSettings::from_env(),
+            tapes: None,
+        }
+    }
+
+    /// Lazily initialise and return the tape service.
+    pub fn tapes(&mut self) -> &TapeService {
+        if self.tapes.is_none() {
+            let tapes_dir = self.settings.home.join("tapes");
+            let file_store = FileTapeStore::new(tapes_dir.clone());
+            let fork_store = ForkTapeStore::from_sync(file_store);
+            self.tapes = Some(TapeService::new(tapes_dir, fork_store));
+        }
+        self.tapes.as_ref().unwrap()
+    }
+
+    /// Mutable access to the tape service.
+    pub fn tapes_mut(&mut self) -> &mut TapeService {
+        if self.tapes.is_none() {
+            let tapes_dir = self.settings.home.join("tapes");
+            let file_store = FileTapeStore::new(tapes_dir.clone());
+            let fork_store = ForkTapeStore::from_sync(file_store);
+            self.tapes = Some(TapeService::new(tapes_dir, fork_store));
+        }
+        self.tapes.as_mut().unwrap()
+    }
+
+    /// Run a prompt to completion within a session.
+    pub async fn run(
+        &mut self,
+        session_id: &str,
+        prompt: PromptValue,
+        state: &HashMap<String, Value>,
+        model: Option<&str>,
+        allowed_skills: Option<&HashSet<String>>,
+        allowed_tools: Option<&HashSet<String>>,
+    ) -> Result<String, ConduitError> {
+        if prompt.is_blank() {
+            return Err(ConduitError::new(ErrorKind::InvalidInput, "empty prompt"));
+        }
+
+        let workspace = state
+            .get("_runtime_workspace")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        let tape_name = TapeService::session_tape_name(session_id, &workspace);
+        let _merge_back = !session_id.starts_with("temp/");
+
+        let settings = self.settings.clone();
+        let tapes = self.tapes_mut();
+        let tool_state = build_tool_state(state, &settings, allowed_skills, allowed_tools);
+
+        tapes.ensure_bootstrap_anchor(&tape_name).await?;
+
+        if let PromptValue::Text(ref text) = prompt {
+            let trimmed = text.trim();
+            if trimmed.starts_with('/') {
+                return run_command(tapes, &tape_name, trimmed, &tool_state).await;
+            }
+        }
+
+        agent_loop(
+            tapes,
+            &tape_name,
+            prompt,
+            &settings,
+            model,
+            state,
+            allowed_skills,
+            allowed_tools,
+            &tool_state,
+            &workspace,
+        )
+        .await
+    }
+
+    /// Build the system prompt from hooks, tools, and skills.
+    pub fn system_prompt(
+        &self,
+        prompt_text: &str,
+        state: &HashMap<String, Value>,
+        allowed_skills: Option<&HashSet<String>>,
+    ) -> String {
+        let workspace = state
+            .get("_runtime_workspace")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        build_system_prompt(
+            &self.settings,
+            prompt_text,
+            state,
+            allowed_skills,
+            &workspace,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::builtin::settings::{ApiBaseConfig, ApiKeyConfig};
+    use crate::builtin::store::{FileTapeStore, ForkTapeStore};
+    use crate::builtin::tools::register_builtin_tools;
+    use conduit::llm::ApiFormat;
+    use serde_json::json;
+
+    fn test_tape_service() -> (
+        tempfile::TempDir,
+        TapeService,
+        String,
+        HashMap<String, Value>,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let tapes_dir = tmp.path().join("tapes");
+        let store = ForkTapeStore::from_sync(FileTapeStore::new(tapes_dir.clone()));
+        let service = TapeService::new(tapes_dir, store);
+        let tape_name = "workspace__session".to_owned();
+
+        let mut tool_state = HashMap::new();
+        tool_state.insert(
+            "_runtime_workspace".to_owned(),
+            json!(workspace.display().to_string()),
+        );
+
+        (tmp, service, tape_name, tool_state)
+    }
+
+    fn test_settings(home: &Path) -> AgentSettings {
+        AgentSettings {
+            home: home.to_path_buf(),
+            model: "test-model".into(),
+            fallback_models: None,
+            api_key: ApiKeyConfig::None,
+            api_base: ApiBaseConfig::None,
+            api_format: ApiFormat::Auto,
+            max_steps: 5,
+            max_tokens: 256,
+            model_timeout_seconds: None,
+            verbose: 0,
+            context_window: 128_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_command_passes_workspace_state_to_tools() {
+        register_builtin_tools();
+
+        let (tmp, service, tape_name, tool_state) = test_tape_service();
+        let file_path = tmp.path().join("workspace").join("note.txt");
+        std::fs::write(&file_path, "hello from workspace").unwrap();
+
+        let output = run_command(&service, &tape_name, "/fs.read path=note.txt", &tool_state)
+            .await
+            .unwrap();
+
+        assert_eq!(output, "hello from workspace");
+    }
+
+    #[tokio::test]
+    async fn test_run_command_binds_tape_runtime_for_tape_tools() {
+        register_builtin_tools();
+
+        let (_tmp, service, tape_name, tool_state) = test_tape_service();
+        service.ensure_bootstrap_anchor(&tape_name).await.unwrap();
+
+        let output = run_command(&service, &tape_name, "/tape_info", &tool_state)
+            .await
+            .unwrap();
+
+        assert!(output.contains("name: workspace__session"));
+        assert!(output.contains("anchors: 1"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_ignores_workspace_agents_guidance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(workspace.join(".agents")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(workspace.join(".agents").join("SOUL.md"), "base prompt").unwrap();
+        std::fs::write(workspace.join("AGENTS.md"), "workspace agents guidance").unwrap();
+
+        let prompt = build_system_prompt(
+            &test_settings(&home),
+            "hello",
+            &HashMap::new(),
+            None,
+            &workspace,
+        );
+
+        assert!(prompt.contains("base prompt"));
+        assert!(!prompt.contains("workspace agents guidance"));
+    }
+}
