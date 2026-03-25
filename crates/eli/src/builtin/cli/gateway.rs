@@ -387,7 +387,9 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         }
     });
 
-    let framework = super::builtin_framework().await;
+    let (framework, builtin) = super::builtin_framework().await;
+    builtin.set_channels(channels.clone());
+
     loop {
         tokio::select! {
             Some(result) = workers.join_next(), if !workers.is_empty() => {
@@ -403,7 +405,6 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
                     msg.output_channel.clone()
                 };
 
-                let inbound_context = msg.context.clone();
                 let media_from_context = reconstruct_context_media(&msg);
                 let combined_media: Vec<MediaItem> =
                     [msg.media.as_slice(), media_from_context.as_slice()].concat();
@@ -428,7 +429,6 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
                 }
 
                 let fw = framework.clone();
-                let chs = channels.clone();
                 let cancel_inner = cancel.clone();
                 workers.spawn(async move {
                     let result = tokio::select! {
@@ -438,61 +438,6 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
                     match result {
                         Ok(result) => {
                             tracing::info!(session = %result.session_id, "framework run completed");
-                            for outbound in &result.outbounds {
-                                let out_ch = outbound
-                                    .get("output_channel")
-                                    .and_then(|v| v.as_str())
-                                    .or_else(|| outbound.get("channel").and_then(|v| v.as_str()))
-                                    .unwrap_or("");
-
-                                let channel = match chs.get(out_ch) {
-                                    Some(ch) => ch.clone(),
-                                    None => {
-                                        // Fallback: try `channel` field when output_channel doesn't match
-                                        let fallback = outbound
-                                            .get("channel")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("");
-                                        match chs.get(fallback) {
-                                            Some(ch) => ch.clone(),
-                                            None => continue,
-                                        }
-                                    }
-                                };
-
-                                let content = super::outbound_string_field(outbound, "content");
-                                let cleanup_only = outbound
-                                    .get("context")
-                                    .and_then(|v| v.as_object())
-                                    .and_then(|ctx| ctx.get(crate::builtin::CLEANUP_ONLY_CONTEXT_KEY))
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(false);
-                                if content.trim().is_empty() && !cleanup_only {
-                                    continue;
-                                }
-
-                                let chat_id = super::outbound_string_field(outbound, "chat_id");
-                                if chat_id.is_empty() {
-                                    continue;
-                                }
-
-                                let session_id = outbound
-                                    .get("session_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&result.session_id);
-                                let reply_context = outbound
-                                    .get("context")
-                                    .and_then(|v| v.as_object())
-                                    .cloned()
-                                    .unwrap_or_else(|| inbound_context.clone());
-                                let reply = ChannelMessage::new(session_id, out_ch, &content)
-                                    .with_chat_id(chat_id)
-                                    .with_context(reply_context)
-                                    .finalize();
-                                if let Err(e) = channel.send(reply).await {
-                                    eprintln!("Failed to send reply via {out_ch}: {e}");
-                                }
-                            }
                         }
                         Err(e) => eprintln!("Framework error: {e}"),
                     }

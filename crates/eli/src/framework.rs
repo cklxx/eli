@@ -12,9 +12,7 @@ use nexil::CancellationToken;
 use crate::control_plane::{BudgetLedger, TurnContext, turn_usage, with_turn_context};
 use crate::envelope::{ValueExt, unpack_batch_vec};
 use crate::hooks::{ChannelHook, EliHookSpec, HookRuntime, TapeStoreKind};
-use crate::types::{
-    Envelope, MessageHandler, OutboundChannelRouter, PromptValue, State, TurnResult, TurnUsageInfo,
-};
+use crate::types::{Envelope, MessageHandler, PromptValue, State, TurnResult, TurnUsageInfo};
 
 // ---------------------------------------------------------------------------
 // PluginStatus
@@ -39,8 +37,6 @@ pub struct EliFramework {
     hook_runtime: RwLock<HookRuntime>,
     /// Status of each loaded plugin.
     plugin_status: RwLock<HashMap<String, PluginStatus>>,
-    /// Optional router for outbound message dispatch.
-    outbound_router: RwLock<Option<Arc<dyn OutboundChannelRouter>>>,
     /// Token budget ledger (control plane infrastructure).
     pub budget: BudgetLedger,
 }
@@ -52,7 +48,7 @@ impl EliFramework {
             workspace: RwLock::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
             hook_runtime: RwLock::new(HookRuntime::new(Vec::new())),
             plugin_status: RwLock::new(HashMap::new()),
-            outbound_router: RwLock::new(None),
+
             budget: BudgetLedger::new(),
         }
     }
@@ -63,7 +59,7 @@ impl EliFramework {
             workspace: RwLock::new(workspace),
             hook_runtime: RwLock::new(HookRuntime::new(Vec::new())),
             plugin_status: RwLock::new(HashMap::new()),
-            outbound_router: RwLock::new(None),
+
             budget: BudgetLedger::new(),
         }
     }
@@ -123,6 +119,7 @@ impl EliFramework {
             cancellation: CancellationToken::new(),
             wrap_tools: Some(rt.wrap_tools_fn()),
             usage: Default::default(),
+            save_events: Default::default(),
         };
 
         with_turn_context(turn_ctx, async {
@@ -290,31 +287,6 @@ impl EliFramework {
     /// Return the plugin status map.
     pub async fn plugin_status(&self) -> HashMap<String, PluginStatus> {
         self.plugin_status.read().await.clone()
-    }
-
-    // -- Outbound router ----------------------------------------------------
-
-    /// Bind an outbound channel router.
-    pub async fn bind_outbound_router(&self, router: Arc<dyn OutboundChannelRouter>) {
-        let mut r = self.outbound_router.write().await;
-        *r = Some(router);
-    }
-
-    /// Dispatch a message through the bound outbound router.
-    pub async fn dispatch_via_router(&self, message: &Envelope) -> bool {
-        let router = self.outbound_router.read().await;
-        match router.as_ref() {
-            Some(r) => r.dispatch(message.clone()).await,
-            None => false,
-        }
-    }
-
-    /// Signal a session to quit through the bound outbound router.
-    pub async fn quit_via_router(&self, session_id: &str) {
-        let router = self.outbound_router.read().await;
-        if let Some(r) = router.as_ref() {
-            r.quit(session_id).await;
-        }
     }
 
     // -- Channel and tape store accessors -----------------------------------

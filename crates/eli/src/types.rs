@@ -5,7 +5,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde_json::Value;
 
 /// An envelope is any JSON value representing a message flowing through the framework.
@@ -17,20 +16,6 @@ pub type State = HashMap<String, Value>;
 /// An async message handler that receives inbound envelopes.
 pub type MessageHandler =
     Arc<dyn Fn(Envelope) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
-
-/// An async outbound dispatcher that sends a single envelope and reports success.
-pub type OutboundDispatcher =
-    Arc<dyn Fn(Envelope) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
-
-/// Router for dispatching outbound messages to the correct channel.
-#[async_trait]
-pub trait OutboundChannelRouter: Send + Sync {
-    /// Dispatch one outbound envelope. Returns `true` if delivered.
-    async fn dispatch(&self, message: Envelope) -> bool;
-
-    /// Signal a session to quit.
-    async fn quit(&self, session_id: &str);
-}
 
 /// Token usage from a single turn.
 #[derive(Debug, Clone, Default)]

@@ -7,7 +7,10 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use std::sync::Mutex;
+
 use nexil::{CancellationToken, Tool};
+use serde_json::Value;
 
 /// Closure type for tool wrapping.
 pub type WrapToolsFn = Arc<dyn Fn(Vec<Tool>) -> Vec<Tool> + Send + Sync>;
@@ -51,6 +54,8 @@ pub struct TurnContext {
     pub cancellation: CancellationToken,
     pub wrap_tools: Option<WrapToolsFn>,
     pub usage: TurnUsage,
+    /// Accumulator for events that `save_state` hooks flush to tape after the turn.
+    pub save_events: Arc<Mutex<Vec<(String, Value)>>>,
 }
 
 /// Run `fut` with the given [`TurnContext`] bound to the current task.
@@ -74,6 +79,27 @@ pub fn turn_usage() -> Option<TurnUsage> {
 /// Record token usage into the current turn context.
 pub fn record_turn_usage(input_tokens: u64, output_tokens: u64) {
     let _ = TURN_CTX.try_with(|ctx| ctx.usage.record(input_tokens, output_tokens));
+}
+
+/// Push a save event into the current turn context.
+///
+/// Events are accumulated during the turn and flushed by the `save_state` hook.
+pub fn push_save_event(name: &str, data: Value) {
+    let _ = TURN_CTX.try_with(|ctx| {
+        ctx.save_events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((name.to_owned(), data));
+    });
+}
+
+/// Drain all accumulated save events from the current turn context.
+pub fn drain_save_events() -> Vec<(String, Value)> {
+    TURN_CTX
+        .try_with(|ctx| {
+            std::mem::take(&mut *ctx.save_events.lock().unwrap_or_else(|e| e.into_inner()))
+        })
+        .unwrap_or_default()
 }
 
 /// Read the tool-wrapping function from the current turn, if any.
@@ -201,6 +227,7 @@ mod tests {
             cancellation: token,
             wrap_tools: None,
             usage: Default::default(),
+            save_events: Default::default(),
         };
         let result = with_turn_context(ctx, async {
             let t = turn_cancellation().unwrap();

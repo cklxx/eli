@@ -14,7 +14,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Subcommand;
-use serde_json::Value;
 
 use crate::builtin::BuiltinImpl;
 use crate::framework::EliFramework;
@@ -163,7 +162,7 @@ pub async fn execute(cmd: CliCommand) -> anyhow::Result<()> {
 
 /// Show registered hooks.
 async fn hooks_command() {
-    let framework = builtin_framework().await;
+    let (framework, _builtin) = builtin_framework().await;
     let mut report: Vec<_> = framework.hook_report().await.into_iter().collect();
     report.sort_by(|a, b| a.0.cmp(&b.0));
     println!("Hook implementations:");
@@ -189,21 +188,11 @@ pub(crate) fn strip_fake_tool_calls(text: &str) -> String {
     RE.replace_all(text, "").trim().to_owned()
 }
 
-async fn builtin_framework() -> Arc<EliFramework> {
+async fn builtin_framework() -> (Arc<EliFramework>, Arc<BuiltinImpl>) {
+    let builtin = Arc::new(BuiltinImpl::new());
     let framework = Arc::new(EliFramework::new());
-    framework
-        .register_plugin("builtin", Arc::new(BuiltinImpl::new()))
-        .await;
-    framework
-}
-
-fn print_cli_outbounds(outbounds: &[Value]) {
-    for outbound in outbounds {
-        let content = outbound_string_field(outbound, "content");
-        if !content.trim().is_empty() {
-            println!("{content}");
-        }
-    }
+    framework.register_plugin("builtin", builtin.clone()).await;
+    (framework, builtin)
 }
 
 fn print_usage(usage: &crate::types::TurnUsageInfo) {
@@ -212,13 +201,5 @@ fn print_usage(usage: &crate::types::TurnUsageInfo) {
             "\x1b[2m[tokens: {} in + {} out = {}]\x1b[0m",
             usage.input_tokens, usage.output_tokens, usage.total_tokens,
         );
-    }
-}
-
-fn outbound_string_field(outbound: &Value, key: &str) -> String {
-    match outbound.get(key) {
-        Some(Value::String(s)) => s.to_owned(),
-        Some(other) => other.to_string(),
-        None => String::new(),
     }
 }

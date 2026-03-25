@@ -6,7 +6,7 @@ pub(crate) async fn chat_command(
     session_id: Option<String>,
 ) -> anyhow::Result<()> {
     let session = session_id.unwrap_or_else(|| format!("cli:{chat_id}"));
-    let framework = super::builtin_framework().await;
+    let (framework, _builtin) = super::builtin_framework().await;
 
     println!("Eli chat session started. Type /quit to exit.");
 
@@ -43,7 +43,6 @@ pub(crate) async fn chat_command(
 
         match framework.process_inbound(inbound).await {
             Ok(result) => {
-                super::print_cli_outbounds(&result.outbounds);
                 super::print_usage(&result.usage);
             }
             Err(e) => eprintln!("Error: {e}"),

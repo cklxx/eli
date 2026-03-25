@@ -9,7 +9,7 @@ pub(crate) async fn run_command(
     session_id: Option<String>,
 ) -> anyhow::Result<()> {
     let session = session_id.unwrap_or_else(|| format!("{channel}:{chat_id}"));
-    let framework = super::builtin_framework().await;
+    let (framework, _builtin) = super::builtin_framework().await;
     let inbound = serde_json::json!({
         "session_id": session,
         "channel": channel,
@@ -22,7 +22,6 @@ pub(crate) async fn run_command(
     match framework.process_inbound(inbound).await {
         Ok(result) => {
             tracing::debug!(session_id = %result.session_id, "run complete");
-            super::print_cli_outbounds(&result.outbounds);
             super::print_usage(&result.usage);
         }
         Err(e) => {

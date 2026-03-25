@@ -338,9 +338,6 @@ eli/src/
 | `register_plugin(name, Arc<dyn EliHookSpec>)` | Register hook impl |
 | `load_hooks(Vec<(name, Arc<dyn EliHookSpec>)>)` | Batch register |
 | `process_inbound(Envelope) → Result<TurnResult>` | **Main pipeline** (7 stages) |
-| `bind_outbound_router(Arc<dyn OutboundChannelRouter>)` | Set delivery target |
-| `dispatch_via_router(&Envelope) → bool` | Route outbound |
-| `quit_via_router(session_id)` | Cancel session tasks |
 | `get_channels(MessageHandler) → HashMap<String, Box<dyn ChannelHook>>` | Collect channels |
 | `get_tape_store() → Option<TapeStoreKind>` | Get tape backend |
 | `get_system_prompt(&PromptValue, &State) → String` | Build system prompt |

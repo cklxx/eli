@@ -23,7 +23,9 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::builtin::agent::Agent;
-use crate::builtin::store::FileTapeStore;
+use crate::builtin::store::{FileTapeStore, ForkTapeStore};
+use crate::builtin::tape::TapeService;
+use crate::channels::base::Channel;
 use crate::channels::message::{ChannelMessage, MessageKind};
 use crate::hooks::{EliHookSpec, TapeStoreKind};
 use crate::smart_router::{RouteDecision, SmartRouter};
@@ -38,6 +40,9 @@ pub struct BuiltinImpl {
     home: PathBuf,
     router: SmartRouter,
     middleware_chain: MiddlewareChain,
+    tape_service: std::sync::OnceLock<TapeService>,
+    /// Channels for outbound dispatch (populated by gateway; empty in CLI mode).
+    channels: std::sync::RwLock<HashMap<String, Arc<dyn Channel>>>,
 }
 
 #[allow(clippy::new_without_default)]
@@ -51,6 +56,8 @@ impl BuiltinImpl {
             home,
             router: SmartRouter::new(),
             middleware_chain: MiddlewareChain::with_defaults(),
+            tape_service: std::sync::OnceLock::new(),
+            channels: std::sync::RwLock::new(HashMap::new()),
         }
     }
 
@@ -123,6 +130,22 @@ impl BuiltinImpl {
             .await
             .run(session_id, prompt, state, None, None, None)
             .await
+    }
+
+    /// Populate channels for gateway-mode outbound dispatch.
+    pub fn set_channels(&self, channels: HashMap<String, Arc<dyn Channel>>) {
+        let mut chs = self.channels.write().unwrap_or_else(|e| e.into_inner());
+        *chs = channels;
+    }
+
+    /// Get or create the shared TapeService for hook-level writes.
+    fn tape_service(&self) -> &TapeService {
+        self.tape_service.get_or_init(|| {
+            let tapes_dir = self.home.join("tapes");
+            let file_store = FileTapeStore::new(tapes_dir.clone());
+            let fork_store = ForkTapeStore::from_sync(file_store);
+            TapeService::new(tapes_dir, fork_store)
+        })
     }
 
     /// Provide the tape store (FileTapeStore backed by the agent's home directory).
@@ -338,6 +361,103 @@ impl EliHookSpec for BuiltinImpl {
                 .filter_map(|message| serde_json::to_value(message).ok())
                 .collect(),
         )
+    }
+
+    async fn save_state(
+        &self,
+        session_id: &str,
+        state: &State,
+        _message: &Envelope,
+        _model_output: &str,
+    ) {
+        let events = crate::control_plane::drain_save_events();
+        if events.is_empty() {
+            return;
+        }
+
+        let workspace = state
+            .get("_runtime_workspace")
+            .and_then(|v| v.as_str())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let tape_name = TapeService::session_tape_name(session_id, &workspace);
+        let tapes = self.tape_service();
+
+        for (name, data) in events {
+            if let Err(e) = tapes.append_event(&tape_name, &name, data).await {
+                tracing::warn!(error = %e, event = %name, "save_state: failed to write event");
+            }
+        }
+    }
+
+    async fn dispatch_outbound(&self, message: &Envelope) -> Option<bool> {
+        let out_ch = envelope_str(message, "output_channel", "").to_owned();
+        let channel_field = envelope_str(message, "channel", "").to_owned();
+        let content = envelope_content(message);
+        let cleanup_only = message
+            .get("context")
+            .and_then(|v| v.as_object())
+            .and_then(|ctx| ctx.get(CLEANUP_ONLY_CONTEXT_KEY))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Resolve channel under the lock, then drop it before any await.
+        let resolved = {
+            let channels = self.channels.read().unwrap_or_else(|e| e.into_inner());
+            if channels.is_empty() {
+                None // CLI mode
+            } else {
+                Some(
+                    channels
+                        .get(out_ch.as_str())
+                        .or_else(|| channels.get(channel_field.as_str()))
+                        .cloned(),
+                )
+            }
+        };
+
+        let Some(maybe_channel) = resolved else {
+            // CLI mode: print to stdout.
+            if !content.trim().is_empty() {
+                println!("{content}");
+            }
+            return Some(true);
+        };
+
+        // Gateway mode: route to channel.
+        if content.trim().is_empty() && !cleanup_only {
+            return Some(false);
+        }
+
+        let chat_id = envelope_str(message, "chat_id", "").to_owned();
+        if chat_id.is_empty() {
+            return Some(false);
+        }
+
+        let Some(ch) = maybe_channel else {
+            return Some(false);
+        };
+
+        let session_id = envelope_str(message, "session_id", "").to_owned();
+        let reply_context = message
+            .get("context")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let target_ch = if !out_ch.is_empty() {
+            &out_ch
+        } else {
+            &channel_field
+        };
+        let reply = ChannelMessage::new(&session_id, target_ch, &content)
+            .with_chat_id(&chat_id)
+            .with_context(reply_context)
+            .finalize();
+        if let Err(e) = ch.send(reply).await {
+            tracing::error!(error = %e, channel = %target_ch, "dispatch_outbound: failed to send");
+            return Some(false);
+        }
+        Some(true)
     }
 
     async fn on_error(&self, stage: &str, error: &anyhow::Error, message: Option<&Envelope>) {

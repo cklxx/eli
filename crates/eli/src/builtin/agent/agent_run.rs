@@ -87,7 +87,7 @@ pub(super) async fn run_command(
     .await;
 
     let elapsed_ms = start.elapsed().as_millis() as i64;
-    record_command_event(tapes, tape_name, body, &name, elapsed_ms, &result).await;
+    record_command_event(body, &name, elapsed_ms, &result);
 
     match result {
         Ok(val) => Ok(value_to_string(val)),
@@ -123,9 +123,7 @@ fn value_to_string(val: Value) -> String {
     }
 }
 
-async fn record_command_event(
-    tapes: &TapeService,
-    tape_name: &str,
+fn record_command_event(
     body: &str,
     name: &str,
     elapsed_ms: i64,
@@ -143,7 +141,7 @@ async fn record_command_event(
         "output": output,
         "date": Utc::now().to_rfc3339(),
     });
-    let _ = tapes.append_event(tape_name, "command", event).await;
+    crate::control_plane::push_save_event("command", event);
 }
 
 // ---------------------------------------------------------------------------
@@ -304,9 +302,7 @@ async fn write_handoff_grace(tapes: &TapeService, tape_name: &str, prev_anchor_n
     }
 }
 
-async fn record_run_event(
-    tapes: &TapeService,
-    tape_name: &str,
+fn record_run_event(
     elapsed_ms: i64,
     status: &str,
     error: Option<&str>,
@@ -332,7 +328,7 @@ async fn record_run_event(
     if let Some(err) = error {
         event["error"] = Value::String(err.to_owned());
     }
-    let _ = tapes.append_event(tape_name, "agent.run", event).await;
+    crate::control_plane::push_save_event("agent.run", event);
 }
 
 // ---------------------------------------------------------------------------
@@ -399,12 +395,12 @@ async fn process_agent_result(
 ) -> Result<String, ConduitError> {
     match result {
         Err(e) => {
-            record_run_event(tapes, tape_name, elapsed_ms, "error", Some(&e.message), &[]).await;
+            record_run_event(elapsed_ms, "error", Some(&e.message), &[]);
             Err(e)
         }
         Ok(ref output) if output.kind == ToolAutoResultKind::Text => {
             let text = output.text.clone().unwrap_or_default();
-            record_run_event(tapes, tape_name, elapsed_ms, "ok", None, &output.usage).await;
+            record_run_event(elapsed_ms, "ok", None, &output.usage);
             maybe_auto_handoff(tapes, tape_name, output, &text, settings).await;
             Ok(text)
         }
@@ -414,15 +410,7 @@ async fn process_agent_result(
                 .as_ref()
                 .map(|e| format!("{}: {}", e.kind.as_str(), e.message))
                 .unwrap_or_else(|| "tool_auto_error: unknown".to_owned());
-            record_run_event(
-                tapes,
-                tape_name,
-                elapsed_ms,
-                "error",
-                Some(&error_msg),
-                &output.usage,
-            )
-            .await;
+            record_run_event(elapsed_ms, "error", Some(&error_msg), &output.usage);
             Err(ConduitError::new(ErrorKind::Unknown, error_msg))
         }
     }
@@ -432,7 +420,8 @@ async fn process_agent_result(
 mod tests {
     use super::*;
     use crate::builtin::store::{FileTapeStore, ForkTapeStore};
-    use nexil::{TapeQuery, UsageEvent};
+    use crate::control_plane::{TurnContext, drain_save_events, with_turn_context};
+    use nexil::UsageEvent;
 
     fn make_tape_service() -> (tempfile::TempDir, TapeService) {
         let tmp = tempfile::tempdir().unwrap();
@@ -452,88 +441,93 @@ mod tests {
         }]
     }
 
-    async fn fetch_run_event(tapes: &TapeService, tape_name: &str) -> Value {
-        let query = TapeQuery::new(tape_name).kinds(vec!["event".into()]);
-        let entries = tapes.store().fetch_all(&query).await.unwrap();
-        entries
-            .into_iter()
-            .find(|e| e.payload.get("name").and_then(|v| v.as_str()) == Some("agent.run"))
-            .map(|e| e.payload.clone())
-            .expect("agent.run event not found in tape")
+    fn test_turn_context() -> TurnContext {
+        TurnContext {
+            cancellation: nexil::CancellationToken::new(),
+            wrap_tools: None,
+            usage: Default::default(),
+            save_events: Default::default(),
+        }
     }
 
     #[tokio::test]
-    async fn test_record_run_event_writes_usage_to_tape() {
-        let (_tmp, tapes) = make_tape_service();
-        let tape_name = "test_tape";
-        tapes.ensure_bootstrap_anchor(tape_name).await.unwrap();
+    async fn test_record_run_event_pushes_save_event() {
+        with_turn_context(test_turn_context(), async {
+            record_run_event(500, "ok", None, &make_usage(1000, 200));
 
-        record_run_event(&tapes, tape_name, 500, "ok", None, &make_usage(1000, 200)).await;
-
-        let payload = fetch_run_event(&tapes, tape_name).await;
-        let usage = &payload["data"]["usage"];
-        assert_eq!(usage["input_tokens"], 1000);
-        assert_eq!(usage["output_tokens"], 200);
-        assert_eq!(usage["total_tokens"], 1200);
-        assert_eq!(usage["rounds"], 1);
+            let events = drain_save_events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].0, "agent.run");
+            let data = &events[0].1;
+            assert_eq!(data["usage"]["input_tokens"], 1000);
+            assert_eq!(data["usage"]["output_tokens"], 200);
+            assert_eq!(data["usage"]["total_tokens"], 1200);
+            assert_eq!(data["usage"]["rounds"], 1);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn test_record_run_event_aggregates_multi_round_usage() {
-        let (_tmp, tapes) = make_tape_service();
-        let tape_name = "test_tape";
-        tapes.ensure_bootstrap_anchor(tape_name).await.unwrap();
+        with_turn_context(test_turn_context(), async {
+            let usage = vec![
+                UsageEvent {
+                    model: "m".into(),
+                    input_tokens: 500,
+                    output_tokens: 100,
+                    attempt: 0,
+                    success: true,
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                },
+                UsageEvent {
+                    model: "m".into(),
+                    input_tokens: 800,
+                    output_tokens: 150,
+                    attempt: 0,
+                    success: true,
+                    timestamp: "2026-01-01T00:00:01Z".into(),
+                },
+            ];
+            record_run_event(1000, "ok", None, &usage);
 
-        let usage = vec![
-            UsageEvent {
-                model: "m".into(),
-                input_tokens: 500,
-                output_tokens: 100,
-                attempt: 0,
-                success: true,
-                timestamp: "2026-01-01T00:00:00Z".into(),
-            },
-            UsageEvent {
-                model: "m".into(),
-                input_tokens: 800,
-                output_tokens: 150,
-                attempt: 0,
-                success: true,
-                timestamp: "2026-01-01T00:00:01Z".into(),
-            },
-        ];
-        record_run_event(&tapes, tape_name, 1000, "ok", None, &usage).await;
-
-        let payload = fetch_run_event(&tapes, tape_name).await;
-        let usage = &payload["data"]["usage"];
-        assert_eq!(usage["input_tokens"], 1300);
-        assert_eq!(usage["output_tokens"], 250);
-        assert_eq!(usage["total_tokens"], 1550);
-        assert_eq!(usage["rounds"], 2);
+            let events = drain_save_events();
+            assert_eq!(events.len(), 1);
+            let data = &events[0].1;
+            assert_eq!(data["usage"]["input_tokens"], 1300);
+            assert_eq!(data["usage"]["output_tokens"], 250);
+            assert_eq!(data["usage"]["total_tokens"], 1550);
+            assert_eq!(data["usage"]["rounds"], 2);
+        })
+        .await;
     }
 
     #[tokio::test]
-    async fn test_process_agent_result_ok_records_usage() {
+    async fn test_process_agent_result_ok_pushes_save_event() {
         let (_tmp, tapes) = make_tape_service();
         let tape_name = "test_tape";
         tapes.ensure_bootstrap_anchor(tape_name).await.unwrap();
 
-        let result = Ok(ToolAutoResult {
-            kind: ToolAutoResultKind::Text,
-            text: Some("hello".into()),
-            tool_calls: vec![],
-            tool_results: vec![],
-            error: None,
-            usage: make_usage(2000, 400),
-        });
+        with_turn_context(test_turn_context(), async {
+            let result = Ok(ToolAutoResult {
+                kind: ToolAutoResultKind::Text,
+                text: Some("hello".into()),
+                tool_calls: vec![],
+                tool_results: vec![],
+                error: None,
+                usage: make_usage(2000, 400),
+            });
 
-        let settings = AgentSettings::from_env();
-        let text = process_agent_result(&tapes, tape_name, result, 100, &settings)
-            .await
-            .unwrap();
-        assert_eq!(text, "hello");
+            let settings = AgentSettings::from_env();
+            let text = process_agent_result(&tapes, tape_name, result, 100, &settings)
+                .await
+                .unwrap();
+            assert_eq!(text, "hello");
 
-        let payload = fetch_run_event(&tapes, tape_name).await;
-        assert_eq!(payload["data"]["usage"]["total_tokens"], 2400);
+            let events = drain_save_events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].0, "agent.run");
+            assert_eq!(events[0].1["usage"]["total_tokens"], 2400);
+        })
+        .await;
     }
 }

@@ -42,7 +42,4 @@ pub mod types;
 // Re-export key types at the crate root for convenience.
 pub use framework::EliFramework;
 pub use hooks::{ChannelHook, EliHookSpec, HookError, HookRuntime, TapeStoreKind};
-pub use types::{
-    Envelope, MessageHandler, OutboundChannelRouter, OutboundDispatcher, PromptValue, State,
-    TurnResult, TurnUsageInfo,
-};
+pub use types::{Envelope, MessageHandler, PromptValue, State, TurnResult, TurnUsageInfo};
