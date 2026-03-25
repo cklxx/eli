@@ -658,19 +658,7 @@ impl LLM {
             system_prompt,
             messages.as_deref(),
         );
-
-        // Build the base context: tape history + current turn messages.
-        // Tape history is compact (spilled results, image placeholders).
-        // Current turn messages are full (images, complete content).
-        // This mirrors the stream() approach with prepend_tape_history.
-        let mut in_memory_msgs = if let Some(tape_name) = tape {
-            let tape_history = self.build_tape_messages(tape_name, tape_context).await;
-            let mut merged = initial_round_msgs.clone();
-            prepend_tape_history(&mut merged, tape_history);
-            merged
-        } else {
-            initial_round_msgs.clone()
-        };
+        let mut in_memory_msgs = initial_round_msgs.clone();
 
         if let Some(tape_name) = tape
             && !initial_round_msgs.is_empty()
@@ -713,9 +701,15 @@ impl LLM {
                 ));
             }
 
-            // Use in_memory_msgs: tape history (compact) + current turn
-            // (full images, complete tool results from this run_tools call).
-            let msgs = in_memory_msgs.clone();
+            // Build context from tape (includes history + current turn).
+            // Then restore the current turn's multimodal content which was
+            // stripped during tape persistence (image placeholders).
+            let mut msgs = self
+                ._prepare_messages(tape, tape_context, &in_memory_msgs)
+                .await?;
+            if let Some(ref parts) = user_content {
+                restore_last_user_content(&mut msgs, parts);
+            }
 
             let round = self._execute_tool_round(&msgs, &round_params).await?;
 
@@ -1394,6 +1388,20 @@ enum ToolRoundOutcome {
 
 pub(crate) fn default_api_base(provider: &str) -> String {
     provider_policies::default_api_base(provider)
+}
+
+/// Restore the original multimodal content on the last user message in context.
+/// This ensures the LLM sees images on the current turn even though tape has
+/// placeholders. On the next turn, user_content is None and tape's placeholders
+/// are used.
+fn restore_last_user_content(msgs: &mut [Value], user_content: &[Value]) {
+    if let Some(msg) = msgs
+        .iter_mut()
+        .rev()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+    {
+        msg["content"] = Value::Array(user_content.to_vec());
+    }
 }
 
 /// Strip image content blocks from a user message before tape persistence.
