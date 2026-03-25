@@ -1,4 +1,5 @@
 import express from "express";
+import rateLimit from "express-rate-limit";
 import type { SidecarConfig } from "./config.js";
 import { logger } from "./log.js";
 
@@ -442,7 +443,6 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
     });
 
     // Rate-limit setup endpoints (auth operations).
-    const { default: rateLimit } = await import("express-rate-limit");
     const setupLimiter = rateLimit({ windowMs: 60_000, max: 5, standardHeaders: true });
 
     // Setup: start QR login for a channel.
