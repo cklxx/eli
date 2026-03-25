@@ -144,7 +144,8 @@ pub(super) fn create_llm(
         .model(&model_str)
         .api_format(settings.api_format)
         .verbose(settings.verbose as u32)
-        .tape_store(tape_store);
+        .tape_store(tape_store)
+        .spill_dir(settings.home.join("tapes"));
 
     if let Some(fallback_models) = settings.fallback_models.clone() {
         builder = builder.fallback_models(fallback_models);

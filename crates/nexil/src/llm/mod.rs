@@ -23,6 +23,7 @@ use crate::core::results::{
 };
 use crate::core::tool_calls::{normalize_message_tool_calls, normalize_tool_calls};
 use crate::tape::entries::TapeEntry;
+use crate::tape::spill::{self, DEFAULT_SPILL};
 use crate::tape::{
     AnchorSelector, AsyncTapeManager, AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore,
     TapeContext, build_messages as tape_build_messages,
@@ -91,6 +92,7 @@ pub struct LLMBuilder {
     context: Option<TapeContext>,
     tape_store: Option<Box<dyn AsyncTapeStore + Send + Sync>>,
     stream_filter: Option<StreamEventFilter>,
+    spill_dir: Option<std::path::PathBuf>,
 }
 
 impl LLMBuilder {
@@ -111,6 +113,7 @@ impl LLMBuilder {
             context: None,
             tape_store: None,
             stream_filter: None,
+            spill_dir: None,
         }
     }
 
@@ -194,6 +197,15 @@ impl LLMBuilder {
         self
     }
 
+    /// Set the directory used for spilling large tool results to disk.
+    /// When set, tool results exceeding the spill threshold are written to
+    /// `{spill_dir}/{tape_name}.d/{call_id}.txt` and replaced with a truncated
+    /// head + tail + file reference in the tape.
+    pub fn spill_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.spill_dir = Some(dir.into());
+        self
+    }
+
     /// Set a stream event filter applied to every event before emission.
     pub fn stream_filter(mut self, filter: StreamEventFilter) -> Self {
         self.stream_filter = Some(filter);
@@ -268,6 +280,7 @@ impl LLMBuilder {
             tool_executor: ToolExecutor::new(),
             async_tape,
             stream_filter: self.stream_filter,
+            spill_dir: self.spill_dir,
         })
     }
 }
@@ -287,6 +300,7 @@ pub struct LLM {
     core: LLMCore,
     tool_executor: ToolExecutor,
     async_tape: AsyncTapeManager,
+    spill_dir: Option<std::path::PathBuf>,
     stream_filter: Option<StreamEventFilter>,
 }
 
@@ -354,6 +368,7 @@ impl LLM {
             tool_executor: ToolExecutor::new(),
             async_tape,
             stream_filter: None,
+            spill_dir: None,
         })
     }
 
@@ -793,11 +808,9 @@ impl LLM {
                     .append_system_if_changed(tape_name, content, meta.clone())
                     .await?;
             } else {
+                let persisted = strip_image_blocks_for_persistence(message);
                 self.async_tape
-                    .append_entry(
-                        tape_name,
-                        &TapeEntry::message(message.clone(), meta.clone()),
-                    )
+                    .append_entry(tape_name, &TapeEntry::message(persisted, meta.clone()))
                     .await?;
             }
         }
@@ -901,7 +914,8 @@ impl LLM {
                 .zip(execution.tool_results.iter())
                 .map(|(call, result)| {
                     let call_id = call.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    serde_json::json!({"call_id": call_id, "output": result})
+                    let output = self.maybe_spill_result(result, tape_name, call_id);
+                    serde_json::json!({"call_id": call_id, "output": output})
                 })
                 .collect();
             self.async_tape
@@ -930,6 +944,28 @@ impl LLM {
             }
         }
         Ok(())
+    }
+
+    /// If spill is configured and `result` is a large string, write the full
+    /// content to a spill file and return the truncated version. Otherwise
+    /// return the result as-is.
+    fn maybe_spill_result(&self, result: &Value, tape_name: &str, call_id: &str) -> Value {
+        let Some(ref base_dir) = self.spill_dir else {
+            return result.clone();
+        };
+        let Some(text) = result.as_str() else {
+            return result.clone();
+        };
+
+        let dir = spill::spill_dir_for_tape(base_dir, tape_name);
+        match spill::spill_if_needed(text, call_id, &dir, &DEFAULT_SPILL) {
+            Ok(Some(truncated)) => Value::String(truncated),
+            Ok(None) => result.clone(),
+            Err(e) => {
+                tracing::warn!(error = %e, call_id, "failed to spill tool result to disk");
+                result.clone()
+            }
+        }
     }
 
     // -- Streaming -----------------------------------------------------------
@@ -1318,6 +1354,53 @@ pub(crate) fn default_api_base(provider: &str) -> String {
         "anthropic" => "https://api.anthropic.com/v1".to_string(),
         other => format!("https://api.{other}.com/v1"),
     }
+}
+
+/// Strip image content blocks from a user message before tape persistence.
+/// Replaces `image_base64`, `image`, and `image_url` blocks with a text
+/// placeholder `[image: filename]`. Non-user messages and string-content
+/// messages pass through unchanged.
+fn strip_image_blocks_for_persistence(message: &Value) -> Value {
+    let role = message.get("role").and_then(|v| v.as_str());
+    if role != Some("user") {
+        return message.clone();
+    }
+
+    let Some(content) = message.get("content").and_then(|v| v.as_array()) else {
+        return message.clone();
+    };
+
+    let mut img_index = 0u32;
+    let replaced: Vec<Value> = content
+        .iter()
+        .map(|block| {
+            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match block_type {
+                "image_base64" | "image" | "image_url" => {
+                    let filename = extract_image_filename(block, img_index);
+                    img_index += 1;
+                    serde_json::json!({"type": "text", "text": format!("[image: {filename}]")})
+                }
+                _ => block.clone(),
+            }
+        })
+        .collect();
+
+    let mut msg = message.clone();
+    msg["content"] = Value::Array(replaced);
+    msg
+}
+
+/// Try to derive a filename from an image content block.
+fn extract_image_filename(block: &Value, index: u32) -> String {
+    // Try common locations for mime_type
+    let mime = block
+        .get("mime_type")
+        .or_else(|| block.get("source").and_then(|s| s.get("media_type")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("image/png");
+    let ext = mime.rsplit('/').next().unwrap_or("png");
+    format!("image_{index}.{ext}")
 }
 
 fn build_messages(

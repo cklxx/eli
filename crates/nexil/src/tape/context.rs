@@ -90,9 +90,6 @@ fn default_messages(entries: &[TapeEntry]) -> Vec<Value> {
         .collect()
 }
 
-/// Maximum characters for a single tool result content before truncation.
-const MAX_TOOL_RESULT_CHARS: usize = 16_000;
-
 /// Maximum total characters across all messages before aggressive trimming kicks in.
 const MAX_TOTAL_CONTEXT_CHARS: usize = 400_000;
 
@@ -100,45 +97,9 @@ const MAX_TOTAL_CONTEXT_CHARS: usize = 400_000;
 const AGGRESSIVE_TRIM_KEEP_ROUNDS: usize = 2;
 
 pub fn apply_context_budget(messages: &mut Vec<Value>) {
-    messages
-        .iter_mut()
-        .filter(|msg| msg_role(msg) == "tool")
-        .for_each(|msg| truncate_tool_result_content(msg, MAX_TOOL_RESULT_CHARS));
-
     let total_chars: usize = messages.iter().map(content_char_count).sum();
     if total_chars > MAX_TOTAL_CONTEXT_CHARS {
         aggressive_trim(messages);
-    }
-}
-
-fn truncate_tool_result_content(msg: &mut Value, limit: usize) {
-    let content = match msg.get("content").and_then(|c| c.as_str()) {
-        Some(s) => s,
-        None => return,
-    };
-    if content.len() <= limit {
-        return;
-    }
-
-    let safe_limit = (0..=limit)
-        .rev()
-        .find(|&i| content.is_char_boundary(i))
-        .unwrap_or(0);
-    let cut = content[..safe_limit].rfind('\n').unwrap_or(safe_limit);
-    let shown_lines = content[..cut].matches('\n').count() + 1;
-    let total_lines = content.matches('\n').count() + 1;
-
-    let truncated = format!(
-        "{}\n\n[Truncated: {}/{} lines shown ({}/{} chars). Use tape.search to see full output.]",
-        &content[..cut],
-        shown_lines,
-        total_lines,
-        cut,
-        content.len()
-    );
-
-    if let Some(obj) = msg.as_object_mut() {
-        obj.insert("content".to_owned(), Value::String(truncated));
     }
 }
 

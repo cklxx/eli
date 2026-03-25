@@ -5,6 +5,7 @@ pub mod entries;
 pub mod manager;
 pub mod query;
 pub mod session;
+pub mod spill;
 pub mod store;
 
 pub use context::{AnchorSelector, TapeContext, build_messages};
