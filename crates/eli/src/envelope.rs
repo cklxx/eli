@@ -113,12 +113,12 @@ fn field_of_str(message: &Envelope, key: &str, default: &str) -> String {
 }
 
 #[cfg(test)]
-fn str_field_of(message: &Envelope, key: &str) -> Option<&str> {
+fn str_field_of<'a>(message: &'a Envelope, key: &'a str) -> Option<&'a str> {
     message.get_str_field(key)
 }
 
 #[cfg(test)]
-fn required_str_field_of(message: &Envelope, key: &str) -> Result<&str, anyhow::Error> {
+fn required_str_field_of<'a>(message: &'a Envelope, key: &'a str) -> Result<&'a str, anyhow::Error> {
     message.require_str_field(key)
 }
 

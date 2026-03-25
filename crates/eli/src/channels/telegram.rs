@@ -371,7 +371,7 @@ fn format_message_content(msg: &Message) -> String {
         "voice" => format!("[Voice message: {}s]", voice_duration_seconds(msg)),
         "document" => format_document_content(msg, caption),
         "video_note" => format!("[Video note: {}s]", video_note_duration_seconds(msg)),
-        _ => format!("[Unsupported message type: {msg_type}]"),
+        msg_type => format!("[Unsupported message type: {msg_type}]"),
     }
 }
 

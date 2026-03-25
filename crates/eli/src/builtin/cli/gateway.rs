@@ -220,6 +220,36 @@ async fn wait_for_sidecar(sidecar_url: &str) -> anyhow::Result<()> {
     anyhow::bail!("sidecar not reachable at {sidecar_url}");
 }
 
+fn report_gateway_task(result: Result<(), tokio::task::JoinError>) {
+    if let Err(err) = result
+        && !err.is_cancelled()
+    {
+        eprintln!("Gateway task failed: {err}");
+    }
+}
+
+async fn drain_gateway_tasks(tasks: &mut tokio::task::JoinSet<()>) {
+    tasks.abort_all();
+    while let Some(result) = tasks.join_next().await {
+        report_gateway_task(result);
+    }
+}
+
+async fn drain_processing_tasks(tasks: &mut tokio::task::JoinSet<()>) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !tasks.is_empty() {
+        let wait = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if wait.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(wait, tasks.join_next()).await {
+            Ok(Some(result)) => report_gateway_task(result),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    drain_gateway_tasks(tasks).await;
+}
+
 /// Start channel listeners (Telegram, Webhook/Sidecar).
 pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     use std::collections::HashMap;
@@ -232,15 +262,41 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     // Load .env so ELI_TELEGRAM_TOKEN (and others) are available.
     let _ = dotenvy::dotenv();
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+    let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     let mut channels: HashMap<String, Arc<dyn Channel>> = HashMap::new();
     let mut tasks = tokio::task::JoinSet::new();
+    let mut workers = tokio::task::JoinSet::new();
+
+    // Channel implementations still publish via UnboundedSender; bridge them
+    // into the bounded gateway queue without touching channel modules.
+    let ingress_cancel = cancel.clone();
+    tasks.spawn(async move {
+        loop {
+            let msg = match tokio::select! {
+                msg = ingress_rx.recv() => msg,
+                () = ingress_cancel.cancelled() => None,
+            } {
+                Some(msg) => msg,
+                None => break,
+            };
+
+            tokio::select! {
+                res = tx.send(msg) => {
+                    if res.is_err() {
+                        break;
+                    }
+                }
+                () = ingress_cancel.cancelled() => break,
+            }
+        }
+    });
 
     // -- Telegram --
     let tg_settings = TelegramSettings::from_env();
     if !tg_settings.token.is_empty() {
-        let tg = Arc::new(TelegramChannel::new(tx.clone(), tg_settings));
+        let tg = Arc::new(TelegramChannel::new(ingress_tx.clone(), tg_settings));
         println!("Starting Telegram channel...");
         let ch = tg.clone();
         let c = cancel.clone();
@@ -258,7 +314,7 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     if find_sidecar_dir().is_some() || wh_settings.is_configured() {
         sidecar_child = start_sidecar(&wh_settings);
 
-        let wh = Arc::new(WebhookChannel::new(tx.clone(), wh_settings));
+        let wh = Arc::new(WebhookChannel::new(ingress_tx.clone(), wh_settings));
         println!("Starting Webhook channel...");
         let ch = wh.clone();
         let c = cancel.clone();
@@ -306,10 +362,15 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     });
 
     let framework = super::builtin_framework().await;
-    let inflight = Arc::new(tokio::sync::Semaphore::new(0));
     loop {
         tokio::select! {
-            Some(msg) = rx.recv() => {
+            Some(result) = workers.join_next(), if !workers.is_empty() => {
+                report_gateway_task(result);
+            }
+            maybe_msg = rx.recv() => {
+                let Some(msg) = maybe_msg else {
+                    break;
+                };
                 let source_channel = msg.channel.clone();
                 let output_channel = if msg.output_channel.is_empty() {
                     source_channel.clone()
@@ -413,10 +474,7 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
                 let fw = framework.clone();
                 let chs = channels.clone();
                 let cancel_inner = cancel.clone();
-                let sem = inflight.clone();
-                sem.add_permits(1);
-                tokio::spawn(async move {
-                    let _permit = sem.acquire().await;
+                workers.spawn(async move {
                     let result = tokio::select! {
                         r = fw.process_inbound(inbound) => r,
                         () = cancel_inner.cancelled() => return,
@@ -482,10 +540,7 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
 
     // Drain inflight framework tasks (max 5s) before killing sidecar,
     // so outbound replies can still reach channel plugins.
-    let drain_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    while let Ok(Ok(permit)) = tokio::time::timeout_at(drain_deadline, inflight.acquire()).await {
-        permit.forget(); // consumed
-    }
+    drain_processing_tasks(&mut workers).await;
 
     // Clean up — kill the entire sidecar process group so child processes
     // (jiti workers, etc.) don't leak.
@@ -515,13 +570,7 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
             eprintln!("Error stopping {name}: {e}");
         }
     }
-    while let Some(result) = tasks.join_next().await {
-        if let Err(err) = result
-            && !err.is_cancelled()
-        {
-            eprintln!("Gateway task failed: {err}");
-        }
-    }
+    drain_gateway_tasks(&mut tasks).await;
     println!("Gateway stopped.");
     Ok(())
 }

@@ -3,6 +3,8 @@
 use crate::builtin::config::EliConfig;
 use crate::builtin::settings::EnvConfig;
 
+type Config = EliConfig;
+
 /// Manage model selection: show, list, or switch.
 pub(crate) async fn model_command(name: Option<String>) -> anyhow::Result<()> {
     match name.as_deref() {
@@ -41,85 +43,72 @@ fn model_show() -> anyhow::Result<()> {
 
 /// Resolve an API key for the given provider for model listing purposes.
 fn resolve_api_key_for_provider(provider: &str) -> anyhow::Result<String> {
-    // 1. Check ELI_API_KEY env var.
-    if let Some(key) = EnvConfig::api_key(None)
-        && !key.is_empty()
-    {
+    let config = Config::load();
+    if let Some(key) = resolve_from_env(provider) {
         return Ok(key);
     }
-
-    match provider {
-        "anthropic" => {
-            // Check ANTHROPIC_API_KEY env var.
-            if let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
-                && !key.is_empty()
-            {
-                return Ok(key);
-            }
-            // Check auth.json (handles both OAuth tokens and legacy API keys).
-            if let Some(key) = crate::builtin::config::load_anthropic_api_key() {
-                return Ok(key);
-            }
-            anyhow::bail!(
-                "No API key found for Anthropic.\n\
-                 Run `eli login claude` or set ANTHROPIC_API_KEY."
-            );
-        }
-        "openai" => {
-            // Check OPENAI_API_KEY env var.
-            if let Ok(key) = std::env::var("OPENAI_API_KEY")
-                && !key.is_empty()
-            {
-                return Ok(key);
-            }
-            // Check Codex OAuth tokens.
-            let codex_home = std::env::var("CODEX_HOME")
-                .ok()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| {
-                    dirs::home_dir()
-                        .unwrap_or_else(|| std::path::PathBuf::from("."))
-                        .join(".codex")
-                });
-            let resolver = nexil::auth::openai_codex::codex_cli_api_key_resolver(Some(codex_home));
-            if let Some(key) = resolver("openai") {
-                return Ok(key);
-            }
-            anyhow::bail!(
-                "No API key found for OpenAI.\n\
-                 Run `eli login openai` or set OPENAI_API_KEY."
-            );
-        }
-        "github-copilot" => {
-            // Use the github copilot resolver which checks stored tokens, env vars, gh CLI.
-            let resolver =
-                nexil::auth::github_copilot::github_copilot_oauth_resolver(None, None, None);
-            if let Some(key) = resolver("github-copilot") {
-                return Ok(key);
-            }
-            anyhow::bail!(
-                "No GitHub token found for Copilot.\n\
-                 Run `eli login github-copilot` or set GITHUB_TOKEN."
-            );
-        }
-        "openrouter" => {
-            if let Ok(key) = std::env::var("OPENROUTER_API_KEY")
-                && !key.is_empty()
-            {
-                return Ok(key);
-            }
-            anyhow::bail!(
-                "No API key found for OpenRouter.\n\
-                 Set OPENROUTER_API_KEY environment variable."
-            );
-        }
-        _ => {
-            anyhow::bail!(
-                "Cannot resolve API key for unknown provider: {provider}\n\
-                 Set ELI_API_KEY environment variable."
-            );
-        }
+    if let Some(key) = resolve_from_config(provider, &config) {
+        return Ok(key);
     }
+    resolve_via_oauth(provider)
+}
+
+fn resolve_from_env(provider: &str) -> Option<String> {
+    EnvConfig::api_key(None)
+        .filter(|key| !key.is_empty())
+        .or_else(|| match provider {
+            "anthropic" => std::env::var("ANTHROPIC_API_KEY").ok(),
+            "openai" => std::env::var("OPENAI_API_KEY").ok(),
+            "openrouter" => std::env::var("OPENROUTER_API_KEY").ok(),
+            "github-copilot" => std::env::var("GITHUB_TOKEN").ok(),
+            _ => None,
+        })
+        .filter(|key| !key.is_empty())
+}
+
+fn resolve_from_config(provider: &str, _config: &Config) -> Option<String> {
+    match provider {
+        "anthropic" => crate::builtin::config::load_anthropic_api_key(),
+        _ => None,
+    }
+}
+
+fn resolve_via_oauth(provider: &str) -> anyhow::Result<String> {
+    match provider {
+        "openai" => resolve_openai_oauth().ok_or_else(|| {
+            anyhow::anyhow!("No API key found for OpenAI.\nRun `eli login openai` or set OPENAI_API_KEY.")
+        }),
+        "github-copilot" => resolve_github_copilot_oauth().ok_or_else(|| {
+            anyhow::anyhow!("No GitHub token found for Copilot.\nRun `eli login github-copilot` or set GITHUB_TOKEN.")
+        }),
+        "anthropic" => anyhow::bail!(
+            "No API key found for Anthropic.\nRun `eli login claude` or set ANTHROPIC_API_KEY."
+        ),
+        "openrouter" => anyhow::bail!(
+            "No API key found for OpenRouter.\nSet OPENROUTER_API_KEY environment variable."
+        ),
+        _ => anyhow::bail!(
+            "Cannot resolve API key for unknown provider: {provider}\nSet ELI_API_KEY environment variable."
+        ),
+    }
+}
+
+fn resolve_openai_oauth() -> Option<String> {
+    let codex_home = std::env::var("CODEX_HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".codex")
+        });
+    let resolver = nexil::auth::openai_codex::codex_cli_api_key_resolver(Some(codex_home));
+    resolver("openai")
+}
+
+fn resolve_github_copilot_oauth() -> Option<String> {
+    let resolver = nexil::auth::github_copilot::github_copilot_oauth_resolver(None, None, None);
+    resolver("github-copilot")
 }
 
 /// Default API base URL for a provider.
