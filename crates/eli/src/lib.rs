@@ -1,7 +1,29 @@
-//! Eli: a hook-first AI agent framework.
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+//! Hook-first AI agent framework with multi-channel support.
 //!
-//! This crate provides the core framework runtime, hook specifications,
-//! envelope utilities, and shared types for building Eli-based applications.
+//! Eli processes every inbound message through a linear hook pipeline:
+//!
+//! ```text
+//! resolve_session → load_state → build_prompt → run_model
+//!     → save_state → render_outbound → dispatch_outbound
+//! ```
+//!
+//! Each stage is a method on [`EliHookSpec`]. Builtins register first;
+//! user plugins register after, and **last-registered wins** for chain-aborting hooks.
+//!
+//! # Feature flags
+//!
+//! | Flag | Default | Description |
+//! |------|---------|-------------|
+//! | `telegram` | yes | Telegram channel via teloxide |
+//! | `gateway` | yes | HTTP gateway channel via axum |
+//! | `tape-viewer` | yes | Web UI for inspecting tape history |
+//!
+//! # Key types
+//!
+//! - [`EliFramework`] — Minimal framework core; everything grows from hook plugins.
+//! - [`EliHookSpec`] — Trait defining all hook points in the turn pipeline.
+//! - [`Channel`](channels::base::Channel) — Transport-level channel trait for inbound/outbound I/O.
 
 pub mod builtin;
 pub mod channels;

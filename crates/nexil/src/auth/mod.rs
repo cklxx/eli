@@ -1,4 +1,4 @@
-//! Authentication helpers for Conduit.
+//! OAuth and API key authentication for LLM providers.
 
 pub mod github_copilot;
 pub mod openai_codex;

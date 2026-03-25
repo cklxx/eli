@@ -1,4 +1,19 @@
-//! Conduit: a developer-first LLM toolkit.
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+//! Provider-agnostic LLM toolkit — streaming, tool calls, tape storage, OAuth.
+//!
+//! # Key types
+//!
+//! | Type | Purpose |
+//! |------|---------|
+//! | [`LLM`] | High-level facade for chat completions and tool-calling loops. |
+//! | [`LLMBuilder`] | Fluent builder for configuring an [`LLM`] instance. |
+//! | [`ChatRequest`] | Parameters for a single chat completion or tool-calling request. |
+//! | [`StreamEvent`] | A single event emitted by a streaming LLM response. |
+//! | [`Tool`] | A callable unit the model can invoke, with optional handler. |
+//! | [`ToolSet`] | A validated collection of tools ready to send as the `tools` parameter. |
+//! | [`TapeContext`] | Configuration for building a prompt context window from tape entries. |
+//! | [`TapeManager`] | Persistent tape storage and retrieval. |
+//! | [`ConduitError`] | Unified error type across all nexil operations. |
 
 pub(crate) mod adapter;
 pub mod auth;
