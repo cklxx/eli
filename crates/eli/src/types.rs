@@ -53,19 +53,18 @@ impl PromptValue {
     pub fn as_text(&self) -> String {
         match self {
             PromptValue::Text(s) => s.clone(),
-            PromptValue::Parts(parts) => {
-                let mut texts = Vec::new();
-                for part in parts {
-                    if let Some(text) = part.as_str() {
-                        texts.push(text.to_string());
-                    } else if let Some(obj) = part.as_object()
-                        && let Some(text) = obj.get("text").and_then(|v| v.as_str())
-                    {
-                        texts.push(text.to_string());
-                    }
-                }
-                texts.join("\n")
-            }
+            PromptValue::Parts(parts) => parts
+                .iter()
+                .filter_map(|part| {
+                    part.as_str().map(str::to_owned).or_else(|| {
+                        part.as_object()
+                            .and_then(|obj| obj.get("text"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     }
 

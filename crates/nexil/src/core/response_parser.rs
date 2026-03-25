@@ -9,14 +9,13 @@ use super::errors::{ConduitError, ErrorKind};
 use super::execution::LLMCore;
 use crate::clients::parsing::TransportKind;
 
-/// Wrapper that pairs a transport kind with the raw response payload.
+/// A transport kind paired with the raw response payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransportResponse {
     pub transport: TransportKind,
     pub payload: Value,
 }
 
-/// Iterate over parsed JSON payloads from SSE `data:` lines.
 fn sse_events(buffer: &str) -> impl Iterator<Item = Value> + '_ {
     buffer.lines().filter_map(|line| {
         let data = line.trim().strip_prefix("data: ")?;
@@ -24,7 +23,6 @@ fn sse_events(buffer: &str) -> impl Iterator<Item = Value> + '_ {
     })
 }
 
-/// Append `suffix` to a string-valued map entry, inserting if absent.
 fn concat_str_entry(map: &mut serde_json::Map<String, Value>, key: &str, suffix: &str) {
     let val = map
         .entry(key)
@@ -34,17 +32,14 @@ fn concat_str_entry(map: &mut serde_json::Map<String, Value>, key: &str, suffix:
     }
 }
 
-/// Merge one OpenAI tool_call delta (by `index`) into the accumulator.
 fn merge_tool_call_delta(map: &mut BTreeMap<u64, serde_json::Map<String, Value>>, delta: &Value) {
     let idx = delta.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
     let entry = map.entry(idx).or_default();
-    // Keep first-seen scalars (id, type)
     for key in ["id", "type"] {
         if let Some(v) = delta.get(key).filter(|_| !entry.contains_key(key)) {
             entry.insert(key.to_owned(), v.clone());
         }
     }
-    // Merge function sub-object: name once, arguments concatenated
     let Some(fd) = delta.get("function").and_then(|f| f.as_object()) else {
         return;
     };
@@ -63,7 +58,6 @@ fn merge_tool_call_delta(map: &mut BTreeMap<u64, serde_json::Map<String, Value>>
     }
 }
 
-/// Build a Completion-format response JSON from accumulated parts.
 fn build_completion_response(
     content: &str,
     tc_map: BTreeMap<u64, serde_json::Map<String, Value>>,
@@ -76,7 +70,6 @@ fn build_completion_response(
     serde_json::json!({"choices": [{"message": msg}]})
 }
 
-/// Parse OpenAI Completion-format SSE into assembled response.
 fn parse_completion_sse(buffer: &str) -> Result<Value, ConduitError> {
     let mut content = String::new();
     let mut tc_map: BTreeMap<u64, serde_json::Map<String, Value>> = BTreeMap::new();
@@ -101,7 +94,6 @@ fn parse_completion_sse(buffer: &str) -> Result<Value, ConduitError> {
     Ok(build_completion_response(&content, tc_map))
 }
 
-/// Parse OpenAI Responses-format SSE (look for `response.completed`).
 fn parse_responses_sse(buffer: &str) -> Result<Value, ConduitError> {
     for event in sse_events(buffer) {
         if event.get("type").and_then(|t| t.as_str()) == Some("response.completed")
@@ -116,76 +108,102 @@ fn parse_responses_sse(buffer: &str) -> Result<Value, ConduitError> {
     ))
 }
 
-/// Parse Anthropic Messages-format SSE into assembled response.
-fn parse_messages_sse(buffer: &str) -> Result<Value, ConduitError> {
-    let mut content = String::new();
-    let mut tool_use_blocks: Vec<Value> = Vec::new();
-    let mut current_tool: Option<serde_json::Map<String, Value>> = None;
-    let mut tool_args = String::new();
-    let mut usage: Option<Value> = None;
+struct MessagesAccumulator {
+    content: String,
+    tool_use_blocks: Vec<Value>,
+    current_tool: Option<serde_json::Map<String, Value>>,
+    tool_args: String,
+    usage: Option<Value>,
+}
 
-    for event in sse_events(buffer) {
+impl MessagesAccumulator {
+    fn new() -> Self {
+        Self {
+            content: String::new(),
+            tool_use_blocks: Vec::new(),
+            current_tool: None,
+            tool_args: String::new(),
+            usage: None,
+        }
+    }
+
+    fn process_event(&mut self, event: &Value) {
         match event.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-            "content_block_start" => {
-                if let Some(block) = event
-                    .get("content_block")
-                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-                {
-                    let mut tool = serde_json::Map::new();
-                    for key in ["id", "name"] {
-                        if let Some(v) = block.get(key) {
-                            tool.insert(key.to_owned(), v.clone());
-                        }
-                    }
-                    tool_args.clear();
-                    current_tool = Some(tool);
-                }
-            }
-            "content_block_delta" => match event.pointer("/delta/type").and_then(|t| t.as_str()) {
-                Some("text_delta") => {
-                    if let Some(t) = event.pointer("/delta/text").and_then(|t| t.as_str()) {
-                        content.push_str(t);
-                    }
-                }
-                Some("input_json_delta") => {
-                    if let Some(p) = event
-                        .pointer("/delta/partial_json")
-                        .and_then(|p| p.as_str())
-                    {
-                        tool_args.push_str(p);
-                    }
-                }
-                _ => {}
-            },
-            "content_block_stop" => {
-                if let Some(mut tool) = current_tool.take() {
-                    let input: Value =
-                        serde_json::from_str(&tool_args).unwrap_or(serde_json::json!({}));
-                    tool.insert("input".to_owned(), input);
-                    tool.insert("type".to_owned(), Value::String("tool_use".to_owned()));
-                    tool_use_blocks.push(Value::Object(tool));
-                    tool_args.clear();
-                }
-            }
+            "content_block_start" => self.handle_block_start(event),
+            "content_block_delta" => self.handle_block_delta(event),
+            "content_block_stop" => self.handle_block_stop(),
             "message_delta" => {
-                usage = event.get("usage").cloned();
+                self.usage = event.get("usage").cloned();
             }
             _ => {}
         }
     }
 
-    let mut blocks: Vec<Value> = Vec::new();
-    if !content.is_empty() {
-        blocks.push(serde_json::json!({"type": "text", "text": content}));
+    fn handle_block_start(&mut self, event: &Value) {
+        let Some(block) = event
+            .get("content_block")
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+        else {
+            return;
+        };
+        let tool = ["id", "name"]
+            .iter()
+            .filter_map(|key| Some(((*key).to_owned(), block.get(*key)?.clone())))
+            .collect();
+        self.tool_args.clear();
+        self.current_tool = Some(tool);
     }
-    blocks.extend(tool_use_blocks);
-    let mut result = serde_json::json!({"role": "assistant", "content": blocks});
-    if let Some(u) = usage
-        && let Value::Object(obj) = &mut result
-    {
-        obj.insert("usage".to_owned(), u);
+
+    fn handle_block_delta(&mut self, event: &Value) {
+        match event.pointer("/delta/type").and_then(|t| t.as_str()) {
+            Some("text_delta") => {
+                if let Some(t) = event.pointer("/delta/text").and_then(|t| t.as_str()) {
+                    self.content.push_str(t);
+                }
+            }
+            Some("input_json_delta") => {
+                if let Some(p) = event
+                    .pointer("/delta/partial_json")
+                    .and_then(|p| p.as_str())
+                {
+                    self.tool_args.push_str(p);
+                }
+            }
+            _ => {}
+        }
     }
-    Ok(result)
+
+    fn handle_block_stop(&mut self) {
+        if let Some(mut tool) = self.current_tool.take() {
+            let input: Value =
+                serde_json::from_str(&self.tool_args).unwrap_or(serde_json::json!({}));
+            tool.insert("input".to_owned(), input);
+            tool.insert("type".to_owned(), Value::String("tool_use".to_owned()));
+            self.tool_use_blocks.push(Value::Object(tool));
+            self.tool_args.clear();
+        }
+    }
+
+    fn into_response(self) -> Value {
+        let text_block = (!self.content.is_empty())
+            .then(|| serde_json::json!({"type": "text", "text": self.content}));
+        let blocks: Vec<Value> = text_block.into_iter().chain(self.tool_use_blocks).collect();
+        let mut result = serde_json::json!({"role": "assistant", "content": blocks});
+        if let Some(u) = self.usage
+            && let Value::Object(obj) = &mut result
+        {
+            obj.insert("usage".to_owned(), u);
+        }
+        result
+    }
+}
+
+fn parse_messages_sse(buffer: &str) -> Result<Value, ConduitError> {
+    let mut acc = MessagesAccumulator::new();
+    for event in sse_events(buffer) {
+        acc.process_event(&event);
+    }
+    Ok(acc.into_response())
 }
 
 /// Parse a collected SSE buffer into a single assembled JSON response.

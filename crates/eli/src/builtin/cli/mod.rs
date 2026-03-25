@@ -177,13 +177,13 @@ async fn hooks_command() {
     }
 }
 
-/// Remove hallucinated `<function_calls>...</function_calls>` blocks and
-/// surrounding narration like "I'll respond..." from model output.
+/// Strip hallucinated `<function_calls>...</function_calls>` blocks from model output.
 pub(crate) fn strip_fake_tool_calls(text: &str) -> String {
-    // Remove <function_calls>...</function_calls> blocks (greedy, may span multiple lines)
-    let re = regex::Regex::new(r"(?s)<function_calls>.*?</function_calls>").unwrap();
-    let cleaned = re.replace_all(text, "");
-    cleaned.trim().to_owned()
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?s)<function_calls>.*?</function_calls>")
+            .expect("SAFETY: regex is a static literal")
+    });
+    RE.replace_all(text, "").trim().to_owned()
 }
 
 async fn builtin_framework() -> Arc<EliFramework> {
@@ -205,7 +205,7 @@ fn print_cli_outbounds(outbounds: &[Value]) {
 
 fn outbound_string_field(outbound: &Value, key: &str) -> String {
     match outbound.get(key) {
-        Some(Value::String(value)) => value.clone(),
+        Some(Value::String(s)) => s.to_owned(),
         Some(other) => other.to_string(),
         None => String::new(),
     }

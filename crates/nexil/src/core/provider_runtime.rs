@@ -48,11 +48,8 @@ impl<'a> ProviderRuntime<'a> {
                 if provider_policies::supports_messages_format(self.provider_name, self.model_id) {
                     return Ok(TransportKind::Messages);
                 }
-
-                match self.require_responses(tools_payload, supports_responses) {
-                    Ok(transport) => Ok(transport),
-                    Err(_) => Ok(TransportKind::Completion),
-                }
+                self.require_responses(tools_payload, supports_responses)
+                    .or(Ok(TransportKind::Completion))
             }
         }
     }

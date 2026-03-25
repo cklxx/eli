@@ -115,20 +115,21 @@ impl ChannelMessage {
         let content = content.into();
         let chat_id = "default".to_owned();
 
-        let mut context = serde_json::Map::new();
-        context.insert("channel".to_owned(), Value::String(format!("${channel}")));
-        context.insert("chat_id".to_owned(), Value::String(chat_id.clone()));
+        let context = serde_json::Map::from_iter([
+            ("channel".to_owned(), Value::String(format!("${channel}"))),
+            ("chat_id".to_owned(), Value::String(chat_id.clone())),
+        ]);
 
         Self {
+            output_channel: channel.clone(),
             session_id,
-            channel: channel.clone(),
+            channel,
             content,
             chat_id,
             is_active: false,
             kind: MessageKind::Normal,
             context,
             media: Vec::new(),
-            output_channel: channel,
         }
     }
 
@@ -187,16 +188,12 @@ impl ChannelMessage {
         self
     }
 
-    /// String representation of context for prompt building.
     pub fn context_str(&self) -> String {
         self.context
             .iter()
-            .map(|(k, v)| {
-                let val = match v {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                format!("{k}={val}")
+            .map(|(k, v)| match v {
+                Value::String(s) => format!("{k}={s}"),
+                other => format!("{k}={other}"),
             })
             .collect::<Vec<_>>()
             .join("|")

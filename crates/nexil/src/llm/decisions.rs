@@ -13,30 +13,20 @@ use crate::tape::entries::TapeEntry;
 /// matching `decision_revoked` tombstone are excluded. Returns the text of
 /// each active decision in chronological order.
 pub fn collect_active_decisions(entries: &[TapeEntry]) -> Vec<String> {
-    let mut decisions: Vec<String> = Vec::new();
-    let mut revoked: HashSet<String> = HashSet::new();
+    let revoked: HashSet<String> = entries
+        .iter()
+        .filter(|e| e.kind == "decision_revoked")
+        .filter_map(|e| e.payload.get("text").and_then(|v| v.as_str()))
+        .map(str::to_owned)
+        .collect();
 
-    // First pass: collect all revocations
-    for entry in entries {
-        if entry.kind == "decision_revoked"
-            && let Some(text) = entry.payload.get("text").and_then(|v| v.as_str())
-        {
-            revoked.insert(text.to_string());
-        }
-    }
-
-    // Second pass: collect decisions not revoked
-    for entry in entries {
-        if entry.kind == "decision"
-            && let Some(text) = entry.payload.get("text").and_then(|v| v.as_str())
-            && !revoked.contains(text)
-            && !text.is_empty()
-        {
-            decisions.push(text.to_string());
-        }
-    }
-
-    decisions
+    entries
+        .iter()
+        .filter(|e| e.kind == "decision")
+        .filter_map(|e| e.payload.get("text").and_then(|v| v.as_str()))
+        .filter(|text| !text.is_empty() && !revoked.contains(*text))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Inject active decisions into the system prompt of a message list.
@@ -49,18 +39,17 @@ pub fn inject_decisions_into_system_prompt(messages: &mut Vec<Value>, decisions:
         return;
     }
 
-    let mut block = String::from("\n\nActive decisions:");
-    for (i, decision) in decisions.iter().enumerate() {
-        block.push_str(&format!("\n{}. {}", i + 1, decision));
-    }
+    let block = decisions.iter().enumerate().fold(
+        String::from("\n\nActive decisions:"),
+        |mut acc, (i, d)| {
+            acc.push_str(&format!("\n{}. {}", i + 1, d));
+            acc
+        },
+    );
 
-    // Find the last system message and append to it
-    let mut last_system_idx = None;
-    for (i, msg) in messages.iter().enumerate() {
-        if msg.get("role").and_then(|r| r.as_str()) == Some("system") {
-            last_system_idx = Some(i);
-        }
-    }
+    let last_system_idx = messages
+        .iter()
+        .rposition(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"));
 
     if let Some(idx) = last_system_idx {
         if let Some(obj) = messages[idx].as_object_mut() {

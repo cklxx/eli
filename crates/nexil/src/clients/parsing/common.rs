@@ -2,30 +2,20 @@
 
 use serde_json::Value;
 
-/// Safely access a field from a JSON value (object key lookup).
 pub fn field<'a>(data: &'a Value, key: &str) -> Option<&'a Value> {
     data.get(key)
 }
 
-/// Access a field and return a default if missing.
 pub fn field_or<'a>(data: &'a Value, key: &str, default: &'a Value) -> &'a Value {
     data.get(key).unwrap_or(default)
 }
 
-/// Access a string field, returning an empty string if missing or not a string.
 pub fn field_str<'a>(data: &'a Value, key: &str) -> &'a str {
     data.get(key).and_then(|v| v.as_str()).unwrap_or("")
 }
 
-/// Expand tool calls that have multiple concatenated JSON objects in their
-/// `arguments` field into separate tool call entries.
 pub fn expand_tool_calls(calls: Vec<Value>) -> Vec<Value> {
-    let mut expanded = Vec::new();
-    for call in calls {
-        let mut items = expand_single_tool_call(&call);
-        expanded.append(&mut items);
-    }
-    expanded
+    calls.iter().flat_map(expand_single_tool_call).collect()
 }
 
 fn expand_single_tool_call(call: &Value) -> Vec<Value> {
@@ -46,66 +36,66 @@ fn expand_single_tool_call(call: &Value) -> Vec<Value> {
 
     let call_id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
 
-    let mut result = Vec::with_capacity(chunks.len());
-    for (index, chunk) in chunks.iter().enumerate() {
-        let mut cloned = call.clone();
-        if let Some(obj) = cloned.as_object_mut() {
-            let mut func_clone = function.clone();
-            if let Some(func_obj) = func_clone.as_object_mut() {
-                func_obj.insert("arguments".to_owned(), Value::String(chunk.clone()));
+    chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let mut cloned = call.clone();
+            if let Some(obj) = cloned.as_object_mut() {
+                let mut func_clone = function.clone();
+                if let Some(func_obj) = func_clone.as_object_mut() {
+                    func_obj.insert("arguments".to_owned(), Value::String(chunk.clone()));
+                }
+                obj.insert("function".to_owned(), func_clone);
+                if !call_id.is_empty() && index > 0 {
+                    obj.insert(
+                        "id".to_owned(),
+                        Value::String(format!("{}__{}", call_id, index + 1)),
+                    );
+                }
             }
-            obj.insert("function".to_owned(), func_clone);
-
-            if !call_id.is_empty() && index > 0 {
-                obj.insert(
-                    "id".to_owned(),
-                    Value::String(format!("{}__{}", call_id, index + 1)),
-                );
-            }
-        }
-        result.push(cloned);
-    }
-    result
+            cloned
+        })
+        .collect()
 }
 
-/// Split a string that contains multiple concatenated JSON objects into
-/// individual JSON object strings.  Returns an empty vec if the string
-/// contains one or zero valid objects.
 fn split_concatenated_json_objects(raw: &str) -> Vec<String> {
-    let bytes = raw.as_bytes();
-    let total = bytes.len();
     let mut chunks: Vec<String> = Vec::new();
-    let mut position = 0;
+    let mut position = skip_whitespace(raw.as_bytes(), 0);
 
-    while position < total {
-        // skip whitespace
-        while position < total && bytes[position].is_ascii_whitespace() {
-            position += 1;
-        }
-        if position >= total {
-            break;
-        }
-
-        // Try to parse one JSON value starting at `position`.
-        let slice = &raw[position..];
-        let mut deserializer = serde_json::Deserializer::from_str(slice).into_iter::<Value>();
-        match deserializer.next() {
-            Some(Ok(val)) => {
-                if !val.is_object() {
-                    return Vec::new();
-                }
-                let end = deserializer.byte_offset();
-                chunks.push(raw[position..position + end].to_owned());
-                position += end;
+    while position < raw.len() {
+        match parse_one_json_object(raw, position) {
+            Some((chunk, end)) => {
+                chunks.push(chunk);
+                position = skip_whitespace(raw.as_bytes(), end);
             }
-            _ => return Vec::new(),
+            None => return Vec::new(),
         }
     }
 
     if chunks.len() <= 1 {
-        return Vec::new();
+        Vec::new()
+    } else {
+        chunks
     }
-    chunks
+}
+
+fn skip_whitespace(bytes: &[u8], mut pos: usize) -> usize {
+    while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+    pos
+}
+
+fn parse_one_json_object(raw: &str, position: usize) -> Option<(String, usize)> {
+    let slice = &raw[position..];
+    let mut deserializer = serde_json::Deserializer::from_str(slice).into_iter::<Value>();
+    let val = deserializer.next()?.ok()?;
+    if !val.is_object() {
+        return None;
+    }
+    let end = deserializer.byte_offset();
+    Some((raw[position..position + end].to_owned(), position + end))
 }
 
 #[cfg(test)]

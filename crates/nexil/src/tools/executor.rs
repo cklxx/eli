@@ -223,15 +223,12 @@ impl ToolExecutor {
         ))
     }
 
-    /// Build a name -> Tool lookup from a slice of tools.
     fn build_tool_map<'a>(&self, tools: &'a [Tool]) -> HashMap<String, &'a Tool> {
-        let mut map = HashMap::new();
-        for tool in tools {
-            if tool.is_runnable() && !tool.name.is_empty() {
-                map.insert(tool.name.clone(), tool);
-            }
-        }
-        map
+        tools
+            .iter()
+            .filter(|t| t.is_runnable() && !t.name.is_empty())
+            .map(|t| (t.name.clone(), t))
+            .collect()
     }
 
     /// Parse arguments from string or object form.

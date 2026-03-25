@@ -68,22 +68,13 @@ impl ShellManager {
 
     /// Spawn a new shell process.
     pub async fn start(&self, cmd: &str, cwd: Option<&str>) -> anyhow::Result<String> {
-        let shell_id = format!("bash-{}", uuid::Uuid::new_v4().to_string()[..8].to_owned());
-        let mut command = Command::new("sh");
-        command.arg("-c").arg(cmd);
-        if let Some(dir) = cwd {
-            command.current_dir(dir);
-        }
-        command
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        let mut child = command.spawn()?;
+        let shell_id = format!("bash-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let mut child = spawn_shell(cmd, cwd)?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
-        let shell = ManagedShell {
+        let shell = Arc::new(Mutex::new(ManagedShell {
             shell_id: shell_id.clone(),
             cmd: cmd.to_owned(),
             cwd: cwd.map(|s| s.to_owned()),
@@ -91,31 +82,25 @@ impl ShellManager {
             child: Some(child),
             exit_code: None,
             read_handles: Vec::new(),
-        };
+        }));
 
-        let shell = Arc::new(Mutex::new(shell));
-
-        // Spawn tasks to drain stdout and stderr.
         let stdout_shell = shell.clone();
-        let stdout_handle = tokio::spawn(async move { drain_stream(stdout_shell, stdout).await });
-
         let stderr_shell = shell.clone();
-        let stderr_handle = tokio::spawn(async move { drain_stream(stderr_shell, stderr).await });
-
         {
             let mut s = shell.lock().await;
-            s.read_handles.push(stdout_handle);
-            s.read_handles.push(stderr_handle);
+            s.read_handles.push(tokio::spawn(async move {
+                drain_stream(stdout_shell, stdout).await
+            }));
+            s.read_handles.push(tokio::spawn(async move {
+                drain_stream(stderr_shell, stderr).await
+            }));
         }
 
         self.shells.lock().await.insert(shell_id.clone(), shell);
-
         Ok(shell_id)
     }
 
-    /// Get a snapshot of a shell's current state.
-    /// If the shell has finished (exit code present), it is removed from the
-    /// map to prevent memory leaks.
+    /// Get a snapshot of a shell's current state, auto-cleaning finished shells.
     pub async fn get_output(
         &self,
         shell_id: &str,
@@ -133,7 +118,6 @@ impl ShellManager {
             shell.returncode(),
             shell.status().to_owned(),
         );
-        // Auto-cleanup: if the shell has exited, remove it from the map.
         if result.1.is_some() {
             drop(shell);
             self.shells.lock().await.remove(shell_id);
@@ -199,9 +183,20 @@ impl ShellManager {
     }
 }
 
+fn spawn_shell(cmd: &str, cwd: Option<&str>) -> std::io::Result<tokio::process::Child> {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(cmd);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+}
+
 async fn finalize_shell(shell: &mut ManagedShell) {
-    let handles: Vec<_> = shell.read_handles.drain(..).collect();
-    for handle in handles {
+    for handle in shell.read_handles.drain(..) {
         if let Ok(chunks) = handle.await {
             shell.output_chunks.extend(chunks);
         }

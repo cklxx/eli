@@ -82,19 +82,12 @@ pub fn build_messages(entries: &[TapeEntry], context: &TapeContext) -> Vec<Value
     default_messages(entries)
 }
 
-/// Default message extraction: filter to kind == "message" entries and return their payloads.
 fn default_messages(entries: &[TapeEntry]) -> Vec<Value> {
-    let mut messages = Vec::new();
-    for entry in entries {
-        if entry.kind != "message" {
-            continue;
-        }
-        if !entry.payload.is_object() {
-            continue;
-        }
-        messages.push(normalize_message_tool_calls(&entry.payload));
-    }
-    messages
+    entries
+        .iter()
+        .filter(|e| e.kind == "message" && e.payload.is_object())
+        .map(|e| normalize_message_tool_calls(&e.payload))
+        .collect()
 }
 
 /// Maximum characters for a single tool result content before truncation.
@@ -106,23 +99,18 @@ const MAX_TOTAL_CONTEXT_CHARS: usize = 400_000;
 /// Number of recent user-message rounds to keep during aggressive trimming.
 const AGGRESSIVE_TRIM_KEEP_ROUNDS: usize = 2;
 
-/// Apply context budget: truncate large tool results and trim if total exceeds budget.
 pub fn apply_context_budget(messages: &mut Vec<Value>) {
-    for msg in messages.iter_mut() {
-        if msg_role(msg) == "tool" {
-            truncate_tool_result_content(msg, MAX_TOOL_RESULT_CHARS);
-        }
-    }
+    messages
+        .iter_mut()
+        .filter(|msg| msg_role(msg) == "tool")
+        .for_each(|msg| truncate_tool_result_content(msg, MAX_TOOL_RESULT_CHARS));
 
-    // Phase 2: If total still exceeds budget, aggressive trim
     let total_chars: usize = messages.iter().map(content_char_count).sum();
     if total_chars > MAX_TOTAL_CONTEXT_CHARS {
         aggressive_trim(messages);
     }
 }
 
-/// Truncate a tool result message's content to `limit` bytes, cutting at a
-/// char-safe line boundary.
 fn truncate_tool_result_content(msg: &mut Value, limit: usize) {
     let content = match msg.get("content").and_then(|c| c.as_str()) {
         Some(s) => s,
@@ -132,13 +120,10 @@ fn truncate_tool_result_content(msg: &mut Value, limit: usize) {
         return;
     }
 
-    // Find the largest char boundary <= limit.
     let safe_limit = (0..=limit)
         .rev()
         .find(|&i| content.is_char_boundary(i))
         .unwrap_or(0);
-
-    // Cut at last newline before that boundary.
     let cut = content[..safe_limit].rfind('\n').unwrap_or(safe_limit);
     let shown_lines = content[..cut].matches('\n').count() + 1;
     let total_lines = content.matches('\n').count() + 1;
@@ -157,20 +142,16 @@ fn truncate_tool_result_content(msg: &mut Value, limit: usize) {
     }
 }
 
-/// Extract the role string from a message value.
 fn msg_role(msg: &Value) -> &str {
     msg.get("role").and_then(|r| r.as_str()).unwrap_or("")
 }
 
-/// Count characters in a message's content field.
 fn content_char_count(msg: &Value) -> usize {
     msg.get("content")
         .and_then(|c| c.as_str())
         .map_or(0, str::len)
 }
 
-/// Walk backwards through `msgs` and return the index where the last `rounds`
-/// user-message rounds begin. Returns 0 if fewer than `rounds` user messages exist.
 fn find_trim_boundary(msgs: &[Value], rounds: usize) -> usize {
     let mut seen = 0;
     for (i, m) in msgs.iter().enumerate().rev() {
@@ -186,10 +167,6 @@ fn find_trim_boundary(msgs: &[Value], rounds: usize) -> usize {
 
 const TRIM_NOTICE: &str = "[Earlier tool interactions trimmed to fit context window. Use tape.search to review full history.]";
 
-/// Aggressive trim: keep system messages + last N complete rounds.
-/// If the kept portion starts with an assistant message, the trim notice is
-/// prepended to it rather than injected as a separate message (which would
-/// violate alternating-roles API constraints).
 fn aggressive_trim(messages: &mut Vec<Value>) {
     let (system, conversation): (Vec<_>, Vec<_>) =
         messages.drain(..).partition(|m| msg_role(m) == "system");
@@ -204,8 +181,6 @@ fn aggressive_trim(messages: &mut Vec<Value>) {
     messages.extend(recent);
 }
 
-/// Insert the trim notice — either prepended to an existing leading assistant
-/// message, or as a new assistant message before the kept portion.
 fn inject_trim_notice(recent: &mut [Value], before: &mut Vec<Value>) {
     if msg_role(&recent[0]) == "assistant" {
         let existing = recent[0]

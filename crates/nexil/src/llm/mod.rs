@@ -213,7 +213,6 @@ impl LLMBuilder {
         let (resolved_provider, resolved_model) =
             LLMCore::resolve_model_provider(model_str, provider_str)?;
 
-        // Resolve API key: explicit key > resolver > key map > none
         let api_key_config = if let Some(key) = self.api_key {
             ApiKeyConfig::Single(key)
         } else if let Some(resolver) = &self.api_key_resolver {
@@ -495,11 +494,9 @@ impl LLM {
             ..
         } = req;
 
-        // Read existing tape context if a tape name is provided.
-        let tape_messages = if let Some(tape_name) = tape {
-            self.build_tape_messages(tape_name, None).await
-        } else {
-            Vec::new()
+        let tape_messages = match tape {
+            Some(tape_name) => self.build_tape_messages(tape_name, None).await,
+            None => Vec::new(),
         };
 
         let mut msgs = build_messages(
@@ -508,17 +505,7 @@ impl LLM {
             system_prompt,
             messages.as_deref(),
         );
-        if !tape_messages.is_empty() {
-            // Prepend tape history before the new messages (after system prompt).
-            let system_count = msgs
-                .iter()
-                .take_while(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
-                .count();
-            let mut combined = msgs[..system_count].to_vec();
-            combined.extend(tape_messages);
-            combined.extend_from_slice(&msgs[system_count..]);
-            msgs = combined;
-        }
+        prepend_tape_history(&mut msgs, tape_messages);
 
         let new_messages: Vec<Value> = msgs
             .iter()
@@ -530,12 +517,12 @@ impl LLM {
             self.core
                 .run_chat(
                     msgs,
-                    None, // tools_payload
+                    None,
                     model,
                     provider,
                     max_tokens,
-                    false, // stream
-                    None,  // reasoning_effort
+                    false,
+                    None,
                     Default::default(),
                     |resp: TransportResponse, _prov: &str, _model: &str, _attempt: u32| {
                         Ok(resp.payload)
@@ -545,7 +532,6 @@ impl LLM {
 
         let content = extract_content(&response)?;
 
-        // Record the exchange to tape if a tape name is provided.
         if let Some(tape_name) = tape {
             let run_id = Uuid::new_v4().to_string();
             if let Err(e) = self
@@ -641,11 +627,8 @@ impl LLM {
         })?;
         let schemas = tools.payload().map(|s| s.to_vec());
 
-        // Accumulate tool calls/results across all rounds for the return value
         let mut all_tool_calls: Vec<Value> = Vec::new();
         let mut all_tool_results: Vec<Value> = Vec::new();
-
-        // Accumulate usage events from all API rounds.
         let mut usage_events: Vec<UsageEvent> = Vec::new();
 
         let initial_round_msgs = build_messages(
@@ -684,22 +667,18 @@ impl LLM {
                 ));
             }
 
-            // Build msgs for this round
             let msgs = self
                 ._prepare_messages(tape, tape_context, &in_memory_msgs)
                 .await?;
 
-            // Execute model call + tool round
             let round = self._execute_tool_round(&msgs, &round_params).await?;
 
-            // Accumulate usage event from this round
             if let Some(event) = round.usage_event {
                 usage_events.push(event);
             }
 
             match round.outcome {
                 ToolRoundOutcome::Text(content) => {
-                    // Write final assistant message to tape
                     if let Some(tape_name) = tape {
                         let meta = serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
                         let assistant_msg =
@@ -722,20 +701,14 @@ impl LLM {
                     response,
                     execution,
                 } => {
-                    // Accumulate for return value
                     all_tool_calls.extend(execution.tool_calls.clone());
                     all_tool_results.extend(execution.tool_results.clone());
-
-                    // Persist round to tape or accumulate in memory
                     self._persist_round(tape, &response, &execution, &mut in_memory_msgs)
                         .await?;
                 }
             }
-            // Loop continues - next iteration reads from tape (or in_memory_msgs)
         }
     }
-
-    // -- Tape context helper -------------------------------------------------
 
     /// Build conversation messages from a tape, including decision injection.
     ///
@@ -747,7 +720,6 @@ impl LLM {
         tape_name: &str,
         tape_context: Option<&TapeContext>,
     ) -> Vec<Value> {
-        // Read the full tape ONCE (no anchor slicing in the query).
         let full_query = self.async_tape.query_tape(tape_name);
         let all_entries = match self.async_tape.fetch_entries(&full_query).await {
             Ok(entries) => entries,
@@ -757,35 +729,22 @@ impl LLM {
             }
         };
 
-        // Determine the anchor selector.
         let default_ctx = self.async_tape.default_context().clone();
         let ctx = tape_context.unwrap_or(&default_ctx);
-
-        // Apply anchor slicing in memory.
         let sliced = slice_entries_by_anchor(&all_entries, &ctx.anchor);
 
-        // Build messages: use custom select when set, otherwise full context builder.
         let mut tape_msgs = if ctx.select.is_some() {
             tape_build_messages(&sliced, ctx)
         } else {
             build_full_context_from_entries(&sliced)
         };
 
-        // Collect decisions from the FULL (unsliced) entries and inject.
         let decisions = collect_active_decisions(&all_entries);
         inject_decisions_into_system_prompt(&mut tape_msgs, &decisions);
-
-        // Apply context budget: truncate large tool results, trim if over budget.
         crate::tape::context::apply_context_budget(&mut tape_msgs);
         tape_msgs
     }
 
-    // -- run_tools helpers ---------------------------------------------------
-
-    /// Build the message list for a single tool round.
-    ///
-    /// When a tape is active, reads the full context back from tape. Otherwise
-    /// returns the in-memory accumulation.
     async fn _prepare_messages(
         &self,
         tape: Option<&str>,
@@ -799,11 +758,6 @@ impl LLM {
         }
     }
 
-    /// Persist initial messages (system + user prompt) to tape.
-    ///
-    /// The system prompt is only written when the tape has no existing system
-    /// entry or when the content has changed. Non-system messages (user prompt)
-    /// are always appended.
     async fn persist_initial_messages(
         &self,
         tape_name: &str,
@@ -833,9 +787,6 @@ impl LLM {
         Ok(())
     }
 
-    /// Execute a single model call and, if tool calls are returned, execute them.
-    ///
-    /// Returns the round outcome (text response or tool execution results).
     async fn _execute_tool_round(
         &mut self,
         msgs: &[Value],
@@ -875,7 +826,6 @@ impl LLM {
             });
         }
 
-        // Execute tools
         let execution = self
             .tool_executor
             .execute_async(
@@ -885,9 +835,6 @@ impl LLM {
             )
             .await?;
 
-        // Log tool errors but continue the loop so the LLM can see the
-        // error as a tool result and react (retry, try a different
-        // approach, or report failure gracefully).
         if let Some(ref err) = execution.error {
             tracing::warn!(
                 error = %err,
@@ -904,7 +851,6 @@ impl LLM {
         })
     }
 
-    /// Write a completed tool round to tape, or accumulate in memory.
     async fn _persist_round(
         &self,
         tape: Option<&str>,
@@ -913,7 +859,6 @@ impl LLM {
         in_memory_msgs: &mut Vec<Value>,
     ) -> Result<(), ConduitError> {
         if let Some(tape_name) = tape {
-            // Write assistant tool_call entry to tape
             let meta = serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
             let assistant_msg = build_assistant_tool_call_message(response);
             let assistant_text = assistant_msg
@@ -932,7 +877,6 @@ impl LLM {
                 )
                 .await?;
 
-            // Write tool_result entries to tape
             let paired: Vec<Value> = execution
                 .tool_calls
                 .iter()
@@ -946,7 +890,6 @@ impl LLM {
                 .append_entry(tape_name, &TapeEntry::tool_result(paired, meta))
                 .await?;
         } else {
-            // tape=None fallback: accumulate in memory
             let assistant_msg = build_assistant_tool_call_message(response);
             in_memory_msgs.push(assistant_msg);
 
@@ -988,11 +931,9 @@ impl LLM {
         } = req;
         use futures::StreamExt;
 
-        // Read existing tape context if a tape name is provided.
-        let tape_messages = if let Some(tape_name) = tape {
-            self.build_tape_messages(tape_name, None).await
-        } else {
-            Vec::new()
+        let tape_messages = match tape {
+            Some(tape_name) => self.build_tape_messages(tape_name, None).await,
+            None => Vec::new(),
         };
 
         let mut msgs = build_messages(
@@ -1001,20 +942,8 @@ impl LLM {
             system_prompt,
             messages.as_deref(),
         );
-        if !tape_messages.is_empty() {
-            let system_count = msgs
-                .iter()
-                .take_while(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
-                .count();
-            let mut combined = msgs[..system_count].to_vec();
-            combined.extend(tape_messages);
-            combined.extend_from_slice(&msgs[system_count..]);
-            msgs = combined;
-        }
+        prepend_tape_history(&mut msgs, tape_messages);
 
-        // For streaming, record the user messages to tape before streaming starts.
-        // The full assistant response should be recorded by the caller after
-        // consuming the stream (e.g., via TapeSession or manually).
         if let Some(tape_name) = tape {
             let new_messages: Vec<Value> = msgs
                 .iter()
@@ -1229,21 +1158,16 @@ impl LLM {
             )
         })?;
 
-        let mut embeddings = Vec::with_capacity(data.len());
-        for item in data {
-            let embedding = item
-                .get("embedding")
-                .and_then(|e| e.as_array())
-                .ok_or_else(|| {
-                    ConduitError::new(ErrorKind::Provider, "Embedding item missing 'embedding'")
-                })?
-                .iter()
-                .filter_map(|v| v.as_f64())
-                .collect::<Vec<f64>>();
-            embeddings.push(embedding);
-        }
-
-        Ok(embeddings)
+        data.iter()
+            .map(|item| {
+                item.get("embedding")
+                    .and_then(|e| e.as_array())
+                    .ok_or_else(|| {
+                        ConduitError::new(ErrorKind::Provider, "Embedding item missing 'embedding'")
+                    })
+                    .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect())
+            })
+            .collect()
     }
 
     // -- Text utilities ------------------------------------------------------
@@ -1302,22 +1226,19 @@ impl LLM {
             .await?;
 
         let trimmed = answer.trim().to_string();
-
-        // Try exact match first
-        for choice in choices {
-            if trimmed == *choice {
-                return Ok(choice.clone());
-            }
-        }
-        // Try case-insensitive prefix match
         let lower = trimmed.to_lowercase();
-        for choice in choices {
-            if lower.starts_with(&choice.to_lowercase()) {
-                return Ok(choice.clone());
-            }
-        }
-        // Fallback: return raw answer
-        Ok(trimmed)
+
+        let matched = choices
+            .iter()
+            .find(|c| trimmed == **c)
+            .or_else(|| {
+                choices
+                    .iter()
+                    .find(|c| lower.starts_with(&c.to_lowercase()))
+            })
+            .cloned()
+            .unwrap_or(trimmed);
+        Ok(matched)
     }
 }
 
@@ -1394,7 +1315,6 @@ fn build_messages(
     if let Some(existing) = messages {
         msgs.extend_from_slice(existing);
     }
-    // Prefer multimodal content blocks over plain text prompt.
     if let Some(parts) = user_content {
         msgs.push(serde_json::json!({"role": "user", "content": parts}));
     } else if let Some(p) = prompt {
@@ -1403,161 +1323,160 @@ fn build_messages(
     msgs
 }
 
-/// Filter tape entries by anchor selector in memory.
-///
-/// Replicates the anchor-slicing logic that `TapeQuery` applies at the store
-/// level, but operates on an already-fetched entry list so that the full tape
-/// only needs to be read once.
+fn prepend_tape_history(msgs: &mut Vec<Value>, tape_messages: Vec<Value>) {
+    if tape_messages.is_empty() {
+        return;
+    }
+    let system_count = msgs
+        .iter()
+        .take_while(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+        .count();
+    let mut combined = msgs[..system_count].to_vec();
+    combined.extend(tape_messages);
+    combined.extend_from_slice(&msgs[system_count..]);
+    *msgs = combined;
+}
+
 fn slice_entries_by_anchor(entries: &[TapeEntry], anchor: &AnchorSelector) -> Vec<TapeEntry> {
-    match anchor {
-        AnchorSelector::None => entries.to_vec(),
-        AnchorSelector::LastAnchor => {
-            // Find the last entry with kind == "anchor"
-            let pos = entries.iter().rposition(|e| e.kind == "anchor");
-            match pos {
-                Some(idx) => entries[idx + 1..].to_vec(),
-                None => entries.to_vec(), // no anchors → return all
-            }
-        }
-        AnchorSelector::Named(name) => {
-            // Find the last entry with kind == "anchor" and matching name
-            let pos = entries.iter().rposition(|e| {
-                e.kind == "anchor"
-                    && e.payload.get("name").and_then(|v| v.as_str()) == Some(name.as_str())
-            });
-            match pos {
-                Some(idx) => entries[idx + 1..].to_vec(),
-                None => entries.to_vec(), // named anchor not found → return all
-            }
-        }
+    let anchor_pos = match anchor {
+        AnchorSelector::None => return entries.to_vec(),
+        AnchorSelector::LastAnchor => entries.iter().rposition(|e| e.kind == "anchor"),
+        AnchorSelector::Named(name) => entries.iter().rposition(|e| {
+            e.kind == "anchor"
+                && e.payload.get("name").and_then(|v| v.as_str()) == Some(name.as_str())
+        }),
+    };
+    match anchor_pos {
+        Some(idx) => entries[idx + 1..].to_vec(),
+        None => entries.to_vec(),
     }
 }
 
-/// Build full conversation context from tape entries, including tool calls and results.
-/// This is needed because the default `build_messages` only extracts "message" entries.
 fn build_full_context_from_entries(entries: &[TapeEntry]) -> Vec<Value> {
-    let mut messages = Vec::new();
-    for entry in entries {
-        match entry.kind.as_str() {
-            "message" => {
-                if entry.payload.is_object() {
-                    messages.push(normalize_message_tool_calls(&entry.payload));
-                }
-            }
-            "system" => {
-                if let Some(content) = entry.payload.get("content").and_then(|c| c.as_str()) {
-                    messages.push(serde_json::json!({"role": "system", "content": content}));
-                }
-            }
-            "tool_call" => {
-                if let Some(calls) = entry.payload.get("calls").and_then(|c| c.as_array()) {
-                    let normalized_calls = normalize_tool_calls(calls);
-                    if !normalized_calls.is_empty() {
-                        let content = entry.payload.get("content").cloned().unwrap_or(Value::Null);
-                        messages.push(serde_json::json!({
-                            "role": "assistant",
-                            "content": content,
-                            "tool_calls": normalized_calls
-                        }));
-                    }
-                }
-            }
-            "tool_result" => {
-                if let Some(results) = entry.payload.get("results").and_then(|r| r.as_array()) {
-                    for result in results {
-                        let tool_call_id = result
-                            .get("call_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown");
-                        let content = result
-                            .get("output")
-                            .map(|v| match v {
-                                Value::String(s) => s.clone(),
-                                other => serde_json::to_string(other).unwrap_or_default(),
-                            })
-                            .unwrap_or_default();
-                        messages.push(serde_json::json!({
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "content": content
-                        }));
-                    }
-                }
-            }
-            _ => {} // Skip anchors, events, errors
-        }
-    }
+    let messages: Vec<Value> = entries.iter().flat_map(entry_to_messages).collect();
+    dedup_system_messages(messages)
+}
 
-    // Deduplicate system messages: keep only the last one
-    let mut last_system_idx = None;
-    for (i, msg) in messages.iter().enumerate() {
-        if msg.get("role").and_then(|r| r.as_str()) == Some("system") {
-            last_system_idx = Some(i);
+fn entry_to_messages(entry: &TapeEntry) -> Vec<Value> {
+    match entry.kind.as_str() {
+        "message" if entry.payload.is_object() => {
+            vec![normalize_message_tool_calls(&entry.payload)]
         }
+        "system" => entry
+            .payload
+            .get("content")
+            .and_then(|c| c.as_str())
+            .map(|content| vec![serde_json::json!({"role": "system", "content": content})])
+            .unwrap_or_default(),
+        "tool_call" => entry
+            .payload
+            .get("calls")
+            .and_then(|c| c.as_array())
+            .map(|calls| normalize_tool_calls(calls))
+            .filter(|nc| !nc.is_empty())
+            .map(|normalized_calls| {
+                let content = entry.payload.get("content").cloned().unwrap_or(Value::Null);
+                vec![serde_json::json!({
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": normalized_calls
+                })]
+            })
+            .unwrap_or_default(),
+        "tool_result" => entry
+            .payload
+            .get("results")
+            .and_then(|r| r.as_array())
+            .map(|results| results.iter().map(tool_result_to_message).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
     }
-    if let Some(last_idx) = last_system_idx {
-        let mut deduped = Vec::new();
-        for (i, msg) in messages.into_iter().enumerate() {
-            let is_system = msg.get("role").and_then(|r| r.as_str()) == Some("system");
-            if !is_system || i == last_idx {
-                deduped.push(msg);
-            }
-        }
-        return deduped;
-    }
+}
 
-    messages
+fn tool_result_to_message(result: &Value) -> Value {
+    let tool_call_id = result
+        .get("call_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let content = result
+        .get("output")
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => serde_json::to_string(other).unwrap_or_default(),
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": content
+    })
+}
+
+fn dedup_system_messages(messages: Vec<Value>) -> Vec<Value> {
+    let last_system_idx = messages
+        .iter()
+        .rposition(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"));
+
+    match last_system_idx {
+        Some(last_idx) => messages
+            .into_iter()
+            .enumerate()
+            .filter(|(i, msg)| {
+                msg.get("role").and_then(|r| r.as_str()) != Some("system") || *i == last_idx
+            })
+            .map(|(_, msg)| msg)
+            .collect(),
+        None => messages,
+    }
 }
 
 fn extract_content(response: &Value) -> Result<String, ConduitError> {
-    // Try completion format first
-    if let Some(content) = response
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-    {
-        return Ok(content.to_string());
+    extract_completion_content(response)
+        .or_else(|| extract_anthropic_content(response))
+        .or_else(|| extract_responses_content(response))
+        .ok_or_else(|| ConduitError::new(ErrorKind::Provider, "Response missing content"))
+}
+
+fn extract_completion_content(response: &Value) -> Option<String> {
+    response
+        .get("choices")?
+        .get(0)?
+        .get("message")?
+        .get("content")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn extract_anthropic_content(response: &Value) -> Option<String> {
+    if response.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+        return None;
     }
-    // Try Anthropic Messages format: { "content": [{"type": "text", "text": "..."}], "role": "assistant" }
-    if response.get("role").and_then(|r| r.as_str()) == Some("assistant")
-        && let Some(content_arr) = response.get("content").and_then(|c| c.as_array())
-    {
-        let mut text_parts: Vec<String> = Vec::new();
-        for block in content_arr {
-            if block.get("type").and_then(|t| t.as_str()) == Some("text")
-                && let Some(text) = block.get("text").and_then(|t| t.as_str())
-            {
-                text_parts.push(text.to_string());
-            }
-        }
-        if !text_parts.is_empty() {
-            return Ok(text_parts.join(""));
-        }
-    }
-    // Try responses format
-    if let Some(output) = response.get("output").and_then(|o| o.as_array()) {
-        for item in output {
-            if item.get("type").and_then(|t| t.as_str()) == Some("message")
-                && let Some(content) = item
-                    .get("content")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("text"))
-                    .and_then(|t| t.as_str())
-            {
-                return Ok(content.to_string());
-            }
-        }
-    }
-    Err(ConduitError::new(
-        ErrorKind::Provider,
-        "Response missing content",
-    ))
+    let text: String = response
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter(|block| block.get("type").and_then(|t| t.as_str()) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
+        .collect();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn extract_responses_content(response: &Value) -> Option<String> {
+    response
+        .get("output")?
+        .as_array()?
+        .iter()
+        .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("message"))
+        .and_then(|item| {
+            item.get("content")?
+                .get(0)?
+                .get("text")?
+                .as_str()
+                .map(str::to_owned)
+        })
 }
 
 fn extract_tool_calls(response: &Value) -> Result<Vec<Value>, ConduitError> {
-    // Completion format
     if let Some(calls) = response
         .get("choices")
         .and_then(|c| c.get(0))
@@ -1567,37 +1486,26 @@ fn extract_tool_calls(response: &Value) -> Result<Vec<Value>, ConduitError> {
     {
         return Ok(normalize_tool_calls(calls));
     }
-    // Anthropic Messages format: { "content": [{"type": "tool_use", "id": "...", "name": "...", "input": {...}}] }
-    if let Some(content_arr) = response.get("content").and_then(|c| c.as_array()) {
-        let mut calls = Vec::new();
-        for block in content_arr {
-            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                calls.push(block.clone());
-            }
-        }
-        if !calls.is_empty() {
-            return Ok(normalize_tool_calls(&calls));
-        }
+    if let Some(calls) = extract_typed_blocks(response.get("content"), "tool_use") {
+        return Ok(normalize_tool_calls(&calls));
     }
-    // Responses format
-    if let Some(output) = response.get("output").and_then(|o| o.as_array()) {
-        let mut calls = Vec::new();
-        for item in output {
-            if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
-                calls.push(item.clone());
-            }
-        }
-        if !calls.is_empty() {
-            return Ok(normalize_tool_calls(&calls));
-        }
+    if let Some(calls) = extract_typed_blocks(response.get("output"), "function_call") {
+        return Ok(normalize_tool_calls(&calls));
     }
     Ok(Vec::new())
 }
 
-/// Build an assistant message containing tool_calls from the raw API response.
-/// Supports OpenAI completion, Anthropic Messages, and Responses formats.
+fn extract_typed_blocks(field: Option<&Value>, type_name: &str) -> Option<Vec<Value>> {
+    let arr = field?.as_array()?;
+    let calls: Vec<Value> = arr
+        .iter()
+        .filter(|item| item.get("type").and_then(|t| t.as_str()) == Some(type_name))
+        .cloned()
+        .collect();
+    if calls.is_empty() { None } else { Some(calls) }
+}
+
 fn build_assistant_tool_call_message(response: &Value) -> Value {
-    // OpenAI completion format: response.choices[0].message
     if let Some(msg) = response
         .get("choices")
         .and_then(|c| c.get(0))
@@ -1606,68 +1514,74 @@ fn build_assistant_tool_call_message(response: &Value) -> Value {
         return normalize_message_tool_calls(msg);
     }
 
-    // Anthropic Messages format: build from response.content
     if let Some(content) = response.get("content").and_then(|c| c.as_array()) {
-        let mut tool_calls = Vec::new();
-        let mut text_parts = Vec::new();
-        for block in content {
-            match block.get("type").and_then(|t| t.as_str()) {
-                Some("tool_use") => {
-                    tool_calls.push(serde_json::json!({
-                        "id": block.get("id").cloned().unwrap_or(Value::Null),
-                        "type": "function",
-                        "function": {
-                            "name": block.get("name").cloned().unwrap_or(Value::Null),
-                            "arguments": serde_json::to_string(
-                                block.get("input").unwrap_or(&Value::Null)
-                            ).unwrap_or_default(),
-                        }
-                    }));
-                }
-                Some("text") => {
-                    if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                        text_parts.push(t.to_owned());
-                    }
-                }
-                _ => {}
-            }
-        }
-        let content_val = if text_parts.is_empty() {
-            Value::Null
-        } else {
-            Value::String(text_parts.join(""))
-        };
-        return normalize_message_tool_calls(&serde_json::json!({
-            "role": "assistant",
-            "content": content_val,
-            "tool_calls": tool_calls,
-        }));
+        return build_anthropic_assistant_message(content);
     }
 
-    // Responses format: build from response.output
     if let Some(output) = response.get("output").and_then(|o| o.as_array()) {
-        let mut tool_calls = Vec::new();
-        for item in output {
-            if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
-                tool_calls.push(serde_json::json!({
-                    "id": item.get("call_id").cloned().unwrap_or(Value::Null),
-                    "type": "function",
-                    "function": {
-                        "name": item.get("name").cloned().unwrap_or(Value::Null),
-                        "arguments": item.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}"),
-                    }
-                }));
-            }
-        }
-        return normalize_message_tool_calls(&serde_json::json!({
-            "role": "assistant",
-            "content": null,
-            "tool_calls": tool_calls,
-        }));
+        return build_responses_assistant_message(output);
     }
 
-    // Fallback
     serde_json::json!({"role": "assistant", "content": null})
+}
+
+fn build_anthropic_assistant_message(content: &[Value]) -> Value {
+    let tool_calls: Vec<Value> = content
+        .iter()
+        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+        .map(|block| {
+            serde_json::json!({
+                "id": block.get("id").cloned().unwrap_or(Value::Null),
+                "type": "function",
+                "function": {
+                    "name": block.get("name").cloned().unwrap_or(Value::Null),
+                    "arguments": serde_json::to_string(
+                        block.get("input").unwrap_or(&Value::Null)
+                    ).unwrap_or_default(),
+                }
+            })
+        })
+        .collect();
+
+    let text: String = content
+        .iter()
+        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+        .collect();
+
+    let content_val = if text.is_empty() {
+        Value::Null
+    } else {
+        Value::String(text)
+    };
+    normalize_message_tool_calls(&serde_json::json!({
+        "role": "assistant",
+        "content": content_val,
+        "tool_calls": tool_calls,
+    }))
+}
+
+fn build_responses_assistant_message(output: &[Value]) -> Value {
+    let tool_calls: Vec<Value> = output
+        .iter()
+        .filter(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
+        .map(|item| {
+            serde_json::json!({
+                "id": item.get("call_id").cloned().unwrap_or(Value::Null),
+                "type": "function",
+                "function": {
+                    "name": item.get("name").cloned().unwrap_or(Value::Null),
+                    "arguments": item.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}"),
+                }
+            })
+        })
+        .collect();
+
+    normalize_message_tool_calls(&serde_json::json!({
+        "role": "assistant",
+        "content": null,
+        "tool_calls": tool_calls,
+    }))
 }
 
 #[cfg(test)]

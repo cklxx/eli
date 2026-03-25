@@ -6,30 +6,28 @@ use super::errors::{ConduitError, ErrorKind};
 use super::execution::LLMCore;
 use super::results::ErrorPayload;
 
-/// What to do after one failed attempt.
+/// Post-failure action for a single attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttemptDecision {
     RetrySameModel,
     TryNextModel,
 }
 
-/// Result of classifying and deciding how to handle one exception.
+/// Classified error paired with the retry/fallback decision.
 #[derive(Debug, Clone)]
 pub struct AttemptOutcome {
     pub error: ConduitError,
     pub decision: AttemptDecision,
 }
 
-/// Check for an HTTP status code in contextual patterns to avoid false
-/// positives on bare numbers (e.g. "Expected 404 items").
+const HTTP_STATUS_PREFIXES: &[&str] = &[
+    "status ", "status: ", "http ", "http/", "code ", "code: ", "error ",
+];
+
 fn has_http_status_pattern(lower: &str, code: &str) -> bool {
-    lower.contains(&format!("status {code}"))
-        || lower.contains(&format!("status: {code}"))
-        || lower.contains(&format!("http {code}"))
-        || lower.contains(&format!("http/{code}"))
-        || lower.contains(&format!("code {code}"))
-        || lower.contains(&format!("code: {code}"))
-        || lower.contains(&format!("error {code}"))
+    HTTP_STATUS_PREFIXES
+        .iter()
+        .any(|prefix| lower.contains(&format!("{prefix}{code}")))
 }
 
 /// Classify an error by scanning the message text for common patterns.
@@ -39,144 +37,124 @@ fn has_http_status_pattern(lower: &str, code: &str) -> bool {
 pub fn classify_by_text_signature(message: &str) -> Option<ErrorKind> {
     let lower = message.to_lowercase();
 
-    // Authentication / configuration errors
-    if lower.contains("auth")
-        || lower.contains("unauthorized")
-        || lower.contains("api key")
-        || lower.contains("invalid key")
-    {
+    if is_auth_error(&lower) {
         return Some(ErrorKind::Config);
     }
-
-    // Rate-limit / quota errors
-    if lower.contains("rate limit")
-        || has_http_status_pattern(&lower, "429")
-        || lower.contains("quota")
-    {
+    if is_rate_limit_error(&lower) || is_timeout_error(&lower) || is_server_error(&lower) {
         return Some(ErrorKind::Temporary);
     }
-
-    // Not-found errors
-    if lower.contains("not found") || has_http_status_pattern(&lower, "404") {
+    if is_not_found_error(&lower) {
         return Some(ErrorKind::NotFound);
     }
-
-    // Timeout errors
-    if lower.contains("timeout") || lower.contains("timed out") {
-        return Some(ErrorKind::Temporary);
-    }
-
-    // Server errors
-    if lower.contains("server error")
-        || has_http_status_pattern(&lower, "500")
-        || has_http_status_pattern(&lower, "502")
-        || has_http_status_pattern(&lower, "503")
-    {
-        return Some(ErrorKind::Temporary);
-    }
-
     None
 }
 
-/// Mask sensitive tokens in text to prevent API key leakage in logs.
-///
-/// Masks `Bearer <token>` patterns and common API key prefixes (`sk-`, `key-`,
-/// `token-`).  Uses simple string scanning to avoid a `regex` dependency.
+fn is_auth_error(lower: &str) -> bool {
+    lower.contains("auth")
+        || lower.contains("unauthorized")
+        || lower.contains("api key")
+        || lower.contains("invalid key")
+}
+
+fn is_rate_limit_error(lower: &str) -> bool {
+    lower.contains("rate limit") || has_http_status_pattern(lower, "429") || lower.contains("quota")
+}
+
+fn is_not_found_error(lower: &str) -> bool {
+    lower.contains("not found") || has_http_status_pattern(lower, "404")
+}
+
+fn is_timeout_error(lower: &str) -> bool {
+    lower.contains("timeout") || lower.contains("timed out")
+}
+
+fn is_server_error(lower: &str) -> bool {
+    lower.contains("server error")
+        || has_http_status_pattern(lower, "500")
+        || has_http_status_pattern(lower, "502")
+        || has_http_status_pattern(lower, "503")
+}
+
 fn mask_sensitive(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     let bytes = text.as_bytes();
 
     while i < bytes.len() {
-        // Mask "Bearer <token>"
-        if text[i..].starts_with("Bearer ") {
-            out.push_str("Bearer [MASKED]");
-            i += 7; // skip "Bearer "
-            // skip the token characters
-            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            continue;
+        if let Some(advance) = try_mask_bearer(&text[i..], &mut out) {
+            i += advance;
+        } else if let Some(advance) = try_mask_key_prefix(&text[i..], bytes, i, &mut out) {
+            i += advance;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
         }
-
-        // Mask common key prefixes: sk-..., key-..., token-...
-        let prefixes = ["sk-", "key-", "token-"];
-        let mut matched = false;
-        for prefix in &prefixes {
-            if text[i..].starts_with(prefix) {
-                // Check there are enough alphanumeric chars after the prefix to
-                // look like a real key (at least 20 chars).
-                let start = i + prefix.len();
-                let mut end = start;
-                while end < bytes.len()
-                    && (bytes[end].is_ascii_alphanumeric()
-                        || bytes[end] == b'_'
-                        || bytes[end] == b'-')
-                {
-                    end += 1;
-                }
-                if end - start >= 20 {
-                    out.push_str("[MASKED_KEY]");
-                    i = end;
-                    matched = true;
-                    break;
-                }
-            }
-        }
-        if matched {
-            continue;
-        }
-
-        out.push(bytes[i] as char);
-        i += 1;
     }
     out
 }
 
+fn try_mask_bearer(slice: &str, out: &mut String) -> Option<usize> {
+    if !slice.starts_with("Bearer ") {
+        return None;
+    }
+    out.push_str("Bearer [MASKED]");
+    let token_len = slice[7..]
+        .bytes()
+        .take_while(|b| !b.is_ascii_whitespace())
+        .count();
+    Some(7 + token_len)
+}
+
+const KEY_PREFIXES: &[&str] = &["sk-", "key-", "token-"];
+
+fn try_mask_key_prefix(
+    slice: &str,
+    bytes: &[u8],
+    offset: usize,
+    out: &mut String,
+) -> Option<usize> {
+    for prefix in KEY_PREFIXES {
+        if !slice.starts_with(prefix) {
+            continue;
+        }
+        let start = offset + prefix.len();
+        let suffix_len = bytes[start..]
+            .iter()
+            .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_' || **b == b'-')
+            .count();
+        if suffix_len >= 20 {
+            out.push_str("[MASKED_KEY]");
+            return Some(prefix.len() + suffix_len);
+        }
+    }
+    None
+}
+
 impl LLMCore {
-    /// Log an error at the warning level if verbose mode is enabled.
-    ///
-    /// Error messages are sanitized to mask Bearer tokens and API key patterns
-    /// before logging.
+    /// Log a sanitized error at the warning level when verbose mode is enabled.
     pub fn log_error(&self, error: &ConduitError, provider: &str, model: &str, attempt: u32) {
         if self.verbose() == 0 {
             return;
         }
         let prefix = format!(
-            "[{}:{}] attempt {}/{}",
-            provider,
-            model,
+            "[{provider}:{model}] attempt {}/{}",
             attempt + 1,
             self.max_attempts()
         );
         let sanitized = mask_sensitive(&error.to_string());
-        if let Some(ref cause) = error.cause {
-            let sanitized_cause = mask_sensitive(&format!("{cause:?}"));
-            tracing::warn!(
-                "{} failed: {} (cause={})",
-                prefix,
-                sanitized,
-                sanitized_cause
-            );
-        } else {
-            tracing::warn!("{} failed: {}", prefix, sanitized);
-        }
+        let cause_suffix = error
+            .cause
+            .as_ref()
+            .map(|c| format!(" (cause={})", mask_sensitive(&format!("{c:?}"))))
+            .unwrap_or_default();
+        tracing::warn!("{prefix} failed: {sanitized}{cause_suffix}");
     }
 
-    /// Classify an error into an `ErrorKind`.
-    ///
-    /// Resolution order:
-    /// 1. Custom classifier (if set)
-    /// 2. Text-signature heuristic on the error message
-    /// 3. The error's own `kind` field
+    /// Classify an error: custom classifier, then text heuristic, then error's own kind.
     pub fn classify_error(&self, error: &ConduitError) -> ErrorKind {
-        if let Some(kind) = self.custom_classify(error) {
-            return kind;
-        }
-        if let Some(kind) = classify_by_text_signature(&error.message) {
-            return kind;
-        }
-        error.kind
+        self.custom_classify(error)
+            .or_else(|| classify_by_text_signature(&error.message))
+            .unwrap_or(error.kind)
     }
 
     /// Classify an HTTP status code into an `ErrorKind`.
@@ -203,7 +181,7 @@ impl LLMCore {
         model: &str,
         message: &str,
     ) -> ConduitError {
-        ConduitError::new(kind, format!("{}:{}: {}", provider, model, message))
+        ConduitError::new(kind, format!("{provider}:{model}: {message}"))
     }
 
     /// Handle a single failed attempt and decide what to do next.
@@ -216,8 +194,7 @@ impl LLMCore {
     ) -> AttemptOutcome {
         let kind = self.classify_error(&error);
         self.log_error(&error, provider_name, model_id, attempt);
-        let can_retry = Self::should_retry(kind) && (attempt + 1) < self.max_attempts();
-        let decision = if can_retry {
+        let decision = if Self::should_retry(kind) && (attempt + 1) < self.max_attempts() {
             AttemptDecision::RetrySameModel
         } else {
             AttemptDecision::TryNextModel
@@ -225,10 +202,7 @@ impl LLMCore {
         AttemptOutcome { error, decision }
     }
 
-    /// Build an `ErrorPayload` with populated details from retry context.
-    ///
-    /// The `details` object includes `provider`, `model`, `attempt`,
-    /// `max_attempts`, and optionally `http_status`.
+    /// Build an `ErrorPayload` with retry context details.
     pub fn build_error_payload(
         &self,
         error: &ConduitError,

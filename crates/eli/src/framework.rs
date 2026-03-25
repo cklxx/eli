@@ -102,128 +102,30 @@ impl EliFramework {
 
     /// Run one inbound message through all hooks and return the turn result.
     pub async fn process_inbound(&self, mut inbound: Envelope) -> anyhow::Result<TurnResult> {
-        // Strip internal-only context keys from inbound to prevent injection.
-        if let Some(ctx) = inbound.get_mut("context").and_then(|v| v.as_object_mut()) {
-            ctx.remove("_eli_cleanup_only");
-        }
+        Self::strip_internal_context(&mut inbound);
 
         let rt = self.hook_runtime.read().await;
         let workspace = self.workspace.read().await.clone();
 
-        // 0. Classify inbound — Greet messages short-circuit the pipeline
-        if let Some(crate::smart_router::RouteDecision::Greet(reply)) =
-            rt.call_classify_inbound(&inbound)
-        {
-            let session_id = Self::default_session_id(&inbound);
-            let channel = inbound
-                .get("channel")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_owned();
-            let chat_id = inbound
-                .get("chat_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_owned();
-            let output_channel = inbound
-                .get("output_channel")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&channel)
-                .to_owned();
-            let outbound = serde_json::json!({
-                "content": reply,
-                "session_id": session_id,
-                "channel": channel,
-                "chat_id": chat_id,
-                "output_channel": output_channel,
-            });
-            return Ok(TurnResult {
-                session_id,
-                prompt: PromptValue::Text(String::new()),
-                model_output: reply.clone(),
-                outbounds: vec![outbound],
-            });
+        if let Some(result) = Self::try_greet_shortcircuit(&rt, &inbound) {
+            return Ok(result);
         }
 
-        // 1. Resolve session
-        let session_id = match rt.call_resolve_session(&inbound).await {
-            Ok(Some(id)) => id,
-            Ok(None) => Self::default_session_id(&inbound),
-            Err(e) => {
-                tracing::warn!(error = %e, "resolve_session failed, using default session id");
-                Self::default_session_id(&inbound)
-            }
-        };
+        let session_id = self.resolve_session_id(&rt, &inbound).await;
+        Self::inject_session_id(&mut inbound, &session_id);
 
-        // Inject session_id into the inbound envelope if it's an object
-        let mut inbound = inbound;
-        if let Some(obj) = inbound.as_object_mut() {
-            obj.entry("session_id")
-                .or_insert_with(|| Value::String(session_id.clone()));
-        }
+        let state = self
+            .build_state(&rt, &inbound, &session_id, &workspace)
+            .await;
+        let prompt = Self::build_prompt(&rt, &inbound, &session_id, &state).await;
+        let model_output = Self::run_model(&rt, &prompt, &session_id, &state, &inbound).await;
 
-        // 2. Build state
-        let mut state: State = HashMap::new();
-        state.insert(
-            "_runtime_workspace".to_string(),
-            Value::String(workspace.to_string_lossy().to_string()),
-        );
-
-        let hook_states = match rt.call_load_state(&inbound, &session_id).await {
-            Ok(states) => states,
-            Err(e) => {
-                tracing::warn!(error = %e, session_id = %session_id, "load_state failed, using empty state");
-                Vec::new()
-            }
-        };
-        // Iterate last-registered-first; `or_insert` keeps the first value seen
-        // per key, so later-registered plugins take priority.
-        for hs in hook_states.into_iter().rev().flatten() {
-            for (k, v) in hs {
-                state.entry(k).or_insert(v);
-            }
-        }
-
-        // 3. Build prompt
-        let prompt = match rt
-            .call_build_user_prompt(&inbound, &session_id, &state)
-            .await
-        {
-            Some(p) => p,
-            None => PromptValue::Text(inbound.content_text()),
-        };
-
-        // 4. Run model
-        let model_output: String;
-        let run_result = rt.call_run_model(&prompt, &session_id, &state).await;
-        match run_result {
-            Ok(Some(output)) => {
-                model_output = output;
-            }
-            Ok(None) => {
-                let fallback_err = anyhow::anyhow!("no model skill returned output");
-                rt.notify_error("run_model:fallback", &fallback_err, Some(&inbound))
-                    .await;
-                model_output = "[Error: no model plugin available]".to_owned();
-            }
-            Err(e) => {
-                let err_msg = format!("{e}");
-                let anyhow_err = anyhow::anyhow!("run_model hook failed: {}", err_msg);
-                rt.notify_error("run_model", &anyhow_err, Some(&inbound))
-                    .await;
-                model_output = format!("[Error: {err_msg}]");
-            }
-        }
-
-        // 5. Save state (always runs, even if model failed)
         rt.call_save_state(&session_id, &state, &inbound, &model_output)
             .await;
 
-        // 6. Collect and dispatch outbounds
         let outbounds = self
             .collect_outbounds(&rt, &inbound, &session_id, &state, &model_output)
             .await;
-
         for outbound in &outbounds {
             rt.call_dispatch_outbound(outbound).await;
         }
@@ -234,6 +136,120 @@ impl EliFramework {
             model_output,
             outbounds,
         })
+    }
+
+    fn strip_internal_context(inbound: &mut Envelope) {
+        if let Some(ctx) = inbound.get_mut("context").and_then(|v| v.as_object_mut()) {
+            ctx.remove("_eli_cleanup_only");
+        }
+    }
+
+    fn try_greet_shortcircuit(rt: &HookRuntime, inbound: &Envelope) -> Option<TurnResult> {
+        let crate::smart_router::RouteDecision::Greet(reply) = rt.call_classify_inbound(inbound)?;
+
+        let session_id = Self::default_session_id(inbound);
+        let channel = inbound.field_str("channel", "");
+        let chat_id = inbound.field_str("chat_id", "");
+        let output_channel = inbound
+            .get("output_channel")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&channel)
+            .to_owned();
+
+        let outbound = serde_json::json!({
+            "content": reply,
+            "session_id": session_id,
+            "channel": channel,
+            "chat_id": chat_id,
+            "output_channel": output_channel,
+        });
+        Some(TurnResult {
+            session_id,
+            prompt: PromptValue::Text(String::new()),
+            model_output: reply.clone(),
+            outbounds: vec![outbound],
+        })
+    }
+
+    async fn resolve_session_id(&self, rt: &HookRuntime, inbound: &Envelope) -> String {
+        match rt.call_resolve_session(inbound).await {
+            Ok(Some(id)) => id,
+            Ok(None) => Self::default_session_id(inbound),
+            Err(e) => {
+                tracing::warn!(error = %e, "resolve_session failed, using default session id");
+                Self::default_session_id(inbound)
+            }
+        }
+    }
+
+    fn inject_session_id(inbound: &mut Envelope, session_id: &str) {
+        if let Some(obj) = inbound.as_object_mut() {
+            obj.entry("session_id")
+                .or_insert_with(|| Value::String(session_id.to_owned()));
+        }
+    }
+
+    async fn build_state(
+        &self,
+        rt: &HookRuntime,
+        inbound: &Envelope,
+        session_id: &str,
+        workspace: &std::path::Path,
+    ) -> State {
+        let mut state: State = HashMap::new();
+        state.insert(
+            "_runtime_workspace".to_string(),
+            Value::String(workspace.to_string_lossy().to_string()),
+        );
+
+        let hook_states = match rt.call_load_state(inbound, session_id).await {
+            Ok(states) => states,
+            Err(e) => {
+                tracing::warn!(error = %e, session_id = %session_id, "load_state failed, using empty state");
+                Vec::new()
+            }
+        };
+        for hs in hook_states.into_iter().rev().flatten() {
+            for (k, v) in hs {
+                state.entry(k).or_insert(v);
+            }
+        }
+        state
+    }
+
+    async fn build_prompt(
+        rt: &HookRuntime,
+        inbound: &Envelope,
+        session_id: &str,
+        state: &State,
+    ) -> PromptValue {
+        rt.call_build_user_prompt(inbound, session_id, state)
+            .await
+            .unwrap_or_else(|| PromptValue::Text(inbound.content_text()))
+    }
+
+    async fn run_model(
+        rt: &HookRuntime,
+        prompt: &PromptValue,
+        session_id: &str,
+        state: &State,
+        inbound: &Envelope,
+    ) -> String {
+        match rt.call_run_model(prompt, session_id, state).await {
+            Ok(Some(output)) => output,
+            Ok(None) => {
+                let err = anyhow::anyhow!("no model skill returned output");
+                rt.notify_error("run_model:fallback", &err, Some(inbound))
+                    .await;
+                "[Error: no model plugin available]".to_owned()
+            }
+            Err(e) => {
+                let err_msg = format!("{e}");
+                let err = anyhow::anyhow!("run_model hook failed: {}", err_msg);
+                rt.notify_error("run_model", &err, Some(inbound)).await;
+                format!("[Error: {err_msg}]")
+            }
+        }
     }
 
     // -- Diagnostics --------------------------------------------------------

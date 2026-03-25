@@ -47,62 +47,67 @@ pub(crate) fn status_command() -> anyhow::Result<()> {
     println!("Eli configuration status");
     println!("========================");
     println!();
+    print_active_profile(&config);
+    print_profiles(&config);
+    print_credentials(&auth);
+    print_env_overrides();
+    println!();
+    println!("Config file: {}", EliConfig::config_path().display());
+    Ok(())
+}
 
-    // Active profile.
+fn print_active_profile(config: &EliConfig) {
     println!("Active profile:");
     match config.active_profile() {
-        Some(profile) => {
-            println!(
-                "  {} (provider: {}, model: {})",
-                config.active_profile.as_deref().unwrap_or("(none)"),
-                profile.provider,
-                profile.model
-            );
-        }
-        None => {
-            println!("  (none) -- run `eli login <provider>` to get started");
-        }
+        Some(profile) => println!(
+            "  {} (provider: {}, model: {})",
+            config.active_profile.as_deref().unwrap_or("(none)"),
+            profile.provider,
+            profile.model
+        ),
+        None => println!("  (none) -- run `eli login <provider>` to get started"),
     }
-    println!();
+}
 
-    // All profiles.
+fn print_profiles(config: &EliConfig) {
+    println!();
     println!("Profiles:");
     if config.profiles.is_empty() {
         println!("  (none)");
-    } else {
-        let mut names: Vec<&String> = config.profiles.keys().collect();
-        names.sort();
-        for name in names {
-            let p = &config.profiles[name];
-            let active_marker = if config.active_profile.as_deref() == Some(name.as_str()) {
-                " *"
-            } else {
-                ""
-            };
-            println!(
-                "  {name}{active_marker} (provider: {}, model: {})",
-                p.provider, p.model
-            );
-        }
+        return;
     }
-    println!();
+    let mut names: Vec<&String> = config.profiles.keys().collect();
+    names.sort();
+    for name in names {
+        let p = &config.profiles[name];
+        let active_marker = if config.active_profile.as_deref() == Some(name.as_str()) {
+            " *"
+        } else {
+            ""
+        };
+        println!(
+            "  {name}{active_marker} (provider: {}, model: {})",
+            p.provider, p.model
+        );
+    }
+}
 
-    // Credentials.
+fn print_credentials(auth: &std::collections::HashMap<String, String>) {
+    println!();
     println!("Stored credentials:");
     if auth.is_empty() {
         println!("  (none)");
-    } else {
-        let mut providers: Vec<&String> = auth.keys().collect();
-        providers.sort();
-        for provider in providers {
-            println!("  {}: {}", provider, auth[provider]);
-        }
+        return;
     }
-    println!();
+    let mut providers: Vec<&String> = auth.keys().collect();
+    providers.sort();
+    for provider in providers {
+        println!("  {}: {}", provider, auth[provider]);
+    }
+}
 
-    // Environment variable overrides.
-    println!("Environment overrides:");
-    let env_vars = [
+fn print_env_overrides() {
+    const ENV_VARS: &[&str] = &[
         "ELI_MODEL",
         "ELI_API_KEY",
         "ELI_API_BASE",
@@ -110,28 +115,30 @@ pub(crate) fn status_command() -> anyhow::Result<()> {
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
     ];
-    let mut has_override = false;
-    for var in &env_vars {
-        if let Ok(val) = std::env::var(var) {
-            let display = if var.contains("KEY") {
-                if val.len() > 12 {
-                    format!("{}...{}", &val[..7], &val[val.len() - 4..])
-                } else {
-                    "****".to_string()
-                }
-            } else {
-                val
-            };
-            println!("  {var}={display}");
-            has_override = true;
-        }
-    }
-    if !has_override {
-        println!("  (none)");
-    }
-
     println!();
-    println!("Config file: {}", EliConfig::config_path().display());
+    println!("Environment overrides:");
+    let overrides: Vec<_> = ENV_VARS
+        .iter()
+        .filter_map(|var| std::env::var(var).ok().map(|val| (*var, val)))
+        .collect();
+    if overrides.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    for (var, val) in overrides {
+        let display = if var.contains("KEY") {
+            redact_env_key(&val)
+        } else {
+            val
+        };
+        println!("  {var}={display}");
+    }
+}
 
-    Ok(())
+fn redact_env_key(val: &str) -> String {
+    if val.len() > 12 {
+        format!("{}...{}", &val[..7], &val[val.len() - 4..])
+    } else {
+        "****".to_string()
+    }
 }

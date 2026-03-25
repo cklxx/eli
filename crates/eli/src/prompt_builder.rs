@@ -8,8 +8,13 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use std::sync::LazyLock;
+
 use crate::builtin::settings::AgentSettings;
 use crate::skills::{SkillMetadata, render_skills_prompt};
+
+static HINT_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"\$([A-Za-z0-9_.\-]+)").expect("SAFETY: static regex"));
 
 /// Default hard cap for the total system prompt size (chars).
 const DEFAULT_HARD_CAP: usize = 32_000;
@@ -117,70 +122,97 @@ impl PromptBuilder {
             return String::new();
         }
 
-        // Render each section.
-        let mut rendered: Vec<(u8, String)> = Vec::with_capacity(self.sections.len());
-        for sec in &self.sections {
-            let content = self.render_section(
-                sec,
-                settings,
-                prompt_text,
-                allowed_skills,
-                expanded_skills,
-                workspace,
-            );
-            if content.is_empty() {
-                continue;
-            }
-            // Apply per-section limit.
-            let content = if let Some(max) = sec.max_chars {
-                truncate_chars(&content, max)
-            } else {
-                content
-            };
-            rendered.push((sec.truncation_priority, content));
+        let mut rendered = self.render_all_sections(
+            settings,
+            prompt_text,
+            allowed_skills,
+            expanded_skills,
+            workspace,
+        );
+
+        let total = Self::total_size(&rendered);
+        if total > self.hard_cap {
+            Self::truncate_to_budget(&mut rendered, total, self.hard_cap);
         }
 
-        // Check total size.
-        let total: usize = rendered.iter().map(|(_, s)| s.len()).sum::<usize>()
-            + rendered.len().saturating_sub(1) * 2; // "\n\n" separators
+        Self::join_sections(rendered)
+    }
 
-        if total <= self.hard_cap {
-            return rendered
-                .into_iter()
-                .map(|(_, s)| s)
-                .collect::<Vec<_>>()
-                .join("\n\n");
-        }
+    fn render_all_sections(
+        &self,
+        settings: &AgentSettings,
+        prompt_text: &str,
+        allowed_skills: Option<&HashSet<String>>,
+        expanded_skills: &HashSet<String>,
+        workspace: &Path,
+    ) -> Vec<(u8, String)> {
+        self.sections
+            .iter()
+            .filter_map(|sec| {
+                let content = self.render_section(
+                    sec,
+                    settings,
+                    prompt_text,
+                    allowed_skills,
+                    expanded_skills,
+                    workspace,
+                );
+                if content.is_empty() {
+                    return None;
+                }
+                let content = match sec.max_chars {
+                    Some(max) => truncate_chars(&content, max),
+                    None => content,
+                };
+                Some((sec.truncation_priority, content))
+            })
+            .collect()
+    }
 
-        // Truncate sections by priority (lowest first) until under the cap.
-        // Sort indices by truncation_priority ascending.
-        let mut indices: Vec<usize> = (0..rendered.len()).collect();
-        indices.sort_by_key(|&i| rendered[i].0);
+    fn total_size(sections: &[(u8, String)]) -> usize {
+        sections.iter().map(|(_, s)| s.len()).sum::<usize>() + sections.len().saturating_sub(1) * 2
+    }
 
-        let mut current_total = total;
+    fn truncate_to_budget(
+        sections: &mut [(u8, String)],
+        mut current_total: usize,
+        hard_cap: usize,
+    ) {
+        let mut indices: Vec<usize> = (0..sections.len()).collect();
+        indices.sort_by_key(|&i| sections[i].0);
+
         for &idx in &indices {
-            if current_total <= self.hard_cap {
+            if current_total <= hard_cap {
                 break;
             }
-            // Skip identity (priority 255) — never truncate.
-            if rendered[idx].0 == 255 {
+            if sections[idx].0 == 255 {
                 continue;
             }
-            let section_len = rendered[idx].1.len();
-            let need_to_remove = current_total - self.hard_cap;
+            let section_len = sections[idx].1.len();
+            let need_to_remove = current_total - hard_cap;
             if section_len <= need_to_remove {
-                // Drop entire section.
-                current_total -= section_len + 2; // +2 for the "\n\n" separator
-                rendered[idx].1.clear();
+                current_total -= section_len + 2;
+                sections[idx].1.clear();
             } else {
-                // Truncate section.
                 let new_len = section_len - need_to_remove;
-                rendered[idx].1 = truncate_chars(&rendered[idx].1, new_len);
-                current_total = self.hard_cap;
+                sections[idx].1 = truncate_chars(&sections[idx].1, new_len);
+                current_total = hard_cap;
             }
         }
+    }
 
-        rendered
+    fn merge_expanded_skills(base: &HashSet<String>, prompt_text: &str) -> HashSet<String> {
+        let mut merged = base.clone();
+        for cap in HINT_RE.captures_iter(prompt_text) {
+            if let Some(m) = cap.get(1) {
+                merged.insert(m.as_str().to_owned());
+            }
+        }
+        merged
+    }
+
+    fn join_sections(sections: Vec<(u8, String)>) -> String {
+        sections
             .into_iter()
             .map(|(_, s)| s)
             .filter(|s| !s.is_empty())
@@ -201,22 +233,14 @@ impl PromptBuilder {
             SectionKind::Identity => load_system_prompt_base(settings, workspace),
             SectionKind::Skills => {
                 let skills = crate::skills::discover_skills(workspace);
-                let filtered: Vec<SkillMetadata> = if let Some(allowed) = allowed_skills {
-                    skills
+                let filtered: Vec<SkillMetadata> = match allowed_skills {
+                    Some(allowed) => skills
                         .into_iter()
                         .filter(|s| allowed.contains(&s.name.to_lowercase()))
-                        .collect()
-                } else {
-                    skills
+                        .collect(),
+                    None => skills,
                 };
-                // Merge hint-expanded skills with auto-activated skills.
-                let hint_re = regex::Regex::new(r"\$([A-Za-z0-9_.\-]+)").unwrap();
-                let mut all_expanded = expanded_skills.clone();
-                for cap in hint_re.captures_iter(prompt_text) {
-                    if let Some(m) = cap.get(1) {
-                        all_expanded.insert(m.as_str().to_owned());
-                    }
-                }
+                let all_expanded = Self::merge_expanded_skills(expanded_skills, prompt_text);
                 render_skills_prompt(&filtered, &all_expanded)
             }
             SectionKind::Runtime => {

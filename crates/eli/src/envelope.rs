@@ -150,13 +150,9 @@ fn unpack_batch(batch: &Value) -> Vec<Envelope> {
     batch.unpack_batch()
 }
 
-/// Unpack a value that may itself be a batch (Vec) into a flat list of envelopes.
+/// Flatten nested batches into a single list of envelopes.
 pub fn unpack_batch_vec(batches: Vec<Vec<Envelope>>) -> Vec<Envelope> {
-    let mut out = Vec::new();
-    for batch in batches {
-        out.extend(batch);
-    }
-    out
+    batches.into_iter().flatten().collect()
 }
 
 /// A validated outbound message extracted from a raw Envelope.

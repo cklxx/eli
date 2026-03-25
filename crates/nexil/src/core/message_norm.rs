@@ -18,24 +18,12 @@ pub fn normalize_messages_for_api(messages: Vec<Value>, transport: TransportKind
         .collect();
     let mut result = prune_orphan_tool_messages(normalized_messages);
 
-    // Rewrite provider-agnostic image_base64 blocks to transport-specific format.
     normalize_image_content_blocks(&mut result, transport);
 
-    // Anthropic-specific role merging is intentionally deferred to
-    // `build_messages_body`, where tool results have already been converted into
-    // Anthropic content blocks. Doing it earlier on the generic message shape
-    // can collapse multiple `role=tool` messages and drop call IDs.
-    if transport == TransportKind::Messages {
-        return result;
-    }
-
+    // Why: role merging deferred to `build_messages_body` — earlier merging drops call IDs.
     result
 }
 
-/// Rewrite `image_base64` content blocks into the provider-specific format.
-///
-/// - **Anthropic Messages**: `{"type": "image", "source": {"type": "base64", "media_type": m, "data": d}}`
-/// - **OpenAI Completion/Responses**: `{"type": "image_url", "image_url": {"url": "data:{m};base64,{d}"}}`
 fn normalize_image_content_blocks(messages: &mut [Value], transport: TransportKind) {
     for msg in messages.iter_mut() {
         if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
@@ -77,100 +65,94 @@ fn normalize_image_content_blocks(messages: &mut [Value], transport: TransportKi
     }
 }
 
-/// Remove orphan tool_use assistant messages and orphan tool_result messages.
-///
-/// A tool_result is orphan when no assistant message has a matching tool_call id.
-/// An assistant message with tool_calls is orphan when any of its calls lack a
-/// matching tool_result.
 pub(crate) fn prune_orphan_tool_messages(messages: Vec<Value>) -> Vec<Value> {
-    // Collect all tool_call IDs from assistant messages
-    let mut tool_call_ids: HashSet<String> = HashSet::new();
-    for msg in &messages {
-        if let Some(calls) = msg.get("tool_calls").and_then(|c| c.as_array()) {
-            for call in calls {
-                if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
-                    tool_call_ids.insert(id.to_owned());
-                }
-            }
-        }
+    let tool_call_ids = collect_tool_call_ids(&messages);
+    let tool_result_ids = collect_tool_result_ids(&messages);
+
+    messages
+        .into_iter()
+        .filter_map(|msg| prune_single_message(msg, &tool_call_ids, &tool_result_ids))
+        .collect()
+}
+
+fn collect_tool_call_ids(messages: &[Value]) -> HashSet<String> {
+    messages
+        .iter()
+        .filter_map(|msg| msg.get("tool_calls").and_then(|c| c.as_array()))
+        .flatten()
+        .filter_map(|call| call.get("id").and_then(|v| v.as_str()))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn collect_tool_result_ids(messages: &[Value]) -> HashSet<String> {
+    messages
+        .iter()
+        .filter(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("tool"))
+        .filter_map(|msg| msg.get("tool_call_id").and_then(|v| v.as_str()))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn prune_single_message(
+    msg: Value,
+    tool_call_ids: &HashSet<String>,
+    tool_result_ids: &HashSet<String>,
+) -> Option<Value> {
+    let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+
+    if role == "tool" {
+        let call_id = msg
+            .get("tool_call_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        return if !call_id.is_empty() && tool_call_ids.contains(call_id) {
+            Some(msg)
+        } else {
+            None
+        };
     }
 
-    // Collect all tool_result IDs
-    let mut tool_result_ids: HashSet<String> = HashSet::new();
-    for msg in &messages {
-        if msg.get("role").and_then(|r| r.as_str()) == Some("tool")
-            && let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str())
-        {
-            tool_result_ids.insert(id.to_owned());
-        }
+    if role == "assistant" && msg.get("tool_calls").and_then(|c| c.as_array()).is_some() {
+        return prune_assistant_tool_calls(msg, tool_result_ids);
     }
 
-    // Filter: keep messages that are not orphans
-    let mut filtered = Vec::new();
-    for msg in messages {
-        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+    Some(msg)
+}
 
-        if role == "tool" {
-            // Keep tool result only if its call_id has a matching tool_use
-            let call_id = msg
-                .get("tool_call_id")
+fn prune_assistant_tool_calls(mut msg: Value, tool_result_ids: &HashSet<String>) -> Option<Value> {
+    let Some(obj) = msg.as_object_mut() else {
+        return Some(msg);
+    };
+
+    let calls = obj
+        .get("tool_calls")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let valid_calls: Vec<Value> = calls
+        .into_iter()
+        .filter(|call| {
+            call.get("id")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if call_id.is_empty() || !tool_call_ids.contains(call_id) {
-                continue; // Drop orphan tool result
-            }
-        }
+                .is_some_and(|id| tool_result_ids.contains(id))
+        })
+        .collect();
 
-        if role == "assistant" && msg.get("tool_calls").and_then(|c| c.as_array()).is_some() {
-            let mut msg = msg;
-            let Some(obj) = msg.as_object_mut() else {
-                filtered.push(msg);
-                continue;
-            };
-            let calls = obj
-                .get("tool_calls")
-                .and_then(|c| c.as_array())
-                .cloned()
-                .unwrap_or_default();
+    let has_text = obj.get("content").is_some_and(|c| {
+        c.as_str().is_some_and(|s| !s.is_empty()) || c.as_array().is_some_and(|a| !a.is_empty())
+    });
 
-            // Keep only tool_calls that have a matching tool result
-            let valid_calls: Vec<Value> = calls
-                .into_iter()
-                .filter(|call| {
-                    call.get("id")
-                        .and_then(|v| v.as_str())
-                        .map(|id| tool_result_ids.contains(id))
-                        .unwrap_or(false)
-                })
-                .collect();
-
-            let has_text = obj
-                .get("content")
-                .map(|c| {
-                    c.as_str().map(|s| !s.is_empty()).unwrap_or(false)
-                        || c.as_array().map(|a| !a.is_empty()).unwrap_or(false)
-                })
-                .unwrap_or(false);
-
-            if valid_calls.is_empty() && !has_text {
-                // No valid tool_calls and no text content → drop entirely
-                continue;
-            } else if valid_calls.is_empty() {
-                // Text content exists but no valid tool_calls → remove tool_calls key
-                obj.remove("tool_calls");
-            } else {
-                // Update tool_calls to only the valid ones
-                obj.insert("tool_calls".to_owned(), Value::Array(valid_calls));
-            }
-
-            filtered.push(msg);
-            continue;
-        }
-
-        filtered.push(msg);
+    if valid_calls.is_empty() && !has_text {
+        return None;
+    } else if valid_calls.is_empty() {
+        obj.remove("tool_calls");
+    } else {
+        obj.insert("tool_calls".to_owned(), Value::Array(valid_calls));
     }
 
-    filtered
+    Some(msg)
 }
 
 /// Enforce Anthropic-specific message ordering rules.

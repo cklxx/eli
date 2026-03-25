@@ -87,7 +87,6 @@ impl LLMCore {
         }
     }
 
-    /// Set a custom error classifier.
     pub fn with_error_classifier(
         mut self,
         classifier: impl Fn(&ConduitError) -> Option<ErrorKind> + Send + Sync + 'static,
@@ -96,47 +95,39 @@ impl LLMCore {
         self
     }
 
-    /// The primary provider name.
     pub fn provider(&self) -> &str {
         &self.provider
     }
 
-    /// The primary model name.
     pub fn model(&self) -> &str {
         &self.model
     }
 
-    /// The fallback model list.
     pub fn fallback_models(&self) -> &[String] {
         &self.fallback_models
     }
 
-    /// Configured maximum retries.
     pub fn max_retries(&self) -> u32 {
         self.max_retries
     }
 
-    /// The API key configuration.
     pub fn api_key_config(&self) -> &ApiKeyConfig {
         &self.api_key
     }
 
-    /// The API base configuration.
     pub fn api_base_config(&self) -> &ApiBaseConfig {
         &self.api_base
     }
 
-    /// The configured API format / transport kind.
     pub fn api_format(&self) -> ApiFormat {
         self.api_format
     }
 
-    /// The verbosity level.
     pub fn verbose(&self) -> u32 {
         self.verbose
     }
 
-    /// Total number of attempts = 1 + max_retries, minimum 1.
+    /// `1 + max_retries`, minimum 1.
     pub fn max_attempts(&self) -> u32 {
         1u32.max(1 + self.max_retries)
     }
@@ -145,17 +136,11 @@ impl LLMCore {
         0..self.max_attempts()
     }
 
-    /// Apply the custom error classifier, if set.
+    /// Delegate to the custom error classifier, if set.
     pub(crate) fn custom_classify(&self, error: &ConduitError) -> Option<ErrorKind> {
-        if let Some(ref classifier) = self.error_classifier
-            && let Some(kind) = classifier(error)
-        {
-            return Some(kind);
-        }
-        None
+        self.error_classifier.as_ref().and_then(|clf| clf(error))
     }
 
-    /// Resolve a `"provider:model"` string into `(provider, model)`.
     pub fn resolve_model_provider(
         model: &str,
         provider: Option<&str>,
@@ -224,6 +209,120 @@ impl LLMCore {
         }
     }
 
+    /// Read the response payload, handling forced-stream collection.
+    async fn read_response_payload(
+        resp: reqwest::Response,
+        body_forced_stream: bool,
+        transport: TransportKind,
+        provider_name: &str,
+        model_id: &str,
+    ) -> Result<Value, ConduitError> {
+        if body_forced_stream {
+            Self::collect_sse_response(resp, transport).await
+        } else {
+            resp.json().await.map_err(|e| {
+                ConduitError::new(
+                    ErrorKind::Provider,
+                    format!("{provider_name}:{model_id}: failed to parse response: {e}"),
+                )
+            })
+        }
+    }
+
+    /// Classify a reqwest transport error into an `ErrorKind`.
+    fn classify_reqwest_error(e: &reqwest::Error) -> ErrorKind {
+        if e.is_timeout() {
+            return ErrorKind::Temporary;
+        }
+        if e.is_connect() {
+            return ErrorKind::Provider;
+        }
+        ErrorKind::Unknown
+    }
+
+    /// Build the request body for a given transport kind.
+    fn build_body_for_transport(
+        transport: TransportKind,
+        request: &super::request_builder::TransportCallRequest,
+        provider_name: &str,
+    ) -> Result<serde_json::Value, ConduitError> {
+        match transport {
+            TransportKind::Responses => Self::build_responses_body(request),
+            TransportKind::Messages => Self::build_messages_body(request),
+            TransportKind::Completion => Self::build_completion_body(request, provider_name),
+        }
+    }
+
+    /// Send an HTTP request, returning the response or classifying the error.
+    async fn send_http_request(
+        client: &Client,
+        url: &str,
+        body: &Value,
+        provider_name: &str,
+        model_id: &str,
+    ) -> Result<reqwest::Response, ConduitError> {
+        let resp = client.post(url).json(body).send().await.map_err(|e| {
+            ConduitError::new(
+                Self::classify_reqwest_error(&e),
+                format!("{provider_name}:{model_id}: {e}"),
+            )
+        })?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let error_body = resp.text().await.unwrap_or_default();
+            let kind = Self::classify_http_status(status.as_u16()).unwrap_or(ErrorKind::Provider);
+            return Err(ConduitError::new(
+                kind,
+                format!("{provider_name}:{model_id}: HTTP {status} - {error_body}"),
+            ));
+        }
+        Ok(resp)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_transport_request(
+        client: &Arc<Client>,
+        provider_name: &str,
+        model_id: &str,
+        resolved_api_base: &str,
+        normalized_messages: Vec<Value>,
+        tools_payload: &Option<Vec<Value>>,
+        max_tokens: Option<u32>,
+        stream: bool,
+        reasoning_effort: &Option<Value>,
+        kwargs: &serde_json::Map<String, Value>,
+        runtime: &ProviderRuntime<'_>,
+    ) -> super::request_builder::TransportCallRequest {
+        super::request_builder::TransportCallRequest {
+            client: Arc::clone(client),
+            provider_name: provider_name.to_owned(),
+            model_id: model_id.to_owned(),
+            api_base: Some(resolved_api_base.to_owned()),
+            messages_payload: normalized_messages,
+            tools_payload: tools_payload.clone(),
+            max_tokens,
+            stream,
+            reasoning_effort: reasoning_effort.clone(),
+            kwargs: kwargs.clone(),
+            is_anthropic_oauth: runtime.is_anthropic_oauth(),
+        }
+    }
+
+    /// Handle a failed attempt and decide whether to retry or move on.
+    /// Returns `Ok(true)` for retry, `Ok(false)` for break.
+    fn handle_send_error(
+        &self,
+        error: ConduitError,
+        provider_name: &str,
+        model_id: &str,
+        attempt: u32,
+        last_error: &mut Option<ConduitError>,
+    ) -> bool {
+        let outcome = self.handle_attempt_error(error, provider_name, model_id, attempt);
+        *last_error = Some(outcome.error);
+        outcome.decision == AttemptDecision::RetrySameModel
+    }
+
     /// Get or create an HTTP client for the given provider.
     pub fn get_client(&mut self, provider: &str) -> Arc<Client> {
         let api_key = self.resolve_api_key(provider);
@@ -269,46 +368,34 @@ impl LLMCore {
             );
 
             for attempt in self.retry_attempts() {
-                let transport = match runtime.selected_transport(
-                    tools_payload.as_deref(),
-                    false, // supports_responses -- caller can override
-                    None,
-                ) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        last_error = Some(e);
-                        break;
-                    }
-                };
+                let transport =
+                    match runtime.selected_transport(tools_payload.as_deref(), false, None) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            last_error = Some(e);
+                            break;
+                        }
+                    };
 
                 let resolved_api_base = runtime.resolved_api_base();
-
-                // Normalize messages for protocol compliance
                 let normalized_messages =
                     normalize_messages_for_api(messages_payload.clone(), transport);
-
-                let request = super::request_builder::TransportCallRequest {
-                    client: Arc::clone(&client),
-                    provider_name: provider_name.clone(),
-                    model_id: model_id.clone(),
-                    api_base: Some(resolved_api_base.clone()),
-                    messages_payload: normalized_messages,
-                    tools_payload: tools_payload.clone(),
+                let request = Self::build_transport_request(
+                    &client,
+                    provider_name,
+                    model_id,
+                    &resolved_api_base,
+                    normalized_messages,
+                    &tools_payload,
                     max_tokens,
                     stream,
-                    reasoning_effort: reasoning_effort.clone(),
-                    kwargs: kwargs.clone(),
-                    is_anthropic_oauth: runtime.is_anthropic_oauth(),
-                };
+                    &reasoning_effort,
+                    &kwargs,
+                    &runtime,
+                );
 
                 let url = Self::build_request_url(&resolved_api_base, transport);
-                let body = match transport {
-                    TransportKind::Responses => Self::build_responses_body(&request)?,
-                    TransportKind::Messages => Self::build_messages_body(&request)?,
-                    TransportKind::Completion => {
-                        Self::build_completion_body(&request, provider_name)?
-                    }
-                };
+                let body = Self::build_body_for_transport(transport, &request, provider_name)?;
 
                 info!(
                     target: "eli_trace",
@@ -320,126 +407,76 @@ impl LLMCore {
                     "llm.request"
                 );
 
-                let http_result = client.post(&url).json(&body).send().await;
-
-                match http_result {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        if !status.is_success() {
-                            let error_body = resp.text().await.unwrap_or_default();
-                            let kind = Self::classify_http_status(status.as_u16())
-                                .unwrap_or(ErrorKind::Provider);
-                            let error = ConduitError::new(
-                                kind,
-                                format!(
-                                    "{}:{}: HTTP {} - {}",
-                                    provider_name, model_id, status, error_body
-                                ),
-                            );
-                            let outcome =
-                                self.handle_attempt_error(error, provider_name, model_id, attempt);
-                            last_error = Some(outcome.error);
-                            if outcome.decision == AttemptDecision::RetrySameModel {
+                let resp =
+                    match Self::send_http_request(&client, &url, &body, provider_name, model_id)
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            if self.handle_send_error(
+                                e,
+                                provider_name,
+                                model_id,
+                                attempt,
+                                &mut last_error,
+                            ) {
                                 continue;
                             }
                             break;
                         }
+                    };
 
-                        // If the body forced stream=true (e.g. Codex backend)
-                        // but the caller asked for non-streaming, collect SSE
-                        // chunks and extract the final response.
-                        let body_forced_stream = !stream
-                            && body
-                                .get("stream")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
+                let body_forced_stream = !stream
+                    && body
+                        .get("stream")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
 
-                        let payload: Value = if body_forced_stream {
-                            match Self::collect_sse_response(resp, transport).await {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    let outcome = self.handle_attempt_error(
-                                        e,
-                                        provider_name,
-                                        model_id,
-                                        attempt,
-                                    );
-                                    last_error = Some(outcome.error);
-                                    if outcome.decision == AttemptDecision::RetrySameModel {
-                                        continue;
-                                    }
-                                    break;
-                                }
-                            }
-                        } else {
-                            match resp.json().await {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    let error = ConduitError::new(
-                                        ErrorKind::Provider,
-                                        format!(
-                                            "{}:{}: failed to parse response: {}",
-                                            provider_name, model_id, e
-                                        ),
-                                    );
-                                    let outcome = self.handle_attempt_error(
-                                        error,
-                                        provider_name,
-                                        model_id,
-                                        attempt,
-                                    );
-                                    last_error = Some(outcome.error);
-                                    if outcome.decision == AttemptDecision::RetrySameModel {
-                                        continue;
-                                    }
-                                    break;
-                                }
-                            }
-                        };
-
-                        info!(
-                            target: "eli_trace",
-                            provider = %provider_name,
-                            model = %model_id,
-                            transport = ?transport,
-                            response_payload = %payload,
-                            "llm.response"
-                        );
-
-                        let transport_response = TransportResponse { transport, payload };
-
-                        match on_response(transport_response, provider_name, model_id, attempt) {
-                            Ok(result) => return Ok(result),
-                            Err(Some(e)) => {
-                                last_error = Some(e);
-                                break;
-                            }
-                            Err(None) => {
-                                // Signal to retry
-                                continue;
-                            }
-                        }
-                    }
+                let payload: Value = match Self::read_response_payload(
+                    resp,
+                    body_forced_stream,
+                    transport,
+                    provider_name,
+                    model_id,
+                )
+                .await
+                {
+                    Ok(v) => v,
                     Err(e) => {
-                        let kind = if e.is_timeout() {
-                            ErrorKind::Temporary
-                        } else if e.is_connect() {
-                            ErrorKind::Provider
-                        } else {
-                            ErrorKind::Unknown
-                        };
-                        let error = ConduitError::new(
-                            kind,
-                            format!("{}:{}: {}", provider_name, model_id, e),
-                        );
-                        let outcome =
-                            self.handle_attempt_error(error, provider_name, model_id, attempt);
-                        last_error = Some(outcome.error);
-                        if outcome.decision == AttemptDecision::RetrySameModel {
+                        if self.handle_send_error(
+                            e,
+                            provider_name,
+                            model_id,
+                            attempt,
+                            &mut last_error,
+                        ) {
                             continue;
                         }
                         break;
                     }
+                };
+
+                info!(
+                    target: "eli_trace",
+                    provider = %provider_name,
+                    model = %model_id,
+                    transport = ?transport,
+                    response_payload = %payload,
+                    "llm.response"
+                );
+
+                match on_response(
+                    TransportResponse { transport, payload },
+                    provider_name,
+                    model_id,
+                    attempt,
+                ) {
+                    Ok(result) => return Ok(result),
+                    Err(Some(e)) => {
+                        last_error = Some(e);
+                        break;
+                    }
+                    Err(None) => continue,
                 }
             }
         }
@@ -489,82 +526,45 @@ impl LLMCore {
                     };
 
                 let resolved_api_base = runtime.resolved_api_base();
-
-                // Normalize messages for protocol compliance
                 let normalized_messages =
                     normalize_messages_for_api(messages_payload.clone(), transport);
-
-                let request = super::request_builder::TransportCallRequest {
-                    client: Arc::clone(&client),
-                    provider_name: provider_name.clone(),
-                    model_id: model_id.clone(),
-                    api_base: Some(resolved_api_base.clone()),
-                    messages_payload: normalized_messages,
-                    tools_payload: tools_payload.clone(),
+                let request = Self::build_transport_request(
+                    &client,
+                    provider_name,
+                    model_id,
+                    &resolved_api_base,
+                    normalized_messages,
+                    &tools_payload,
                     max_tokens,
-                    stream: true,
-                    reasoning_effort: reasoning_effort.clone(),
-                    kwargs: kwargs.clone(),
-                    is_anthropic_oauth: runtime.is_anthropic_oauth(),
-                };
+                    true,
+                    &reasoning_effort,
+                    &kwargs,
+                    &runtime,
+                );
 
                 let url = Self::build_request_url(&resolved_api_base, transport);
-                let body = match transport {
-                    TransportKind::Responses => Self::build_responses_body(&request)?,
-                    TransportKind::Messages => Self::build_messages_body(&request)?,
-                    TransportKind::Completion => {
-                        Self::build_completion_body(&request, provider_name)?
-                    }
-                };
+                let body = Self::build_body_for_transport(transport, &request, provider_name)?;
 
-                let http_result = client.post(&url).json(&body).send().await;
-
-                match http_result {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        if !status.is_success() {
-                            let error_body = resp.text().await.unwrap_or_default();
-                            let kind = Self::classify_http_status(status.as_u16())
-                                .unwrap_or(ErrorKind::Provider);
-                            let error = ConduitError::new(
-                                kind,
-                                format!(
-                                    "{}:{}: HTTP {} - {}",
-                                    provider_name, model_id, status, error_body
-                                ),
-                            );
-                            let outcome =
-                                self.handle_attempt_error(error, provider_name, model_id, attempt);
-                            last_error = Some(outcome.error);
-                            if outcome.decision == AttemptDecision::RetrySameModel {
+                let resp =
+                    match Self::send_http_request(&client, &url, &body, provider_name, model_id)
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            if self.handle_send_error(
+                                e,
+                                provider_name,
+                                model_id,
+                                attempt,
+                                &mut last_error,
+                            ) {
                                 continue;
                             }
                             break;
                         }
+                    };
 
-                        return Ok((resp, transport, provider_name.clone(), model_id.clone()));
-                    }
-                    Err(e) => {
-                        let kind = if e.is_timeout() {
-                            ErrorKind::Temporary
-                        } else if e.is_connect() {
-                            ErrorKind::Provider
-                        } else {
-                            ErrorKind::Unknown
-                        };
-                        let error = ConduitError::new(
-                            kind,
-                            format!("{}:{}: {}", provider_name, model_id, e),
-                        );
-                        let outcome =
-                            self.handle_attempt_error(error, provider_name, model_id, attempt);
-                        last_error = Some(outcome.error);
-                        if outcome.decision == AttemptDecision::RetrySameModel {
-                            continue;
-                        }
-                        break;
-                    }
-                }
+                return Ok((resp, transport, provider_name.clone(), model_id.clone()));
             }
         }
 

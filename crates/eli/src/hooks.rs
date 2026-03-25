@@ -267,6 +267,23 @@ pub trait EliHookSpec: Send + Sync {
 // HookRuntime
 // ---------------------------------------------------------------------------
 
+const HOOK_NAMES: &[&str] = &[
+    "classify_inbound",
+    "resolve_session",
+    "load_state",
+    "build_user_prompt",
+    "build_system_prompt",
+    "run_model",
+    "save_state",
+    "render_outbound",
+    "dispatch_outbound",
+    "register_cli_commands",
+    "on_error",
+    "wrap_tool",
+    "provide_tape_store",
+    "provide_channels",
+];
+
 /// Executes hooks with fault isolation and precedence semantics.
 ///
 /// # Panic Policy
@@ -676,40 +693,20 @@ impl HookRuntime {
 
     /// Build a hook-name to adapter-names mapping for diagnostics.
     pub fn hook_report(&self) -> HashMap<String, Vec<String>> {
-        // We report which plugins implement each hook by checking if their
-        // return value differs from the default. Since we can't introspect
-        // trait overrides in Rust the way pluggy can, we just list all
-        // registered plugin names for each hook.
-        let hook_names = [
-            "classify_inbound",
-            "resolve_session",
-            "load_state",
-            "build_user_prompt",
-            "build_system_prompt",
-            "run_model",
-            "save_state",
-            "render_outbound",
-            "dispatch_outbound",
-            "register_cli_commands",
-            "on_error",
-            "wrap_tool",
-            "provide_tape_store",
-            "provide_channels",
-        ];
-
-        let mut report = HashMap::new();
         let names: Vec<String> = self
             .plugins
             .iter()
             .map(|p| p.plugin_name().to_string())
             .collect();
 
-        for hook_name in &hook_names {
-            if !names.is_empty() {
-                report.insert(hook_name.to_string(), names.clone());
-            }
+        if names.is_empty() {
+            return HashMap::new();
         }
-        report
+
+        HOOK_NAMES
+            .iter()
+            .map(|&hook| (hook.to_string(), names.clone()))
+            .collect()
     }
 }
 

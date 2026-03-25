@@ -31,21 +31,16 @@ impl InternalOps {
         &mut self.core
     }
 
-    /// Resolve provider name, falling back to the core's default provider.
     fn resolve_provider(&self, provider: Option<&str>) -> String {
-        provider
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.core.provider().to_string())
+        provider.unwrap_or(self.core.provider()).to_owned()
     }
 
-    /// Resolve API base URL for a provider.
     fn resolve_base(&self, provider: &str) -> String {
         self.core
             .resolve_api_base(provider)
             .unwrap_or_else(|| default_api_base(provider))
     }
 
-    /// Resolve API key for a provider, returning an error if not found.
     fn resolve_key(&self, provider: &str) -> Result<String, ConduitError> {
         self.core.resolve_api_key(provider).ok_or_else(|| {
             ConduitError::new(
@@ -55,7 +50,6 @@ impl InternalOps {
         })
     }
 
-    /// Get an HTTP client for the provider.
     fn get_client(&mut self, provider: &str) -> Arc<reqwest::Client> {
         self.core.get_client(provider)
     }
@@ -67,23 +61,10 @@ impl InternalOps {
         format!("{base}/{path}")
     }
 
-    /// List available models from a provider.
-    pub async fn list_models(&mut self, provider: Option<&str>) -> Result<Value, ConduitError> {
-        let prov = self.resolve_provider(provider);
-        let base = self.resolve_base(&prov);
-        let api_key = self.resolve_key(&prov)?;
-        let client = self.get_client(&prov);
-
-        let url = Self::build_url(&base, "/models");
-        let resp = client
-            .get(&url)
-            .bearer_auth(&api_key)
-            .send()
-            .await
-            .map_err(|e| {
-                ConduitError::new(ErrorKind::Provider, format!("HTTP request failed: {e}"))
-            })?;
-
+    async fn send_and_parse(
+        resp: reqwest::Response,
+        operation: &str,
+    ) -> Result<Value, ConduitError> {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
@@ -92,13 +73,32 @@ impl InternalOps {
                 format!("HTTP {status}: {text}"),
             ));
         }
-
         resp.json::<Value>().await.map_err(|e| {
             ConduitError::new(
                 ErrorKind::Provider,
-                format!("Failed to parse list_models response: {e}"),
+                format!("Failed to parse {operation} response: {e}"),
             )
         })
+    }
+
+    async fn send_request(
+        request: reqwest::RequestBuilder,
+        operation: &str,
+    ) -> Result<Value, ConduitError> {
+        let resp = request.send().await.map_err(|e| {
+            ConduitError::new(ErrorKind::Provider, format!("HTTP request failed: {e}"))
+        })?;
+        Self::send_and_parse(resp, operation).await
+    }
+
+    /// List available models from a provider.
+    pub async fn list_models(&mut self, provider: Option<&str>) -> Result<Value, ConduitError> {
+        let prov = self.resolve_provider(provider);
+        let base = self.resolve_base(&prov);
+        let api_key = self.resolve_key(&prov)?;
+        let client = self.get_client(&prov);
+        let url = Self::build_url(&base, "/models");
+        Self::send_request(client.get(&url).bearer_auth(&api_key), "list_models").await
     }
 
     /// Send a raw responses-format request.
@@ -113,41 +113,15 @@ impl InternalOps {
         let api_key = self.resolve_key(&prov)?;
         let client = self.get_client(&prov);
 
-        let mdl = model
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.core.model().to_string());
-
+        let mdl = model.unwrap_or(self.core.model());
         let url = Self::build_url(&base, "/responses");
-        let body = serde_json::json!({
-            "model": mdl,
-            "input": input,
-        });
+        let body = serde_json::json!({ "model": mdl, "input": input });
 
-        let resp = client
-            .post(&url)
-            .bearer_auth(&api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                ConduitError::new(ErrorKind::Provider, format!("HTTP request failed: {e}"))
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(ConduitError::new(
-                ErrorKind::Provider,
-                format!("HTTP {status}: {text}"),
-            ));
-        }
-
-        resp.json::<Value>().await.map_err(|e| {
-            ConduitError::new(
-                ErrorKind::Provider,
-                format!("Failed to parse responses response: {e}"),
-            )
-        })
+        Self::send_request(
+            client.post(&url).bearer_auth(&api_key).json(&body),
+            "responses",
+        )
+        .await
     }
 
     /// Create a batch job.
@@ -170,38 +144,17 @@ impl InternalOps {
             "endpoint": endpoint,
             "completion_window": completion_window,
         });
-
         if let Some(meta) = metadata {
             body.as_object_mut()
-                .unwrap()
+                .expect("SAFETY: json! above produces an object")
                 .insert("metadata".to_owned(), meta);
         }
 
-        let resp = client
-            .post(&url)
-            .bearer_auth(&api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                ConduitError::new(ErrorKind::Provider, format!("HTTP request failed: {e}"))
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(ConduitError::new(
-                ErrorKind::Provider,
-                format!("HTTP {status}: {text}"),
-            ));
-        }
-
-        resp.json::<Value>().await.map_err(|e| {
-            ConduitError::new(
-                ErrorKind::Provider,
-                format!("Failed to parse create_batch response: {e}"),
-            )
-        })
+        Self::send_request(
+            client.post(&url).bearer_auth(&api_key).json(&body),
+            "create_batch",
+        )
+        .await
     }
 
     /// Retrieve batch status.
@@ -214,33 +167,8 @@ impl InternalOps {
         let base = self.resolve_base(&prov);
         let api_key = self.resolve_key(&prov)?;
         let client = self.get_client(&prov);
-
         let url = Self::build_url(&base, &format!("/batches/{batch_id}"));
-
-        let resp = client
-            .get(&url)
-            .bearer_auth(&api_key)
-            .send()
-            .await
-            .map_err(|e| {
-                ConduitError::new(ErrorKind::Provider, format!("HTTP request failed: {e}"))
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(ConduitError::new(
-                ErrorKind::Provider,
-                format!("HTTP {status}: {text}"),
-            ));
-        }
-
-        resp.json::<Value>().await.map_err(|e| {
-            ConduitError::new(
-                ErrorKind::Provider,
-                format!("Failed to parse retrieve_batch response: {e}"),
-            )
-        })
+        Self::send_request(client.get(&url).bearer_auth(&api_key), "retrieve_batch").await
     }
 
     /// Cancel a batch.
@@ -253,33 +181,8 @@ impl InternalOps {
         let base = self.resolve_base(&prov);
         let api_key = self.resolve_key(&prov)?;
         let client = self.get_client(&prov);
-
         let url = Self::build_url(&base, &format!("/batches/{batch_id}/cancel"));
-
-        let resp = client
-            .post(&url)
-            .bearer_auth(&api_key)
-            .send()
-            .await
-            .map_err(|e| {
-                ConduitError::new(ErrorKind::Provider, format!("HTTP request failed: {e}"))
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(ConduitError::new(
-                ErrorKind::Provider,
-                format!("HTTP {status}: {text}"),
-            ));
-        }
-
-        resp.json::<Value>().await.map_err(|e| {
-            ConduitError::new(
-                ErrorKind::Provider,
-                format!("Failed to parse cancel_batch response: {e}"),
-            )
-        })
+        Self::send_request(client.post(&url).bearer_auth(&api_key), "cancel_batch").await
     }
 
     /// List batches.
@@ -293,7 +196,6 @@ impl InternalOps {
         let base = self.resolve_base(&prov);
         let api_key = self.resolve_key(&prov)?;
         let client = self.get_client(&prov);
-
         let url = Self::build_url(&base, "/batches");
 
         let mut request = client.get(&url).bearer_auth(&api_key);
@@ -303,26 +205,7 @@ impl InternalOps {
         if let Some(limit_val) = limit {
             request = request.query(&[("limit", limit_val.to_string())]);
         }
-
-        let resp = request.send().await.map_err(|e| {
-            ConduitError::new(ErrorKind::Provider, format!("HTTP request failed: {e}"))
-        })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(ConduitError::new(
-                ErrorKind::Provider,
-                format!("HTTP {status}: {text}"),
-            ));
-        }
-
-        resp.json::<Value>().await.map_err(|e| {
-            ConduitError::new(
-                ErrorKind::Provider,
-                format!("Failed to parse list_batches response: {e}"),
-            )
-        })
+        Self::send_request(request, "list_batches").await
     }
 }
 

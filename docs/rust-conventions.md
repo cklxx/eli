@@ -932,6 +932,130 @@ pub fn derive_validate(input: TokenStream) -> TokenStream {
 
 ---
 
+## 8. Elegance Principles
+
+Code elegance is not aesthetic preference — it is engineering discipline that reduces defect surface and cognitive load.
+
+### 8.1 Intent Is Code
+
+Reading the code should feel like reading a specification. Type signatures declare **what**, function bodies declare **how**. If you need a comment to explain what a function does, the name or signature is wrong.
+
+```rust
+// ✅ Intent is obvious from signature and body
+fn authenticate(token: &str, secret: &str) -> Result<Claims, AuthError> {
+    decode(token)
+        .and_then(|t| verify(t, secret))
+        .map_err(AuthError::from)
+}
+
+// ❌ Needs comment to explain intent
+fn process(s: &str, s2: &str) -> Result<Value, Error> {
+    // decode token and verify against secret
+    let t = decode(s)?;
+    let v = verify(t, s2)?;
+    Ok(v.into())
+}
+```
+
+**Rule**: If you want to write a comment explaining _what_ the code does, rename instead. Reserve comments for _why_ (non-obvious domain constraints, performance tradeoffs, historical context).
+
+### 8.2 Make Mistakes Impossible
+
+The goal is not "be careful" — it is "cannot compile if wrong." Prefer solutions where the wrong code is rejected by the compiler, not caught by tests or reviewers.
+
+```rust
+// ✅ Wrong argument order = compile error
+fn route(session: SessionId, channel: ChannelId) { /* ... */ }
+
+// ❌ Wrong argument order = silent bug, caught (maybe) by a test
+fn route(session: &str, channel: &str) { /* ... */ }
+```
+
+**Hierarchy**: compile error > type error > runtime error > test failure > code review catch > production bug.
+
+### 8.3 Nothing to Remove
+
+Elegance is not what you add — it is what you remove. The code is finished when deleting any line would break it.
+
+- No defensive checks for impossible states (trust type/caller invariants)
+- No abstractions serving only one call site (inline until proven reusable)
+- No wrapper structs for one field (unless newtype § 1.4 applies)
+- No builders unless > 4 parameters
+- No compatibility shims — redesign cleanly when requirements change
+
+```rust
+// ✅ Nothing superfluous
+fn find_admin(users: &[User]) -> Option<&User> {
+    users.iter().find(|u| u.role == Role::Admin)
+}
+
+// ❌ Over-engineered for a one-liner
+struct AdminFinder<'a> {
+    users: &'a [User],
+}
+
+impl<'a> AdminFinder<'a> {
+    fn new(users: &'a [User]) -> Self { Self { users } }
+    fn find(&self) -> Option<&'a User> {
+        self.users.iter().find(|u| u.role == Role::Admin)
+    }
+}
+```
+
+### 8.4 Composition Over Accumulation
+
+Small functions compose into complex behavior via data pipelines. Each step transforms input → output with no side effects. The top-level function reads like a recipe.
+
+```rust
+// ✅ Pipeline — each step is independently testable
+fn process_batch(raw: &[RawEvent]) -> Vec<Notification> {
+    raw.iter()
+        .filter_map(|e| parse_event(e).ok())
+        .filter(|e| e.is_actionable())
+        .map(|e| build_notification(&e))
+        .collect()
+}
+
+// ❌ Accumulation — mutable state threaded through loops
+fn process_batch(raw: &[RawEvent]) -> Vec<Notification> {
+    let mut results = Vec::new();
+    for e in raw {
+        if let Ok(parsed) = parse_event(e) {
+            if parsed.is_actionable() {
+                results.push(build_notification(&parsed));
+            }
+        }
+    }
+    results
+}
+```
+
+**Rule**: Prefer `iter().filter().map().collect()` over `let mut v = Vec::new(); for ... { v.push(...) }`.
+
+### 8.5 Symmetry
+
+Similar problems get similar solutions. After reading one module, you should be able to predict how the next one works. Zero surprises.
+
+- All channels implement the same trait with the same error handling pattern
+- All hook points follow the same registration → resolution → execution flow
+- All CLI subcommands share the same arg parsing → execute → output structure
+
+**Test**: Pick any two files in the same layer. If they solve analogous problems differently, one of them is wrong.
+
+### 8.6 Signals of Inelegance
+
+| Signal | Root cause | Fix |
+|--------|-----------|-----|
+| Function > 15 lines | Doing more than one thing | Extract subfunctions (§ 5.1) |
+| Comment explaining _what_ | Name/signature unclear | Rename (§ 8.1) |
+| `clone()` without justification | Ownership model not thought through | Fix lifetimes or restructure (§ 6.1) |
+| Match with > 3 similar branches | Missing abstraction | Extract mapping function |
+| `&str` parameter for a domain concept | Primitive obsession | Newtype (§ 1.4) |
+| `Option<A>` + `Option<B>` mutually exclusive | Invalid states representable | Enum variants (§ 5.3) |
+| Defensive `if` for impossible condition | Types not carrying enough information | Parse, don't validate (§ 5.2) |
+
+---
+
 ## Pattern Selection Guide
 
 | Problem | Pattern | Section |

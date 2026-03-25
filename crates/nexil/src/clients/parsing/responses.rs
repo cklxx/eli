@@ -8,6 +8,32 @@ use super::types::{BaseTransportParser, ToolCallDelta};
 /// Parser for the OpenAI responses API format.
 pub struct ResponseTransportParser;
 
+fn responses_function_call_to_openai(item: &Value) -> Option<Value> {
+    let name = field(item, "name")
+        .and_then(|n| n.as_str())
+        .filter(|n| !n.is_empty())?;
+    let arguments = field(item, "arguments")
+        .and_then(|a| a.as_str())
+        .unwrap_or("")
+        .to_owned();
+
+    let call_id = field(item, "call_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| field(item, "id").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty());
+
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+        "function".to_owned(),
+        serde_json::json!({"name": name, "arguments": arguments}),
+    );
+    if let Some(cid) = call_id {
+        entry.insert("id".to_owned(), Value::String(cid.to_owned()));
+    }
+    entry.insert("type".to_owned(), Value::String("function".to_owned()));
+    Some(Value::Object(entry))
+}
+
 impl ResponseTransportParser {
     fn tool_delta_from_args_event(&self, chunk: &Value, event_type: &str) -> Vec<ToolCallDelta> {
         let item_id = match field(chunk, "item_id").and_then(|v| v.as_str()) {
@@ -94,25 +120,16 @@ impl ResponseTransportParser {
             Some(a) => a,
             None => return String::new(),
         };
-        let mut parts = Vec::new();
-        for item in items {
-            if field_str(item, "type") != "message" {
-                continue;
-            }
-            let content = match field(item, "content").and_then(|c| c.as_array()) {
-                Some(c) => c,
-                None => continue,
-            };
-            for entry in content {
-                if field_str(entry, "type") == "output_text"
-                    && let Some(text) = field(entry, "text").and_then(|t| t.as_str())
-                    && !text.is_empty()
-                {
-                    parts.push(text.to_owned());
-                }
-            }
-        }
-        parts.join("")
+        items
+            .iter()
+            .filter(|item| field_str(item, "type") == "message")
+            .filter_map(|item| field(item, "content").and_then(|c| c.as_array()))
+            .flatten()
+            .filter(|entry| field_str(entry, "type") == "output_text")
+            .filter_map(|entry| field(entry, "text").and_then(|t| t.as_str()))
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("")
     }
 }
 
@@ -148,15 +165,12 @@ impl BaseTransportParser for ResponseTransportParser {
     }
 
     fn extract_text(&self, response: &Value) -> String {
-        // Try output_text first (direct field).
         if let Some(text) = field(response, "output_text").and_then(|t| t.as_str()) {
             return text.to_owned();
         }
-        // Fall back to extracting from the output list.
-        match field(response, "output") {
-            Some(output) => self.extract_text_from_output(output),
-            None => String::new(),
-        }
+        field(response, "output")
+            .map(|o| self.extract_text_from_output(o))
+            .unwrap_or_default()
     }
 
     fn extract_tool_calls(&self, response: &Value) -> Vec<Value> {
@@ -173,39 +187,11 @@ impl BaseTransportParser for ResponseTransportParser {
             None => return Vec::new(),
         };
 
-        let mut calls = Vec::new();
-        for item in items {
-            if field_str(item, "type") != "function_call" {
-                continue;
-            }
-            let name = match field(item, "name").and_then(|n| n.as_str()) {
-                Some(n) if !n.is_empty() => n,
-                _ => continue,
-            };
-            let arguments = field(item, "arguments")
-                .and_then(|a| a.as_str())
-                .unwrap_or("")
-                .to_owned();
-
-            let mut entry = serde_json::Map::new();
-            let mut func_map = serde_json::Map::new();
-            func_map.insert("name".to_owned(), Value::String(name.to_owned()));
-            func_map.insert("arguments".to_owned(), Value::String(arguments));
-            entry.insert("function".to_owned(), Value::Object(func_map));
-
-            // call_id or id
-            let call_id = field(item, "call_id")
-                .and_then(|v| v.as_str())
-                .or_else(|| field(item, "id").and_then(|v| v.as_str()));
-            if let Some(cid) = call_id
-                && !cid.is_empty()
-            {
-                entry.insert("id".to_owned(), Value::String(cid.to_owned()));
-            }
-            entry.insert("type".to_owned(), Value::String("function".to_owned()));
-
-            calls.push(Value::Object(entry));
-        }
+        let calls = items
+            .iter()
+            .filter(|item| field_str(item, "type") == "function_call")
+            .filter_map(responses_function_call_to_openai)
+            .collect();
 
         expand_tool_calls(calls)
     }

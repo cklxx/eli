@@ -26,9 +26,7 @@ impl ClientCacheKey {
 /// Configuration for creating provider HTTP clients.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
-    /// Default headers to include in every request.
     pub default_headers: HashMap<String, String>,
-    /// Connection timeout in seconds.
     pub timeout_secs: u64,
 }
 
@@ -49,7 +47,6 @@ pub struct ClientRegistry {
 }
 
 impl ClientRegistry {
-    /// Create a new empty registry with default config.
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
@@ -57,7 +54,6 @@ impl ClientRegistry {
         }
     }
 
-    /// Create a new registry with the given client config.
     pub fn with_config(config: ClientConfig) -> Self {
         Self {
             cache: HashMap::new(),
@@ -82,94 +78,33 @@ impl ClientRegistry {
         client
     }
 
-    /// Check if a client is already cached for the given key.
     pub fn contains(&self, provider: &str, api_key: Option<&str>, api_base: Option<&str>) -> bool {
         let cache_key = ClientCacheKey::new(provider, api_key, api_base);
         self.cache.contains_key(&cache_key)
     }
 
-    /// Remove all cached clients.
     pub fn clear(&mut self) {
         self.cache.clear();
     }
 
-    /// Number of cached clients.
     pub fn len(&self) -> usize {
         self.cache.len()
     }
 
-    /// Whether the cache is empty.
     pub fn is_empty(&self) -> bool {
         self.cache.is_empty()
     }
 
     fn build_client(&self, provider: &str, api_key: Option<&str>) -> Client {
-        let mut headers = reqwest::header::HeaderMap::new();
-
-        for (key, value) in &self.config.default_headers {
-            if let (Ok(name), Ok(val)) = (
-                reqwest::header::HeaderName::from_bytes(key.as_bytes()),
-                reqwest::header::HeaderValue::from_str(value),
-            ) {
-                headers.insert(name, val);
-            }
-        }
-
+        let mut headers = self.default_headers();
         let is_anthropic = provider.eq_ignore_ascii_case("anthropic");
-        let is_oauth_token = api_key
-            .map(|k| k.to_ascii_lowercase().starts_with("sk-ant-oat"))
-            .unwrap_or(false);
+        let is_oauth_token =
+            api_key.is_some_and(|k| k.to_ascii_lowercase().starts_with("sk-ant-oat"));
 
-        if let Some(key) = api_key {
-            if is_anthropic && !is_oauth_token {
-                // Anthropic API keys use x-api-key header.
-                if let Ok(val) = reqwest::header::HeaderValue::from_str(key)
-                    && let Ok(name) = reqwest::header::HeaderName::from_bytes(b"x-api-key")
-                {
-                    headers.insert(name, val);
-                }
-            } else {
-                // All other providers (and Anthropic OAuth tokens) use Bearer auth.
-                if let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
-                    headers.insert(reqwest::header::AUTHORIZATION, val);
-                }
-            }
-        }
+        Self::insert_auth_header(&mut headers, api_key, is_anthropic, is_oauth_token);
 
-        // Add anthropic-version header for Anthropic provider.
-        if is_anthropic
-            && let Ok(val) = reqwest::header::HeaderValue::from_str("2023-06-01")
-            && let Ok(name) = reqwest::header::HeaderName::from_bytes(b"anthropic-version")
-        {
-            headers.insert(name, val);
-        }
-
-        // Anthropic OAuth tokens require Claude Code CLI impersonation headers.
-        if is_anthropic && is_oauth_token {
-            headers.insert(
-                reqwest::header::USER_AGENT,
-                reqwest::header::HeaderValue::from_static("claude-cli/2.1.75"),
-            );
-            if let Ok(name) = reqwest::header::HeaderName::from_bytes(b"x-app") {
-                headers.insert(name, reqwest::header::HeaderValue::from_static("cli"));
-            }
-            headers.insert(
-                reqwest::header::ACCEPT,
-                reqwest::header::HeaderValue::from_static("application/json"),
-            );
-            if let Ok(name) = reqwest::header::HeaderName::from_bytes(
-                b"anthropic-dangerous-direct-browser-access",
-            ) {
-                headers.insert(name, reqwest::header::HeaderValue::from_static("true"));
-            }
-            if let Ok(name) = reqwest::header::HeaderName::from_bytes(b"anthropic-beta") {
-                headers.insert(
-                    name,
-                    reqwest::header::HeaderValue::from_static(
-                        "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
-                    ),
-                );
-            }
+        if is_anthropic {
+            Self::insert_anthropic_headers(&mut headers, is_oauth_token);
         }
 
         headers.insert(
@@ -182,9 +117,78 @@ impl ClientRegistry {
             .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
             .build()
             .unwrap_or_else(|err| {
-                tracing::warn!(%err, provider, "failed to build HTTP client with custom config, falling back to default");
+                tracing::warn!(%err, provider, "failed to build HTTP client, falling back to default");
                 Client::new()
             })
+    }
+
+    fn default_headers(&self) -> reqwest::header::HeaderMap {
+        self.config
+            .default_headers
+            .iter()
+            .filter_map(|(key, value)| {
+                let name = reqwest::header::HeaderName::from_bytes(key.as_bytes()).ok()?;
+                let val = reqwest::header::HeaderValue::from_str(value).ok()?;
+                Some((name, val))
+            })
+            .collect()
+    }
+
+    fn insert_auth_header(
+        headers: &mut reqwest::header::HeaderMap,
+        api_key: Option<&str>,
+        is_anthropic: bool,
+        is_oauth_token: bool,
+    ) {
+        let Some(key) = api_key else { return };
+        if is_anthropic && !is_oauth_token {
+            if let Ok(val) = reqwest::header::HeaderValue::from_str(key)
+                && let Ok(name) = reqwest::header::HeaderName::from_bytes(b"x-api-key")
+            {
+                headers.insert(name, val);
+            }
+        } else if let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
+            headers.insert(reqwest::header::AUTHORIZATION, val);
+        }
+    }
+
+    fn insert_anthropic_headers(headers: &mut reqwest::header::HeaderMap, is_oauth_token: bool) {
+        if let Ok(val) = reqwest::header::HeaderValue::from_str("2023-06-01")
+            && let Ok(name) = reqwest::header::HeaderName::from_bytes(b"anthropic-version")
+        {
+            headers.insert(name, val);
+        }
+
+        if is_oauth_token {
+            Self::insert_oauth_impersonation_headers(headers);
+        }
+    }
+
+    fn insert_oauth_impersonation_headers(headers: &mut reqwest::header::HeaderMap) {
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            reqwest::header::HeaderValue::from_static("claude-cli/2.1.75"),
+        );
+        if let Ok(name) = reqwest::header::HeaderName::from_bytes(b"x-app") {
+            headers.insert(name, reqwest::header::HeaderValue::from_static("cli"));
+        }
+        headers.insert(
+            reqwest::header::ACCEPT,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
+        if let Ok(name) =
+            reqwest::header::HeaderName::from_bytes(b"anthropic-dangerous-direct-browser-access")
+        {
+            headers.insert(name, reqwest::header::HeaderValue::from_static("true"));
+        }
+        if let Ok(name) = reqwest::header::HeaderName::from_bytes(b"anthropic-beta") {
+            headers.insert(
+                name,
+                reqwest::header::HeaderValue::from_static(
+                    "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
+                ),
+            );
+        }
     }
 }
 

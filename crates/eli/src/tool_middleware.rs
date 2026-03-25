@@ -95,21 +95,18 @@ impl ToolMiddleware for CircuitBreaker {
         }
 
         let name = tool_name.to_owned();
-        // Clone the Arc to safely move state into the async block.
-        let states = self.states.clone();
+        let states = Arc::clone(&self.states);
         let max_failures = self.max_failures;
         let fut = next(args, ctx);
-        let name_clone = name.clone();
         Box::pin(async move {
             let result = fut.await;
+            let mut s = states.lock().unwrap_or_else(|e| e.into_inner());
             match &result {
                 Ok(_) => {
-                    let mut s = states.lock().unwrap_or_else(|e| e.into_inner());
-                    s.insert(name_clone, CircuitState::default());
+                    s.insert(name, CircuitState::default());
                 }
                 Err(_) => {
-                    let mut s = states.lock().unwrap_or_else(|e| e.into_inner());
-                    let state = s.entry(name_clone).or_default();
+                    let state = s.entry(name).or_default();
                     state.consecutive_failures += 1;
                     if state.consecutive_failures >= max_failures {
                         state.tripped_at = Some(Instant::now());
@@ -235,10 +232,8 @@ impl MiddlewareChain {
             let handler = handler.clone();
 
             Box::pin(async move {
-                // Build the chain: innermost is the real handler.
                 let inner: NextFn = Box::new(move |a, c| handler(a, c));
 
-                // Wrap layers in reverse order (first pushed = innermost).
                 let mut current = inner;
                 for layer in layers.iter() {
                     let layer = Arc::clone(layer);
@@ -248,9 +243,6 @@ impl MiddlewareChain {
                         let layer = Arc::clone(&layer);
                         let prev = &prev;
                         let n = n.clone();
-                        // We need to call layer.call() which returns BoxFuture.
-                        // But prev is behind a reference that won't be 'static.
-                        // So we evaluate immediately.
                         layer.call(&n, a, c, prev)
                     });
                 }

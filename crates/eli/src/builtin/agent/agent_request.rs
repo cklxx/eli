@@ -28,24 +28,24 @@ pub(super) fn build_tool_state(
     );
 
     if let Some(allowed) = allowed_skills {
-        let mut skills: Vec<String> = allowed.iter().cloned().collect();
-        skills.sort();
-        tool_state.insert(
-            "allowed_skills".to_owned(),
-            Value::Array(skills.into_iter().map(Value::String).collect()),
-        );
+        tool_state.insert("allowed_skills".to_owned(), sorted_string_array(allowed));
     }
-
     if let Some(allowed) = allowed_tools {
-        let mut tools: Vec<String> = allowed.iter().cloned().collect();
-        tools.sort();
-        tool_state.insert(
-            "allowed_tools".to_owned(),
-            Value::Array(tools.into_iter().map(Value::String).collect()),
-        );
+        tool_state.insert("allowed_tools".to_owned(), sorted_string_array(allowed));
     }
 
     tool_state
+}
+
+fn sorted_string_array(set: &HashSet<String>) -> Value {
+    let mut items: Vec<&str> = set.iter().map(String::as_str).collect();
+    items.sort_unstable();
+    Value::Array(
+        items
+            .into_iter()
+            .map(|s| Value::String(s.to_owned()))
+            .collect(),
+    )
 }
 
 pub(super) fn build_tool_context(
@@ -80,13 +80,6 @@ pub(super) fn lookup_registered_tool(name: &str) -> Option<Tool> {
         })
 }
 
-/// Resolve an API key from stored OAuth tokens / credentials when no explicit key is set.
-///
-/// Checks (in order):
-/// 1. `~/.eli/config.toml` for active provider profile
-/// 2. OpenAI Codex OAuth tokens (from `~/.codex/auth.json`)
-/// 3. Anthropic API key (from `~/.eli/auth.json`)
-/// 4. GitHub Copilot OAuth tokens
 #[allow(clippy::type_complexity)]
 fn resolve_stored_api_key(
     model_str: &str,
@@ -95,75 +88,60 @@ fn resolve_stored_api_key(
     Option<std::collections::HashMap<String, String>>,
 )> {
     let provider = model_str.split(':').next().unwrap_or("");
+    let key_map: HashMap<String, String> = provider_resolvers()
+        .into_iter()
+        .filter(|(name, _)| provider.is_empty() || provider == *name)
+        .filter_map(|(name, resolve)| resolve().map(|key| (name.to_owned(), key)))
+        .collect();
 
-    let mut key_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-
-    if provider.is_empty() || provider == "openai" {
-        let resolver = nexil::auth::openai_codex::codex_cli_api_key_resolver(None);
-        if let Some(token) = resolver("openai") {
-            key_map.insert("openai".to_string(), token);
+    match key_map.len() {
+        0 => None,
+        1 => {
+            let (_, v) = key_map
+                .into_iter()
+                .next()
+                .expect("SAFETY: len == 1 verified");
+            Some((Some(v), None))
         }
-    }
-
-    if (provider.is_empty() || provider == "anthropic")
-        && let Some(key) = crate::builtin::config::load_anthropic_api_key()
-    {
-        key_map.insert("anthropic".to_string(), key);
-    }
-
-    if provider.is_empty() || provider == "github-copilot" {
-        let resolver = nexil::auth::github_copilot::github_copilot_oauth_resolver(None, None, None);
-        if let Some(token) = resolver("github-copilot") {
-            key_map.insert("github-copilot".to_string(), token);
-        }
-    }
-
-    if key_map.is_empty() {
-        None
-    } else if key_map.len() == 1 {
-        let (_, v) = key_map.into_iter().next().unwrap();
-        Some((Some(v), None))
-    } else {
-        Some((None, Some(key_map)))
+        _ => Some((None, Some(key_map))),
     }
 }
 
-/// Create a `nexil::LLM` instance from agent settings.
+type ProviderResolver = (&'static str, Box<dyn FnOnce() -> Option<String>>);
+
+fn provider_resolvers() -> Vec<ProviderResolver> {
+    vec![
+        (
+            "openai",
+            Box::new(|| {
+                let resolver = nexil::auth::openai_codex::codex_cli_api_key_resolver(None);
+                resolver("openai")
+            }),
+        ),
+        (
+            "anthropic",
+            Box::new(crate::builtin::config::load_anthropic_api_key),
+        ),
+        (
+            "github-copilot",
+            Box::new(|| {
+                let resolver =
+                    nexil::auth::github_copilot::github_copilot_oauth_resolver(None, None, None);
+                resolver("github-copilot")
+            }),
+        ),
+    ]
+}
+
 pub(super) fn create_llm(
     settings: &AgentSettings,
     model_override: Option<&str>,
     tape_store: ForkTapeStore,
 ) -> Result<LLM, ConduitError> {
-    let model_str = model_override.unwrap_or(&settings.model);
-
-    let model_string: String;
-    let model_str = if model_str.contains(':') {
-        model_str
-    } else {
-        let config = crate::builtin::config::EliConfig::load();
-        let provider = config
-            .resolve_provider()
-            .unwrap_or_else(|| "openai".to_string());
-        model_string = format!("{provider}:{model_str}");
-        &model_string
-    };
-    let (api_key, api_key_map) = match settings.api_key.clone() {
-        ApiKeyConfig::Single(k) => (Some(k), None),
-        ApiKeyConfig::PerProvider(m) => (None, Some(m)),
-        ApiKeyConfig::None => match resolve_stored_api_key(model_str) {
-            Some((key, map)) => (key, map),
-            None => (None, None),
-        },
-    };
-
-    let (api_base, api_base_map) = match settings.api_base.clone() {
-        ApiBaseConfig::Single(b) => (Some(b), None),
-        ApiBaseConfig::PerProvider(m) => (None, Some(m)),
-        ApiBaseConfig::None => (None, None),
-    };
+    let model_str = resolve_model_string(model_override.unwrap_or(&settings.model));
 
     let mut builder = LLM::builder()
-        .model(model_str)
+        .model(&model_str)
         .api_format(settings.api_format)
         .verbose(settings.verbose as u32)
         .tape_store(tape_store);
@@ -171,25 +149,53 @@ pub(super) fn create_llm(
     if let Some(fallback_models) = settings.fallback_models.clone() {
         builder = builder.fallback_models(fallback_models);
     }
-    if let Some(api_key) = api_key {
-        builder = builder.api_key(&api_key);
-    } else if let Some(api_key_map) = api_key_map {
-        builder = builder.api_key_map(api_key_map);
-    }
-    if let Some(api_base) = api_base {
-        builder = builder.api_base(&api_base);
-    } else if let Some(api_base_map) = api_base_map {
-        builder = builder.api_base_map(api_base_map);
-    }
+
+    builder = apply_api_key(builder, &settings.api_key, &model_str);
+    builder = apply_api_base(builder, &settings.api_base);
 
     builder.build()
 }
 
-/// Build the system prompt for the agent loop.
-///
-/// Delegates to [`PromptBuilder`] for sectioned composition with mode support.
-/// Uses [`SkillMatcher`] for multi-signal skill auto-activation alongside
-/// the existing `$hint` regex expansion.
+fn resolve_model_string(model_str: &str) -> String {
+    if model_str.contains(':') {
+        model_str.to_owned()
+    } else {
+        let config = crate::builtin::config::EliConfig::load();
+        let provider = config
+            .resolve_provider()
+            .unwrap_or_else(|| "openai".to_string());
+        format!("{provider}:{model_str}")
+    }
+}
+
+fn apply_api_key(
+    builder: nexil::llm::LLMBuilder,
+    config: &ApiKeyConfig,
+    model_str: &str,
+) -> nexil::llm::LLMBuilder {
+    let (api_key, api_key_map) = match config.clone() {
+        ApiKeyConfig::Single(k) => (Some(k), None),
+        ApiKeyConfig::PerProvider(m) => (None, Some(m)),
+        ApiKeyConfig::None => resolve_stored_api_key(model_str).unwrap_or((None, None)),
+    };
+    match (api_key, api_key_map) {
+        (Some(key), _) => builder.api_key(&key),
+        (_, Some(map)) => builder.api_key_map(map),
+        _ => builder,
+    }
+}
+
+fn apply_api_base(
+    builder: nexil::llm::LLMBuilder,
+    config: &ApiBaseConfig,
+) -> nexil::llm::LLMBuilder {
+    match config.clone() {
+        ApiBaseConfig::Single(b) => builder.api_base(&b),
+        ApiBaseConfig::PerProvider(m) => builder.api_base_map(m),
+        ApiBaseConfig::None => builder,
+    }
+}
+
 pub(super) fn build_system_prompt(
     settings: &AgentSettings,
     prompt_text: &str,

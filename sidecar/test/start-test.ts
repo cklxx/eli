@@ -41,16 +41,7 @@ async function main() {
   log.info("channels", { list: Array.from(registry.channels.keys()) });
   log.info("tools", { count: registry.tools.size });
 
-  // Start outbound server with test endpoints
-  const app = express();
-  app.use(express.json());
-
-  // Mount test endpoints
-  mountTestEndpoints(app);
-
-  // Mount standard outbound endpoint (reuse bridge's handler)
-  // We need to re-implement the outbound server with test endpoints included.
-  // Simplest: start the standard outbound server, then layer test endpoints.
+  // Start the normal outbound server.
   const server = await startOutboundServer(config.port);
 
   // Mount test endpoints on the same server via a separate express app

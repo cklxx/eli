@@ -33,6 +33,19 @@ fn api_format_from_str_lossy(s: &str) -> ApiFormat {
     }
 }
 
+fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
+    env::var(key).ok().and_then(|v| v.parse().ok())
+}
+
+fn parse_fallback_models() -> Option<Vec<String>> {
+    env::var("ELI_FALLBACK_MODELS").ok().map(|v| {
+        v.split(',')
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Centralized env-var resolution
 // ---------------------------------------------------------------------------
@@ -168,7 +181,11 @@ fn collapse_config_map<T>(
     if map.is_empty() {
         none
     } else if map.len() == 1 && map.contains_key("default") {
-        single(map.remove("default").unwrap())
+        // SAFETY: guarded by `map.contains_key("default")` check above
+        single(
+            map.remove("default")
+                .expect("SAFETY: key presence verified"),
+        )
     } else {
         per_provider(map)
     }
@@ -203,7 +220,6 @@ impl AgentSettings {
     /// Per-provider API keys are detected via `ELI_<PROVIDER>_API_KEY` and
     /// `ELI_<PROVIDER>_API_BASE` patterns, matching the Python implementation.
     pub fn from_env() -> Self {
-        // Best-effort load of a .env file in the current directory.
         let _ = dotenvy::dotenv();
 
         let home = env::var("ELI_HOME")
@@ -213,56 +229,22 @@ impl AgentSettings {
 
         let config = crate::builtin::config::EliConfig::load();
         let model = EnvConfig::model(&config);
-
-        let fallback_models = env::var("ELI_FALLBACK_MODELS").ok().map(|v| {
-            v.split(',')
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty())
-                .collect()
-        });
-
-        let api_format = api_format_from_str_lossy(&env::var("ELI_API_FORMAT").unwrap_or_default());
-
-        let max_steps: usize = env::var("ELI_MAX_STEPS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(50);
-
-        let max_tokens: usize = env::var("ELI_MAX_TOKENS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| infer_max_output_tokens(&model));
-
-        let model_timeout_seconds: Option<u64> = env::var("ELI_MODEL_TIMEOUT_SECONDS")
-            .ok()
-            .and_then(|v| v.parse().ok());
-
-        let verbose: u8 = env::var("ELI_VERBOSE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0)
-            .min(2);
-
-        let context_window: usize = env::var("ELI_CONTEXT_WINDOW")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| infer_context_window(&model));
-
-        // Resolve API key / base — single value or per-provider map.
         let (api_key, api_base) = EnvConfig::api_credentials();
 
         Self {
             home,
-            model,
-            fallback_models,
+            fallback_models: parse_fallback_models(),
+            api_format: api_format_from_str_lossy(&env::var("ELI_API_FORMAT").unwrap_or_default()),
+            max_steps: env_parse("ELI_MAX_STEPS").unwrap_or(50),
+            max_tokens: env_parse("ELI_MAX_TOKENS")
+                .unwrap_or_else(|| infer_max_output_tokens(&model)),
+            model_timeout_seconds: env_parse("ELI_MODEL_TIMEOUT_SECONDS"),
+            verbose: env_parse::<u8>("ELI_VERBOSE").unwrap_or(0).min(2),
+            context_window: env_parse("ELI_CONTEXT_WINDOW")
+                .unwrap_or_else(|| infer_context_window(&model)),
             api_key,
             api_base,
-            api_format,
-            max_steps,
-            max_tokens,
-            model_timeout_seconds,
-            verbose,
-            context_window,
+            model,
         }
     }
 }

@@ -33,29 +33,31 @@ fn parse_internal_command(line: &str) -> (String, Vec<String>) {
     (name, rest)
 }
 
-/// Parse arg tokens into a JSON object. Keyword args (`key=value`) become
-/// object fields; bare positional args are joined under a `"value"` key.
 fn parse_args_to_json(tokens: &[String]) -> Value {
-    let mut map = serde_json::Map::new();
-    let mut positional: Vec<&str> = Vec::new();
-    let mut seen_kwarg = false;
+    let kwargs: serde_json::Map<String, Value> = tokens
+        .iter()
+        .filter_map(|t| {
+            t.find('=')
+                .map(|pos| (t[..pos].to_owned(), Value::String(t[pos + 1..].to_owned())))
+        })
+        .collect();
 
-    for token in tokens {
-        if let Some(eq_pos) = token.find('=') {
-            map.insert(
-                token[..eq_pos].to_owned(),
-                Value::String(token[eq_pos + 1..].to_owned()),
-            );
-            seen_kwarg = true;
-        } else if seen_kwarg {
-            tracing::warn!("positional argument '{}' after keyword arguments", token);
-        } else {
-            positional.push(token);
-        }
+    if !kwargs.is_empty() {
+        tokens
+            .iter()
+            .filter(|t| !t.contains('='))
+            .for_each(|t| tracing::warn!("positional argument '{t}' after keyword arguments"));
+        return Value::Object(kwargs);
     }
 
-    if !positional.is_empty() && map.is_empty() {
-        map.insert("value".to_owned(), Value::String(positional.join(" ")));
+    let joined: String = tokens
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut map = serde_json::Map::new();
+    if !joined.is_empty() {
+        map.insert("value".to_owned(), Value::String(joined));
     }
     Value::Object(map)
 }
@@ -77,69 +79,77 @@ pub(super) async fn run_command(
 
     let (name, arg_tokens) = parse_internal_command(body);
     let start = Instant::now();
-    let result = with_tape_runtime(tapes.clone(), async {
-        let tool = lookup_registered_tool(&name);
-        if let Some(tool) = tool {
-            let json_args = parse_args_to_json(&arg_tokens);
-            let ctx = build_tool_context("run_command", tape_name, tool_state);
-            if tool.context {
-                tool.run(json_args, Some(ctx)).await
-            } else {
-                tool.run(json_args, None).await
-            }
-        } else {
-            let ctx = build_tool_context("run_command", tape_name, tool_state);
-            let bash_args = serde_json::json!({"cmd": body});
-            let bash_tool = lookup_registered_tool("bash");
-            if let Some(bash_tool) = bash_tool {
-                bash_tool.run(bash_args, Some(ctx)).await
-            } else {
-                Err(ConduitError::new(ErrorKind::Tool, "bash tool not found"))
-            }
-        }
-    })
+
+    let result = with_tape_runtime(
+        tapes.clone(),
+        execute_tool_or_bash(&name, &arg_tokens, body, tape_name, tool_state),
+    )
     .await;
 
-    let output = match result {
-        Ok(val) => match val {
-            Value::String(s) => s,
-            other => serde_json::to_string(&other).unwrap_or_default(),
-        },
-        Err(e) => {
-            let error_output = e.message.clone();
-            let elapsed_ms = start.elapsed().as_millis() as i64;
-            let event = serde_json::json!({
-                "raw": body,
-                "name": name,
-                "status": "error",
-                "elapsed_ms": elapsed_ms,
-                "output": error_output,
-                "date": Utc::now().to_rfc3339(),
-            });
-            let _ = tapes.append_event(tape_name, "command", event).await;
-            return Err(e);
-        }
-    };
-
     let elapsed_ms = start.elapsed().as_millis() as i64;
+    record_command_event(tapes, tape_name, body, &name, elapsed_ms, &result).await;
+
+    match result {
+        Ok(val) => Ok(value_to_string(val)),
+        Err(e) => Err(e),
+    }
+}
+
+async fn execute_tool_or_bash(
+    name: &str,
+    arg_tokens: &[String],
+    body: &str,
+    tape_name: &str,
+    tool_state: &HashMap<String, Value>,
+) -> Result<Value, ConduitError> {
+    let ctx = build_tool_context("run_command", tape_name, tool_state);
+    if let Some(tool) = lookup_registered_tool(name) {
+        let json_args = parse_args_to_json(arg_tokens);
+        let ctx_arg = if tool.context { Some(ctx) } else { None };
+        tool.run(json_args, ctx_arg).await
+    } else {
+        let bash_tool = lookup_registered_tool("bash")
+            .ok_or_else(|| ConduitError::new(ErrorKind::Tool, "bash tool not found"))?;
+        bash_tool
+            .run(serde_json::json!({"cmd": body}), Some(ctx))
+            .await
+    }
+}
+
+fn value_to_string(val: Value) -> String {
+    match val {
+        Value::String(s) => s,
+        other => serde_json::to_string(&other).unwrap_or_default(),
+    }
+}
+
+async fn record_command_event(
+    tapes: &TapeService,
+    tape_name: &str,
+    body: &str,
+    name: &str,
+    elapsed_ms: i64,
+    result: &Result<Value, ConduitError>,
+) {
+    let (status, output) = match result {
+        Ok(val) => ("ok", value_to_string(val.clone())),
+        Err(e) => ("error", e.message.clone()),
+    };
     let event = serde_json::json!({
         "raw": body,
         "name": name,
-        "status": "ok",
+        "status": status,
         "elapsed_ms": elapsed_ms,
         "output": output,
         "date": Utc::now().to_rfc3339(),
     });
     let _ = tapes.append_event(tape_name, "command", event).await;
-
-    Ok(output)
 }
 
 // ---------------------------------------------------------------------------
 // Agent loop helpers
 // ---------------------------------------------------------------------------
 
-/// Log active decisions from the tape on session resume.
 async fn log_active_decisions(tapes: &TapeService, tape_name: &str) {
     if let Ok(all_entries) = tapes
         .store()
@@ -156,8 +166,6 @@ async fn log_active_decisions(tapes: &TapeService, tape_name: &str) {
     }
 }
 
-/// If an auto-handoff anchor was placed recently, return a TapeContext override
-/// that keeps using the previous anchor during the grace period.
 async fn resolve_tape_context_override(
     tapes: &TapeService,
     tape_name: &str,
@@ -179,8 +187,6 @@ async fn resolve_tape_context_override(
     }
 }
 
-/// Handle auto-handoff: decrement grace period or place a new handoff anchor
-/// when context approaches the limit.
 async fn maybe_auto_handoff(
     tapes: &TapeService,
     tape_name: &str,
@@ -188,41 +194,51 @@ async fn maybe_auto_handoff(
     response_text: &str,
     settings: &AgentSettings,
 ) {
-    // Decrement existing grace period if active.
-    if let Ok(Some((remaining, prev_anchor))) = tapes.auto_handoff_grace(tape_name).await
-        && remaining > 0
-    {
-        let new_remaining = remaining - 1;
-        let _ = tapes
-            .append_event(
-                tape_name,
-                "auto-handoff.grace",
-                serde_json::json!({
-                    "remaining": new_remaining,
-                    "prev_anchor": prev_anchor,
-                }),
-            )
-            .await;
-        if new_remaining == 0 {
-            tracing::info!(
-                tape = tape_name,
-                "auto-handoff grace ended, context will be trimmed next turn"
-            );
-        }
+    if try_decrement_grace(tapes, tape_name).await {
         return;
     }
+    if let Some(input_tokens) = should_handoff(output, settings) {
+        place_handoff_anchor(tapes, tape_name, response_text, input_tokens, settings).await;
+    }
+}
 
-    // Check whether context is approaching the limit.
-    if output.usage.is_empty() {
-        return;
+async fn try_decrement_grace(tapes: &TapeService, tape_name: &str) -> bool {
+    let Ok(Some((remaining, prev_anchor))) = tapes.auto_handoff_grace(tape_name).await else {
+        return false;
+    };
+    if remaining == 0 {
+        return false;
     }
+    let new_remaining = remaining - 1;
+    let _ = tapes
+        .append_event(
+            tape_name,
+            "auto-handoff.grace",
+            serde_json::json!({ "remaining": new_remaining, "prev_anchor": prev_anchor }),
+        )
+        .await;
+    if new_remaining == 0 {
+        tracing::info!(
+            tape = tape_name,
+            "auto-handoff grace ended, context will be trimmed next turn"
+        );
+    }
+    true
+}
+
+fn should_handoff(output: &ToolAutoResult, settings: &AgentSettings) -> Option<usize> {
     let input_tokens = output.usage.last().map(|u| u.input_tokens).unwrap_or(0) as usize;
     let threshold = settings.context_window * 70 / 100;
-    if input_tokens < threshold {
-        return;
-    }
+    (input_tokens >= threshold).then_some(input_tokens)
+}
 
-    // Place handoff anchor.
+async fn place_handoff_anchor(
+    tapes: &TapeService,
+    tape_name: &str,
+    response_text: &str,
+    input_tokens: usize,
+    settings: &AgentSettings,
+) {
     let prev_anchor_name = tapes
         .last_anchor_name(tape_name)
         .await
@@ -231,41 +247,9 @@ async fn maybe_auto_handoff(
         .unwrap_or_default();
 
     let summary: String = response_text.chars().take(500).collect();
-    let anchor_state = serde_json::json!({
-        "reason": "auto-handoff: context approaching limit",
-        "input_tokens": input_tokens,
-        "context_window": settings.context_window,
-        "summary": summary,
-    });
-    let anchor_name = format!("auto-handoff/{}", Utc::now().format("%Y%m%dT%H%M%S"));
-    if let Err(e) = tapes
-        .handoff(tape_name, &anchor_name, Some(anchor_state))
-        .await
-    {
-        tracing::warn!(error = %e, "auto-handoff: failed to write anchor");
-    }
-
-    let sys_entry = TapeEntry::system(
-        &format!("[Context summary from auto-handoff]\n{summary}"),
-        Value::Object(Default::default()),
-    );
-    if let Err(e) = tapes.store().append(tape_name, &sys_entry).await {
-        tracing::warn!(error = %e, "auto-handoff: failed to write summary");
-    }
-
-    if let Err(e) = tapes
-        .append_event(
-            tape_name,
-            "auto-handoff.grace",
-            serde_json::json!({
-                "remaining": 2,
-                "prev_anchor": prev_anchor_name,
-            }),
-        )
-        .await
-    {
-        tracing::warn!(error = %e, "auto-handoff: failed to write grace event");
-    }
+    write_handoff_anchor(tapes, tape_name, &summary, input_tokens, settings).await;
+    write_handoff_summary(tapes, tape_name, &summary).await;
+    write_handoff_grace(tapes, tape_name, &prev_anchor_name).await;
 
     tracing::info!(
         tape = tape_name,
@@ -275,7 +259,51 @@ async fn maybe_auto_handoff(
     );
 }
 
-/// Record a run event to the tape with standardised fields.
+async fn write_handoff_anchor(
+    tapes: &TapeService,
+    tape_name: &str,
+    summary: &str,
+    input_tokens: usize,
+    settings: &AgentSettings,
+) {
+    let anchor_name = format!("auto-handoff/{}", Utc::now().format("%Y%m%dT%H%M%S"));
+    let anchor_state = serde_json::json!({
+        "reason": "auto-handoff: context approaching limit",
+        "input_tokens": input_tokens,
+        "context_window": settings.context_window,
+        "summary": summary,
+    });
+    if let Err(e) = tapes
+        .handoff(tape_name, &anchor_name, Some(anchor_state))
+        .await
+    {
+        tracing::warn!(error = %e, "auto-handoff: failed to write anchor");
+    }
+}
+
+async fn write_handoff_summary(tapes: &TapeService, tape_name: &str, summary: &str) {
+    let sys_entry = TapeEntry::system(
+        &format!("[Context summary from auto-handoff]\n{summary}"),
+        Value::Object(Default::default()),
+    );
+    if let Err(e) = tapes.store().append(tape_name, &sys_entry).await {
+        tracing::warn!(error = %e, "auto-handoff: failed to write summary");
+    }
+}
+
+async fn write_handoff_grace(tapes: &TapeService, tape_name: &str, prev_anchor_name: &str) {
+    if let Err(e) = tapes
+        .append_event(
+            tape_name,
+            "auto-handoff.grace",
+            serde_json::json!({ "remaining": 2, "prev_anchor": prev_anchor_name }),
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "auto-handoff: failed to write grace event");
+    }
+}
+
 async fn record_run_event(
     tapes: &TapeService,
     tape_name: &str,
@@ -319,10 +347,12 @@ pub(super) async fn agent_loop(
 
     let start = Instant::now();
     tracing::info!(tape = tape_name, model = display_model, "agent.run");
-
-    let step_event = serde_json::json!({"prompt": prompt_text});
     let _ = tapes
-        .append_event(tape_name, "agent.run.start", step_event)
+        .append_event(
+            tape_name,
+            "agent.run.start",
+            serde_json::json!({"prompt": prompt_text}),
+        )
         .await;
 
     log_active_decisions(tapes, tape_name).await;
@@ -345,27 +375,35 @@ pub(super) async fn agent_loop(
     .await;
 
     let elapsed_ms = start.elapsed().as_millis() as i64;
+    process_agent_result(tapes, tape_name, result, elapsed_ms, settings).await
+}
 
+async fn process_agent_result(
+    tapes: &TapeService,
+    tape_name: &str,
+    result: Result<ToolAutoResult, ConduitError>,
+    elapsed_ms: i64,
+    settings: &AgentSettings,
+) -> Result<String, ConduitError> {
     match result {
         Err(e) => {
             record_run_event(tapes, tape_name, elapsed_ms, "error", Some(&e.message)).await;
             Err(e)
         }
-        Ok(ref output) => match output.kind {
-            ToolAutoResultKind::Text => {
-                let text = output.text.clone().unwrap_or_default();
-                record_run_event(tapes, tape_name, elapsed_ms, "ok", None).await;
-                maybe_auto_handoff(tapes, tape_name, output, &text, settings).await;
-                Ok(text)
-            }
-            _ => {
-                let error_msg = match &output.error {
-                    Some(e) => format!("{}: {}", e.kind.as_str(), e.message),
-                    None => "tool_auto_error: unknown".to_owned(),
-                };
-                record_run_event(tapes, tape_name, elapsed_ms, "error", Some(&error_msg)).await;
-                Err(ConduitError::new(ErrorKind::Unknown, error_msg))
-            }
-        },
+        Ok(ref output) if output.kind == ToolAutoResultKind::Text => {
+            let text = output.text.clone().unwrap_or_default();
+            record_run_event(tapes, tape_name, elapsed_ms, "ok", None).await;
+            maybe_auto_handoff(tapes, tape_name, output, &text, settings).await;
+            Ok(text)
+        }
+        Ok(ref output) => {
+            let error_msg = output
+                .error
+                .as_ref()
+                .map(|e| format!("{}: {}", e.kind.as_str(), e.message))
+                .unwrap_or_else(|| "tool_auto_error: unknown".to_owned());
+            record_run_event(tapes, tape_name, elapsed_ms, "error", Some(&error_msg)).await;
+            Err(ConduitError::new(ErrorKind::Unknown, error_msg))
+        }
     }
 }

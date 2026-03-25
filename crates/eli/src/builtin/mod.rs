@@ -31,10 +31,6 @@ use crate::types::{Envelope, PromptValue, State};
 
 pub(crate) const CLEANUP_ONLY_CONTEXT_KEY: &str = "_eli_cleanup_only";
 
-// ---------------------------------------------------------------------------
-// BuiltinImpl — default hook implementations
-// ---------------------------------------------------------------------------
-
 /// Default hook implementations for basic runtime operations.
 pub struct BuiltinImpl {
     agents: std::sync::RwLock<HashMap<String, Arc<Mutex<Agent>>>>,
@@ -152,37 +148,43 @@ impl BuiltinImpl {
         session_id: &str,
         model_output: &str,
     ) -> Vec<ChannelMessage> {
-        let output_channel = if message.output_channel.is_empty() {
-            message.channel.as_str()
-        } else {
-            message.output_channel.as_str()
-        };
+        let output_channel = effective_output_channel(message);
         let clean = crate::builtin::cli::strip_fake_tool_calls(model_output);
-        if clean.trim().is_empty() {
-            tracing::info!(
-                target: "eli_trace",
-                session_id = %session_id,
-                raw_model_output = ?model_output,
-                "builtin.render_outbound.empty_after_cleanup"
-            );
-            let mut extra = message.context.clone();
-            extra.insert(CLEANUP_ONLY_CONTEXT_KEY.to_owned(), Value::Bool(true));
-            let outbound = ChannelMessage::new(session_id, &message.channel, "")
-                .with_chat_id(&message.chat_id)
-                .with_output_channel(output_channel)
-                .with_kind(message.kind)
-                .with_context(extra)
-                .finalize();
-            return vec![outbound];
-        }
-
-        let outbound = ChannelMessage::new(session_id, &message.channel, clean)
+        let (content, context) = render_content_and_context(&clean, message, session_id);
+        let outbound = ChannelMessage::new(session_id, &message.channel, content)
             .with_chat_id(&message.chat_id)
             .with_output_channel(output_channel)
             .with_kind(message.kind)
-            .with_context(message.context.clone())
+            .with_context(context)
             .finalize();
         vec![outbound]
+    }
+}
+
+fn effective_output_channel(message: &ChannelMessage) -> &str {
+    if message.output_channel.is_empty() {
+        message.channel.as_str()
+    } else {
+        message.output_channel.as_str()
+    }
+}
+
+fn render_content_and_context(
+    clean: &str,
+    message: &ChannelMessage,
+    session_id: &str,
+) -> (String, serde_json::Map<String, Value>) {
+    if clean.trim().is_empty() {
+        tracing::info!(
+            target: "eli_trace",
+            session_id = %session_id,
+            "builtin.render_outbound.empty_after_cleanup"
+        );
+        let mut extra = message.context.clone();
+        extra.insert(CLEANUP_ONLY_CONTEXT_KEY.to_owned(), Value::Bool(true));
+        (String::new(), extra)
+    } else {
+        (clean.to_owned(), message.context.clone())
     }
 }
 
@@ -197,56 +199,45 @@ fn extract_message_text(content: &str) -> String {
     }
 }
 
-fn envelope_to_channel_message(message: &Envelope) -> ChannelMessage {
-    let channel = message
-        .get("channel")
-        .and_then(|v| v.as_str())
-        .unwrap_or("cli")
-        .to_owned();
+fn envelope_str<'a>(message: &'a Envelope, key: &str, default: &'a str) -> &'a str {
+    message.get(key).and_then(|v| v.as_str()).unwrap_or(default)
+}
 
-    let kind = match message
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("normal")
-    {
+fn envelope_content(message: &Envelope) -> String {
+    match message.get("content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
+fn parse_message_kind(message: &Envelope) -> MessageKind {
+    match envelope_str(message, "kind", "normal") {
         "error" => MessageKind::Error,
         "command" => MessageKind::Command,
         _ => MessageKind::Normal,
-    };
+    }
+}
 
+fn envelope_to_channel_message(message: &Envelope) -> ChannelMessage {
+    let channel = envelope_str(message, "channel", "cli");
     ChannelMessage {
-        session_id: message
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_owned(),
-        channel: channel.clone(),
-        content: match message.get("content") {
-            Some(Value::String(s)) => s.clone(),
-            Some(other) => other.to_string(),
-            None => String::new(),
-        },
-        chat_id: message
-            .get("chat_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("default")
-            .to_owned(),
+        session_id: envelope_str(message, "session_id", "").to_owned(),
+        channel: channel.to_owned(),
+        content: envelope_content(message),
+        chat_id: envelope_str(message, "chat_id", "default").to_owned(),
         is_active: message
             .get("is_active")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        kind,
+        kind: parse_message_kind(message),
         context: message
             .get("context")
             .and_then(|v| v.as_object())
             .cloned()
             .unwrap_or_default(),
         media: Vec::new(),
-        output_channel: message
-            .get("output_channel")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&channel)
-            .to_owned(),
+        output_channel: envelope_str(message, "output_channel", channel).to_owned(),
     }
 }
 

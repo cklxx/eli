@@ -7,14 +7,10 @@ use serde_json::Value;
 
 use crate::channels::message::{ChannelMessage, MediaItem, MediaType};
 
-/// Resolve the sidecar directory. Search order:
-///   1. `ELI_SIDECAR_DIR` env var
-///   2. `sidecar/` next to the current executable
-///   3. `sidecar/` in the current working directory
 fn find_sidecar_dir() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
 
-    let candidates: Vec<PathBuf> = [
+    [
         std::env::var("ELI_SIDECAR_DIR").ok().map(PathBuf::from),
         std::env::current_exe()
             .ok()
@@ -23,14 +19,9 @@ fn find_sidecar_dir() -> Option<std::path::PathBuf> {
     ]
     .into_iter()
     .flatten()
-    .collect();
-
-    candidates
-        .into_iter()
-        .find(|d| d.join("start.cjs").exists())
+    .find(|d| d.join("start.cjs").exists())
 }
 
-/// Prompt for a line of input with the given label.
 fn prompt_line(label: &str) -> String {
     use std::io::Write;
     print!("{label}");
@@ -40,8 +31,6 @@ fn prompt_line(label: &str) -> String {
     buf.trim().to_owned()
 }
 
-/// Ensure sidecar.json exists. If not, interactively prompt for channel
-/// credentials and write it.
 fn ensure_sidecar_config(sidecar_dir: &std::path::Path) {
     let config_path = sidecar_dir.join("sidecar.json");
     if config_path.exists() {
@@ -57,26 +46,34 @@ fn ensure_sidecar_config(sidecar_dir: &std::path::Path) {
         plugin
     };
 
-    // Determine channel id from plugin name.
-    let channel_id = if plugin.contains("lark") || plugin.contains("feishu") {
-        "feishu"
-    } else if plugin.contains("dingtalk") {
-        "dingtalk"
-    } else if plugin.contains("discord") {
-        "discord"
-    } else if plugin.contains("slack") {
-        "slack"
-    } else {
-        &*prompt_line("  Channel ID (e.g. feishu, slack): ")
-            .to_owned()
-            .leak()
-    };
+    let channel_id = infer_channel_id(&plugin);
+    let config = build_sidecar_channel_config(&plugin, channel_id);
 
+    let json = serde_json::to_string_pretty(&config).unwrap();
+    std::fs::write(&config_path, &json).unwrap();
+    println!("\n  Saved {}\n", config_path.display());
+}
+
+fn infer_channel_id(plugin: &str) -> String {
+    const KNOWN_CHANNELS: &[(&str, &str)] = &[
+        ("lark", "feishu"),
+        ("feishu", "feishu"),
+        ("dingtalk", "dingtalk"),
+        ("discord", "discord"),
+        ("slack", "slack"),
+    ];
+    KNOWN_CHANNELS
+        .iter()
+        .find(|(keyword, _)| plugin.contains(keyword))
+        .map(|(_, id)| id.to_string())
+        .unwrap_or_else(|| prompt_line("  Channel ID (e.g. feishu, slack): "))
+}
+
+fn build_sidecar_channel_config(plugin: &str, channel_id: String) -> Value {
     println!("\n  Enter credentials for {channel_id}:");
     let app_id = prompt_line("  App ID: ");
     let app_secret = prompt_line("  App Secret: ");
 
-    // For feishu, ask domain (feishu vs lark).
     let domain = if channel_id == "feishu" {
         let d = prompt_line("  Domain (feishu/lark) [feishu]: ");
         if d.is_empty() { "feishu".to_owned() } else { d }
@@ -84,7 +81,6 @@ fn ensure_sidecar_config(sidecar_dir: &std::path::Path) {
         String::new()
     };
 
-    // Build config JSON.
     let mut channel_config = serde_json::json!({
         "enabled": true,
         "appId": app_id,
@@ -101,76 +97,80 @@ fn ensure_sidecar_config(sidecar_dir: &std::path::Path) {
         channel_config["accounts"]["default"]["domain"] = serde_json::json!(domain);
     }
 
-    let config = serde_json::json!({
+    serde_json::json!({
         "eli_url": "http://127.0.0.1:3100",
         "port": 3101,
         "plugins": [plugin],
         "channels": {
             channel_id: channel_config,
         }
-    });
-
-    let json = serde_json::to_string_pretty(&config).unwrap();
-    std::fs::write(&config_path, &json).unwrap();
-    println!("\n  Saved {}\n", config_path.display());
+    })
 }
 
-/// Find and start the Node sidecar process.
-/// Returns `Some(Child)` if spawned, `None` if not found or failed.
 fn start_sidecar(wh: &crate::channels::webhook::WebhookSettings) -> Option<std::process::Child> {
-    let sidecar_dir = match find_sidecar_dir() {
-        Some(d) => d,
-        None => {
-            println!("Sidecar directory not found, skipping");
-            return None;
-        }
-    };
+    let sidecar_dir = find_sidecar_dir().or_else(|| {
+        println!("Sidecar directory not found, skipping");
+        None
+    })?;
 
-    // Check that node is available.
-    if std::process::Command::new("node")
+    if !ensure_node_available() {
+        return None;
+    }
+    if !ensure_sidecar_deps(&sidecar_dir) {
+        return None;
+    }
+    ensure_sidecar_config(&sidecar_dir);
+
+    println!("Starting sidecar from {}...", sidecar_dir.display());
+    spawn_sidecar_process(&sidecar_dir, wh)
+}
+
+fn ensure_node_available() -> bool {
+    let ok = std::process::Command::new("node")
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_err()
-    {
+        .is_ok();
+    if !ok {
         eprintln!("Warning: `node` not found in PATH, cannot start sidecar");
-        return None;
     }
+    ok
+}
 
-    // Check node_modules exists.
-    if !sidecar_dir.join("node_modules").exists() {
-        println!("Installing sidecar dependencies...");
-        let install = std::process::Command::new("npm")
-            .arg("install")
-            .current_dir(&sidecar_dir)
-            .status();
-        if install.is_err() || !install.unwrap().success() {
-            eprintln!("Warning: `npm install` failed in {}", sidecar_dir.display());
-            return None;
-        }
+fn ensure_sidecar_deps(sidecar_dir: &std::path::Path) -> bool {
+    if sidecar_dir.join("node_modules").exists() {
+        return true;
     }
+    println!("Installing sidecar dependencies...");
+    let ok = std::process::Command::new("npm")
+        .arg("install")
+        .current_dir(sidecar_dir)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("Warning: `npm install` failed in {}", sidecar_dir.display());
+    }
+    ok
+}
 
-    // Ensure sidecar.json exists (prompt if missing).
-    ensure_sidecar_config(&sidecar_dir);
-
-    println!("Starting sidecar from {}...", sidecar_dir.display());
-
+fn spawn_sidecar_process(
+    sidecar_dir: &std::path::Path,
+    wh: &crate::channels::webhook::WebhookSettings,
+) -> Option<std::process::Child> {
     let eli_url = format!("http://127.0.0.1:{}", wh.listen_port);
-    // Pass workspace path so sidecar writes SKILL.md files to the project root,
-    // where discover_skills() can find them.
+    // Workspace path lets sidecar write SKILL.md files where discover_skills() finds them
     let workspace = std::env::current_dir()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
 
-    // Use process_group(0) so the sidecar and all its children share a
-    // process group that we can kill atomically on shutdown.
-    // Pipe stdin so sidecar can detect parent death (pipe close = exit).
+    // process_group(0): sidecar + children share a PGID for atomic kill on shutdown
+    // piped stdin: sidecar detects parent death via pipe close
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new("node");
     cmd.arg("start.cjs")
-        .current_dir(&sidecar_dir)
+        .current_dir(sidecar_dir)
         .env("SIDECAR_ELI_URL", &eli_url)
         .env("SIDECAR_SKILLS_DIR", &workspace)
         .stdin(std::process::Stdio::piped())
@@ -190,9 +190,6 @@ fn start_sidecar(wh: &crate::channels::webhook::WebhookSettings) -> Option<std::
     }
 }
 
-/// Wait for the sidecar to be ready and register its URL for the bridge tool.
-/// Skills are discovered from .agents/skills/ SKILL.md files (standard protocol)
-/// — the sidecar writes them to disk on startup.
 fn sidecar_retry_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis((200u64 << attempt.min(4)).min(3000))
 }
@@ -218,6 +215,18 @@ async fn wait_for_sidecar(sidecar_url: &str) -> anyhow::Result<()> {
         }
     }
     anyhow::bail!("sidecar not reachable at {sidecar_url}");
+}
+
+fn context_string_array(context: &serde_json::Map<String, Value>, key: &str) -> Vec<String> {
+    context
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn report_gateway_task(result: Result<(), tokio::task::JoinError>) {
@@ -269,8 +278,6 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     let mut tasks = tokio::task::JoinSet::new();
     let mut workers = tokio::task::JoinSet::new();
 
-    // Channel implementations still publish via UnboundedSender; bridge them
-    // into the bounded gateway queue without touching channel modules.
     let ingress_cancel = cancel.clone();
     tasks.spawn(async move {
         loop {
@@ -293,7 +300,6 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         }
     });
 
-    // -- Telegram --
     let tg_settings = TelegramSettings::from_env();
     if !tg_settings.token.is_empty() {
         let tg = Arc::new(TelegramChannel::new(ingress_tx.clone(), tg_settings));
@@ -308,7 +314,6 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         channels.insert("telegram".to_owned(), tg);
     }
 
-    // -- Webhook + Sidecar (enabled when sidecar directory exists) --
     let mut sidecar_child: Option<std::process::Child> = None;
     let wh_settings = WebhookSettings::from_env();
     if find_sidecar_dir().is_some() || wh_settings.is_configured() {
@@ -333,15 +338,12 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         );
     }
 
-    // -- Sidecar --
-    // Wait for sidecar to be ready. Skills are on disk (.agents/skills/).
     if sidecar_child.is_some()
         && let Err(e) = wait_for_sidecar("http://127.0.0.1:3101").await
     {
         eprintln!("Warning: sidecar not ready: {e}");
     }
 
-    // Handle Ctrl-C. First signal → graceful shutdown. Second → force exit.
     let cancel_for_signal = cancel.clone();
     let signal_shutdown = cancel.clone();
     tasks.spawn(async move {
@@ -371,86 +373,17 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
                 let Some(msg) = maybe_msg else {
                     break;
                 };
-                let source_channel = msg.channel.clone();
                 let output_channel = if msg.output_channel.is_empty() {
-                    source_channel.clone()
+                    msg.channel.clone()
                 } else {
                     msg.output_channel.clone()
                 };
 
                 let inbound_context = msg.context.clone();
-
-                let context_media_paths: Vec<String> = msg
-                    .context
-                    .get("media_paths")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let context_media_types: Vec<String> = msg
-                    .context
-                    .get("media_types")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                tracing::debug!(
-                    session = %msg.session_id,
-                    paths = context_media_paths.len(),
-                    types = context_media_types.len(),
-                    "reconstructing media from context"
-                );
-                let media_from_context: Vec<MediaItem> = context_media_paths
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(i, path)| {
-                        let media_type_str = context_media_types
-                            .get(i)
-                            .map(|s| s.as_str())
-                            .unwrap_or("image");
-                        if media_type_str != "image" {
-                            return None;
-                        }
-                        let path_clone = path.clone();
-                        let fetcher: crate::channels::message::DataFetcher = Arc::new(move || {
-                            let p = path_clone.clone();
-                            Box::pin(async move { tokio::fs::read(&p).await.unwrap_or_default() })
-                        });
-                        let mime = if path.ends_with(".png") {
-                            "image/png"
-                        } else if path.ends_with(".gif") {
-                            "image/gif"
-                        } else if path.ends_with(".webp") {
-                            "image/webp"
-                        } else {
-                            "image/jpeg"
-                        };
-                        Some(MediaItem {
-                            media_type: MediaType::Image,
-                            mime_type: mime.to_owned(),
-                            filename: Some(path.clone()),
-                            data_fetcher: Some(fetcher),
-                        })
-                    })
-                    .collect();
-
+                let media_from_context = reconstruct_context_media(&msg);
                 let combined_media: Vec<MediaItem> =
                     [msg.media.as_slice(), media_from_context.as_slice()].concat();
                 let resolved = resolve_image_media(&combined_media).await;
-                tracing::debug!(
-                    session = %msg.session_id,
-                    parts = resolved.parts.len(),
-                    errors = resolved.errors.len(),
-                    "resolved image media parts"
-                );
-
-                // Append media errors to content so the user sees download failures.
                 let content = if resolved.errors.is_empty() {
                     msg.content.clone()
                 } else {
@@ -470,7 +403,6 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
                     inbound["media_parts"] = serde_json::json!(resolved.parts);
                 }
 
-                // Spawn processing so the main loop stays responsive to cancel.
                 let fw = framework.clone();
                 let chs = channels.clone();
                 let cancel_inner = cancel.clone();
@@ -538,23 +470,16 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         }
     }
 
-    // Drain inflight framework tasks (max 5s) before killing sidecar,
-    // so outbound replies can still reach channel plugins.
     drain_processing_tasks(&mut workers).await;
 
-    // Clean up — kill the entire sidecar process group so child processes
-    // (jiti workers, etc.) don't leak.
     if let Some(mut child) = sidecar_child {
         let pid = child.id();
         println!("Stopping sidecar (pgid={pid})...");
-        // Kill the process group (negative pid) with SIGTERM.
         let _ = std::process::Command::new("kill")
             .args(["-TERM", &format!("-{pid}")])
             .status();
-        // Give it a moment to exit gracefully, then force-kill the process group.
         let waited = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(3));
-            // SIGKILL the entire process group, not just the main child.
             let _ = std::process::Command::new("kill")
                 .args(["-9", &format!("-{}", pid)])
                 .status();
@@ -575,23 +500,57 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Maximum raw image size to embed (20 MB).
+fn reconstruct_context_media(msg: &ChannelMessage) -> Vec<MediaItem> {
+    let paths = context_string_array(&msg.context, "media_paths");
+    let types = context_string_array(&msg.context, "media_types");
+    tracing::debug!(
+        session = %msg.session_id,
+        paths = paths.len(),
+        types = types.len(),
+        "reconstructing media from context"
+    );
+    paths
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| types.get(*i).map(|s| s.as_str()).unwrap_or("image") == "image")
+        .map(|(_, path)| {
+            let mime = mime_from_path(&path);
+            let path_clone = path.clone();
+            let fetcher: crate::channels::message::DataFetcher = Arc::new(move || {
+                let p = path_clone.clone();
+                Box::pin(async move { tokio::fs::read(&p).await.unwrap_or_default() })
+            });
+            MediaItem {
+                media_type: MediaType::Image,
+                mime_type: mime.to_owned(),
+                filename: Some(path),
+                data_fetcher: Some(fetcher),
+            }
+        })
+        .collect()
+}
+
+fn mime_from_path(path: &str) -> &'static str {
+    const MIME_MAP: &[(&str, &str)] = &[
+        (".png", "image/png"),
+        (".gif", "image/gif"),
+        (".webp", "image/webp"),
+    ];
+    MIME_MAP
+        .iter()
+        .find(|(ext, _)| path.ends_with(ext))
+        .map(|(_, mime)| *mime)
+        .unwrap_or("image/jpeg")
+}
+
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
-/// Result of resolving image media: successfully encoded parts and any errors.
 struct ResolvedMedia {
     parts: Vec<Value>,
     errors: Vec<String>,
 }
 
-/// Resolve image `MediaItem`s into provider-agnostic base64 content blocks.
-///
-/// Returns blocks of the form `{"type": "image_base64", "mime_type": "…", "data": "…"}`.
-/// Conduit's `normalize_image_content_blocks` rewrites these to the correct
-/// provider format (Anthropic or OpenAI) before the API call.
-///
-/// Any download failures or size-limit violations are collected in `errors`
-/// so the caller can surface them to the user.
+/// Resolve image `MediaItem`s into base64 content blocks, collecting errors for failures.
 async fn resolve_image_media(media: &[MediaItem]) -> ResolvedMedia {
     let mut parts = Vec::new();
     let mut errors = Vec::new();

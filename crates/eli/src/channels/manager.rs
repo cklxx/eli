@@ -101,6 +101,14 @@ pub trait OutboundRouter: Send + Sync {
     async fn quit(&self, session_id: &str);
 }
 
+fn parse_message_kind(s: &str) -> MessageKind {
+    match s {
+        "error" => MessageKind::Error,
+        "command" => MessageKind::Command,
+        _ => MessageKind::Normal,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ChannelManager
 // ---------------------------------------------------------------------------
@@ -113,16 +121,10 @@ pub struct ChannelManager {
     settings: ChannelSettings,
     enabled_list: Vec<String>,
 
-    /// Unbounded sender/receiver pair for the internal message queue.
     tx: mpsc::UnboundedSender<ChannelMessage>,
     rx: Mutex<mpsc::UnboundedReceiver<ChannelMessage>>,
-
-    /// Per-session debounced handlers (only for channels with `needs_debounce`).
     session_handlers: Mutex<HashMap<String, Arc<BufferedMessageHandler>>>,
-
-    /// Per-session in-flight task handles, so we can cancel on quit/shutdown.
     ongoing_tasks: Mutex<HashMap<String, HashSet<tokio::task::Id>>>,
-    /// We also keep `JoinHandle`s keyed by task id for awaiting cancellation.
     task_handles: Mutex<HashMap<tokio::task::Id, tokio::task::JoinHandle<()>>>,
 }
 
@@ -199,40 +201,40 @@ impl ChannelManager {
 
     /// Dispatch an outbound envelope to the correct channel.
     pub async fn dispatch(&self, message: &Envelope) -> bool {
-        // Use OutboundMessage for validated field extraction with logging.
-        // We pass empty defaults; if neither output_channel nor channel is
-        // present, the validated message's channel field will be empty and
-        // the lookup below will fail gracefully (returning false).
-        let validated = OutboundMessage::from_envelope(message, "", "");
-
-        if validated.channel.is_empty() {
+        let Some(outbound) = self.build_outbound(message) else {
+            return false;
+        };
+        let channel_name = outbound.channel.clone();
+        let Some(channel) = self.channels.get(&channel_name).map(Arc::clone) else {
+            return false;
+        };
+        if let Err(e) = channel.send(outbound).await {
+            error!(error = %e, "failed to send outbound message");
             return false;
         }
+        true
+    }
 
-        let channel = match self.channels.get(&validated.channel) {
-            Some(c) => Arc::clone(c),
-            None => return false,
-        };
+    fn build_outbound(&self, message: &Envelope) -> Option<ChannelMessage> {
+        let validated = OutboundMessage::from_envelope(message, "", "");
+        if validated.channel.is_empty() {
+            return None;
+        }
 
-        // Resolve session_id default that depends on the channel name.
         let session_id = if validated.session_id.is_empty() {
             format!("{}:default", validated.channel)
         } else {
             validated.session_id
         };
 
-        let kind_str = message
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("normal");
+        let kind = parse_message_kind(
+            message
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("normal"),
+        );
 
-        let kind = match kind_str {
-            "error" => MessageKind::Error,
-            "command" => MessageKind::Command,
-            _ => MessageKind::Normal,
-        };
-
-        let outbound = ChannelMessage {
+        Some(ChannelMessage {
             session_id,
             channel: validated.channel,
             chat_id: validated.chat_id,
@@ -242,13 +244,7 @@ impl ChannelManager {
             context: validated.context,
             media: Vec::new(),
             output_channel: String::new(),
-        };
-
-        if let Err(e) = channel.send(outbound).await {
-            error!(error = %e, "failed to send outbound message");
-            return false;
-        }
-        true
+        })
     }
 
     /// Cancel all in-flight tasks for a session.
@@ -257,43 +253,40 @@ impl ChannelManager {
             let mut ongoing = self.ongoing_tasks.lock().await;
             ongoing.remove(session_id).unwrap_or_default()
         };
+        let cancelled = self.abort_tasks(task_ids).await;
+        info!(session_id = %session_id, cancelled, "channel.manager quit session");
+    }
 
-        let mut handles_guard = self.task_handles.lock().await;
+    /// Abort a set of tasks by their IDs and return the count of cancelled tasks.
+    async fn abort_tasks(&self, task_ids: HashSet<tokio::task::Id>) -> usize {
+        let mut handles = self.task_handles.lock().await;
         let mut cancelled = 0usize;
         for id in &task_ids {
-            if let Some(handle) = handles_guard.remove(id) {
+            if let Some(handle) = handles.remove(id) {
                 handle.abort();
                 let _ = handle.await;
                 cancelled += 1;
             }
         }
-        drop(handles_guard);
-
-        info!(
-            session_id = %session_id,
-            cancelled = cancelled,
-            "channel.manager quit session"
-        );
+        cancelled
     }
 
     // ----- enabled channels -------------------------------------------------
 
     /// Return the list of channels that should be started.
     pub fn enabled_channels(&self) -> Vec<Arc<dyn Channel>> {
-        if self.enabled_list.iter().any(|s| s == "all") {
-            // "all" excludes CLI to prevent interference.
-            self.channels
-                .iter()
-                .filter(|(name, _)| name.as_str() != "cli")
-                .map(|(_, ch)| Arc::clone(ch))
-                .collect()
-        } else {
-            self.channels
-                .iter()
-                .filter(|(name, _)| self.enabled_list.contains(name))
-                .map(|(_, ch)| Arc::clone(ch))
-                .collect()
-        }
+        let is_all = self.enabled_list.iter().any(|s| s == "all");
+        self.channels
+            .iter()
+            .filter(|(name, _)| {
+                if is_all {
+                    name.as_str() != "cli"
+                } else {
+                    self.enabled_list.contains(name)
+                }
+            })
+            .map(|(_, ch)| Arc::clone(ch))
+            .collect()
     }
 
     // ----- main loop --------------------------------------------------------
@@ -326,91 +319,77 @@ impl ChannelManager {
         let mut rx = self.rx.lock().await;
         loop {
             let message = tokio::select! {
-                msg = rx.recv() => {
-                    match msg {
-                        Some(m) => m,
-                        None => break,
-                    }
-                }
+                msg = rx.recv() => match msg {
+                    Some(m) => m,
+                    None => break,
+                },
                 () = cancel.cancelled() => {
                     info!("channel.manager received shutdown signal");
                     break;
                 }
             };
 
-            let session_id = message.session_id.clone();
-            let proc = Arc::clone(&processor);
-            let mgr = Arc::clone(self);
-
-            let handle = tokio::spawn(async move {
-                if let Err(e) = proc.process_inbound(message).await {
-                    error!(error = %e, "channel.manager process_inbound error");
-                }
-            });
-
-            let task_id = handle.id();
-            {
-                let mut ongoing = self.ongoing_tasks.lock().await;
-                ongoing
-                    .entry(session_id.clone())
-                    .or_default()
-                    .insert(task_id);
-            }
-            {
-                let mut handles = self.task_handles.lock().await;
-                handles.insert(task_id, handle);
-            }
-
-            // Spawn a cleanup task that removes the handle once done.
-            let task_id_clean = task_id;
-            let session_id_clean = session_id;
-            tokio::spawn(async move {
-                // The handle was just inserted above; yield to ensure visibility.
-                tokio::task::yield_now().await;
-                let handle = { mgr.task_handles.lock().await.remove(&task_id_clean) };
-                if let Some(h) = handle {
-                    let _ = h.await;
-                }
-                // Clean up ongoing_tasks.
-                let mut ongoing = mgr.ongoing_tasks.lock().await;
-                if let Some(set) = ongoing.get_mut(&session_id_clean) {
-                    set.remove(&task_id_clean);
-                    if set.is_empty() {
-                        ongoing.remove(&session_id_clean);
-                    }
-                }
-            });
+            self.spawn_and_track(message, Arc::clone(&processor)).await;
         }
-
         Ok(())
+    }
+
+    async fn spawn_and_track(
+        self: &Arc<Self>,
+        message: ChannelMessage,
+        processor: Arc<dyn InboundProcessor>,
+    ) {
+        let session_id = message.session_id.clone();
+        let mgr = Arc::clone(self);
+
+        let handle = tokio::spawn(async move {
+            if let Err(e) = processor.process_inbound(message).await {
+                error!(error = %e, "channel.manager process_inbound error");
+            }
+        });
+
+        let task_id = handle.id();
+        self.register_task(&session_id, task_id, handle).await;
+        Self::spawn_cleanup(mgr, task_id, session_id);
+    }
+
+    async fn register_task(
+        &self,
+        session_id: &str,
+        task_id: tokio::task::Id,
+        handle: tokio::task::JoinHandle<()>,
+    ) {
+        self.ongoing_tasks
+            .lock()
+            .await
+            .entry(session_id.to_owned())
+            .or_default()
+            .insert(task_id);
+        self.task_handles.lock().await.insert(task_id, handle);
+    }
+
+    fn spawn_cleanup(mgr: Arc<Self>, task_id: tokio::task::Id, session_id: String) {
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let handle = mgr.task_handles.lock().await.remove(&task_id);
+            if let Some(h) = handle {
+                let _ = h.await;
+            }
+            let mut ongoing = mgr.ongoing_tasks.lock().await;
+            if let Some(set) = ongoing.get_mut(&session_id) {
+                set.remove(&task_id);
+                if set.is_empty() {
+                    ongoing.remove(&session_id);
+                }
+            }
+        });
     }
 
     // ----- shutdown ---------------------------------------------------------
 
     /// Cancel all in-flight tasks and stop every enabled channel.
     pub async fn shutdown(&self) {
-        let mut count = 0usize;
-
-        let all_sessions: Vec<String> = {
-            let ongoing = self.ongoing_tasks.lock().await;
-            ongoing.keys().cloned().collect()
-        };
-
-        for session_id in all_sessions {
-            let task_ids = {
-                let mut ongoing = self.ongoing_tasks.lock().await;
-                ongoing.remove(&session_id).unwrap_or_default()
-            };
-            let mut handles = self.task_handles.lock().await;
-            for id in task_ids {
-                if let Some(handle) = handles.remove(&id) {
-                    handle.abort();
-                    let _ = handle.await;
-                    count += 1;
-                }
-            }
-        }
-
+        let count = self.abort_all_sessions().await;
         info!(
             cancelled = count,
             "channel.manager cancelled in-flight tasks"
@@ -421,5 +400,13 @@ impl ChannelManager {
                 error!(channel = %ch.name(), error = %e, "error stopping channel");
             }
         }
+    }
+
+    async fn abort_all_sessions(&self) -> usize {
+        let all_task_ids: HashSet<tokio::task::Id> = {
+            let mut ongoing = self.ongoing_tasks.lock().await;
+            ongoing.drain().flat_map(|(_, ids)| ids).collect()
+        };
+        self.abort_tasks(all_task_ids).await
     }
 }

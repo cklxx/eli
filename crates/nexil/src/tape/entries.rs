@@ -7,12 +7,10 @@ use serde_json::{Map, Value};
 use crate::core::results::ErrorPayload;
 use crate::core::tool_calls::{normalize_message_tool_calls, normalize_tool_calls};
 
-/// Return the current UTC time as an ISO-8601 string.
 pub fn utc_now() -> String {
     Utc::now().to_rfc3339()
 }
 
-/// Return the content of the latest system entry, if any.
 pub fn latest_system_content(entries: &[TapeEntry]) -> Option<&str> {
     entries
         .iter()

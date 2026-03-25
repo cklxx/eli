@@ -39,6 +39,13 @@ pub trait AsyncTapeStore: Send + Sync {
 // Anchor helpers
 // ---------------------------------------------------------------------------
 
+fn is_matching_anchor(entry: &TapeEntry, name: Option<&str>) -> bool {
+    entry.kind == "anchor"
+        && name
+            .map(|n| entry.payload.get("name").and_then(|v| v.as_str()) == Some(n))
+            .unwrap_or(true)
+}
+
 fn anchor_index(
     entries: &[TapeEntry],
     name: Option<&str>,
@@ -46,79 +53,55 @@ fn anchor_index(
     forward: bool,
     start: usize,
 ) -> i64 {
+    let mut range = start..entries.len();
     if forward {
-        for (idx, entry) in entries.iter().enumerate().skip(start) {
-            if entry.kind != "anchor" {
-                continue;
-            }
-            if let Some(n) = name
-                && entry.payload.get("name").and_then(|v| v.as_str()) != Some(n)
-            {
-                continue;
-            }
-            return idx as i64;
-        }
+        range
+            .find(|&i| is_matching_anchor(&entries[i], name))
+            .map(|i| i as i64)
+            .unwrap_or(default)
     } else {
-        for idx in (start..entries.len()).rev() {
-            let entry = &entries[idx];
-            if entry.kind != "anchor" {
-                continue;
-            }
-            if let Some(n) = name
-                && entry.payload.get("name").and_then(|v| v.as_str()) != Some(n)
-            {
-                continue;
-            }
-            return idx as i64;
-        }
+        range
+            .rev()
+            .find(|&i| is_matching_anchor(&entries[i], name))
+            .map(|i| i as i64)
+            .unwrap_or(default)
     }
-    default
 }
 
-// ---------------------------------------------------------------------------
-// Date parsing helpers
-// ---------------------------------------------------------------------------
+fn boundary_time(is_end: bool) -> NaiveTime {
+    if is_end {
+        NaiveTime::from_hms_nano_opt(23, 59, 59, 999_999_999)
+            .expect("SAFETY: static time components are always valid")
+    } else {
+        NaiveTime::MIN
+    }
+}
+
+fn try_parse_date_only(value: &str, is_end: bool) -> Option<DateTime<Utc>> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .map(|d| d.and_time(boundary_time(is_end)).and_utc())
+}
 
 fn parse_datetime_boundary(value: &str, is_end: bool) -> Result<DateTime<Utc>, ConduitError> {
-    // Try date-only first (no T or space)
     if !value.contains('T')
         && !value.contains(' ')
-        && let Ok(parsed_date) = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        && let Some(dt) = try_parse_date_only(value, is_end)
     {
-        let boundary_time = if is_end {
-            NaiveTime::from_hms_nano_opt(23, 59, 59, 999_999_999).unwrap()
-        } else {
-            NaiveTime::MIN
-        };
-        let dt = parsed_date.and_time(boundary_time);
-        return Ok(dt.and_utc());
+        return Ok(dt);
     }
 
-    // Try full ISO datetime
-    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
-        return Ok(parsed.with_timezone(&Utc));
-    }
-
-    // Try chrono's flexible ISO parsing
-    if let Ok(parsed) = value.parse::<DateTime<Utc>>() {
-        return Ok(parsed);
-    }
-
-    // Fallback: try date-only again
-    if let Ok(parsed_date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
-        let boundary_time = if is_end {
-            NaiveTime::from_hms_nano_opt(23, 59, 59, 999_999_999).unwrap()
-        } else {
-            NaiveTime::MIN
-        };
-        let dt = parsed_date.and_time(boundary_time);
-        return Ok(dt.and_utc());
-    }
-
-    Err(ConduitError::new(
-        ErrorKind::InvalidInput,
-        format!("Invalid ISO date or datetime: '{value}'."),
-    ))
+    DateTime::parse_from_rfc3339(value)
+        .map(|p| p.with_timezone(&Utc))
+        .or_else(|_| value.parse::<DateTime<Utc>>())
+        .or_else(|_| {
+            try_parse_date_only(value, is_end).ok_or_else(|| {
+                ConduitError::new(
+                    ErrorKind::InvalidInput,
+                    format!("Invalid ISO date or datetime: '{value}'."),
+                )
+            })
+        })
 }
 
 fn entry_in_datetime_range(
@@ -246,7 +229,6 @@ impl InMemoryTapeStore {
         }
     }
 
-    /// Read all entries for a tape, returning cloned copies.
     pub fn read(&self, tape: &str) -> Option<Vec<TapeEntry>> {
         let tapes = self.tapes.read().unwrap_or_else(|e| e.into_inner());
         tapes
@@ -265,7 +247,7 @@ impl TapeStore for InMemoryTapeStore {
     fn list_tapes(&self) -> Result<Vec<String>, ConduitError> {
         let tapes = self.tapes.read().unwrap_or_else(|e| e.into_inner());
         let mut keys: Vec<String> = tapes.keys().cloned().collect();
-        keys.sort();
+        keys.sort_unstable();
         Ok(keys)
     }
 

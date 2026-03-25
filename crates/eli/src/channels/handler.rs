@@ -62,45 +62,43 @@ impl BufferedMessageHandler {
         }
     }
 
-    /// Feed a message into the buffer. This mirrors the Python `__call__`.
+    /// Feed a message into the buffer.
     pub async fn handle(&self, message: ChannelMessage) {
-        let now = Instant::now();
-
-        // Commands bypass buffering entirely.
         if message.content.starts_with('/') {
-            let mut inner = self.inner.lock().await;
-            let dropped = inner.pending.len();
-            inner.pending.clear();
+            self.handle_command(message).await;
+        } else {
+            self.handle_buffered(message).await;
+        }
+    }
+
+    async fn handle_command(&self, message: ChannelMessage) {
+        let mut inner = self.inner.lock().await;
+        let dropped = inner.pending.len();
+        inner.pending.clear();
+        inner.last_active_time = None;
+        drop(inner);
+        self.notify.notify_waiters();
+        info!(
+            session_id = %message.session_id,
+            content = %message.content,
+            dropped_pending = dropped,
+            "session.message received command"
+        );
+        let _ = self.handler.send(message);
+    }
+
+    async fn handle_buffered(&self, message: ChannelMessage) {
+        let now = Instant::now();
+        let mut inner = self.inner.lock().await;
+
+        if !message.is_active && !self.is_within_active_window(&inner, now) {
             inner.last_active_time = None;
-            drop(inner);
-            self.notify.notify_waiters();
             info!(
                 session_id = %message.session_id,
                 content = %message.content,
-                dropped_pending = dropped,
-                "session.message received command"
+                "session.message received ignored"
             );
-            let _ = self.handler.send(message);
             return;
-        }
-
-        let mut inner = self.inner.lock().await;
-
-        // Drop inactive messages outside the active window.
-        if !message.is_active {
-            let in_window = match inner.last_active_time {
-                Some(last) => now.duration_since(last) <= self.active_time_window,
-                None => false,
-            };
-            if !in_window {
-                inner.last_active_time = None;
-                info!(
-                    session_id = %message.session_id,
-                    content = %message.content,
-                    "session.message received ignored"
-                );
-                return;
-            }
         }
 
         inner.pending.push(message.clone());
@@ -125,6 +123,12 @@ impl BufferedMessageHandler {
         }
     }
 
+    fn is_within_active_window(&self, inner: &BufferInner, now: Instant) -> bool {
+        inner
+            .last_active_time
+            .is_some_and(|last| now.duration_since(last) <= self.active_time_window)
+    }
+
     /// Schedule a flush after `delay`. Any previously scheduled flush is
     /// implicitly superseded because we use a single `Notify`.
     fn schedule_flush(&self, delay: Duration) {
@@ -132,12 +136,9 @@ impl BufferedMessageHandler {
         let notify = Arc::clone(&self.notify);
         let sink = self.handler.clone();
 
-        // Notify wakes any existing waiter, effectively resetting the timer.
         self.notify.notify_waiters();
 
         tokio::spawn(async move {
-            // We race: either the delay elapses, or a new notify arrives
-            // (meaning a newer schedule_flush was called).
             tokio::select! {
                 () = tokio::time::sleep(delay) => {
                     let mut guard = inner.lock().await;
@@ -153,9 +154,7 @@ impl BufferedMessageHandler {
                         warn!("buffered handler: sink closed, dropping batch");
                     }
                 }
-                () = notify.notified() => {
-                    // A newer flush was scheduled; this one is superseded.
-                }
+                () = notify.notified() => {}
             }
         });
     }

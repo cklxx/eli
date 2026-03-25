@@ -57,18 +57,20 @@ impl TapeService {
         let query = TapeQuery::new(tape_name);
         let entries = self.store.fetch_all(&query).await?;
 
-        let mut anchor_positions: Vec<(usize, String)> = Vec::new();
-        for (i, entry) in entries.iter().enumerate() {
-            if entry.kind == "anchor" {
-                let name = entry
+        let anchor_positions: Vec<(usize, String)> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.kind == "anchor")
+            .map(|(i, e)| {
+                let name = e
                     .payload
                     .get("name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("-")
                     .to_owned();
-                anchor_positions.push((i, name));
-            }
-        }
+                (i, name)
+            })
+            .collect();
 
         let (last_anchor, entries_since_last_anchor) =
             if let Some((idx, name)) = anchor_positions.last() {
@@ -77,21 +79,7 @@ impl TapeService {
                 (None, entries.len())
             };
 
-        let mut last_token_usage: Option<i64> = None;
-        for entry in entries.iter().rev() {
-            if entry.kind == "event"
-                && entry.payload.get("name").and_then(|v| v.as_str()) == Some("run")
-                && let Some(usage) = entry
-                    .payload
-                    .get("data")
-                    .and_then(|d| d.get("usage"))
-                    .and_then(|u| u.get("total_tokens"))
-                    .and_then(|t| t.as_i64())
-            {
-                last_token_usage = Some(usage);
-                break;
-            }
-        }
+        let last_token_usage = find_last_token_usage(&entries);
 
         Ok(TapeInfo {
             name: tape_name.to_owned(),
@@ -310,4 +298,20 @@ impl TapeService {
     pub fn store(&self) -> &ForkTapeStore {
         &self.store
     }
+}
+
+/// Find the most recent `run` event's `total_tokens` usage.
+fn find_last_token_usage(entries: &[TapeEntry]) -> Option<i64> {
+    entries.iter().rev().find_map(|entry| {
+        (entry.kind == "event" && entry.payload.get("name").and_then(|v| v.as_str()) == Some("run"))
+            .then(|| {
+                entry
+                    .payload
+                    .get("data")
+                    .and_then(|d| d.get("usage"))
+                    .and_then(|u| u.get("total_tokens"))
+                    .and_then(|t| t.as_i64())
+            })
+            .flatten()
+    })
 }

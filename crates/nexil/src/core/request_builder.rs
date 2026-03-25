@@ -15,6 +15,104 @@ use super::tool_calls::{
 use crate::clients::parsing::TransportKind;
 use crate::providers;
 
+fn convert_message_to_responses_items(message: &Value) -> Vec<Value> {
+    let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("");
+    match role {
+        "user" | "assistant" => convert_user_or_assistant_items(message, role),
+        "tool" => convert_tool_result_item(message).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn convert_user_or_assistant_items(message: &Value, role: &str) -> Vec<Value> {
+    let content_item = message
+        .get("content")
+        .and_then(|c| c.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| serde_json::json!({"role": role, "content": s, "type": "message"}));
+
+    let tool_items = (role == "assistant")
+        .then(|| message.get("tool_calls").and_then(|tc| tc.as_array()))
+        .flatten()
+        .into_iter()
+        .flat_map(|calls| {
+            normalize_tool_calls(calls)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, tc)| tool_call_to_function_call(&tc, index))
+        });
+
+    content_item.into_iter().chain(tool_items).collect()
+}
+
+fn tool_call_to_function_call(tc: &Value, index: usize) -> Option<Value> {
+    let name = tool_call_name(tc).filter(|n| !n.is_empty())?;
+    let call_id = tool_call_id(tc)
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| format!("call_{}", index + 1));
+    Some(serde_json::json!({
+        "type": "function_call",
+        "name": name,
+        "arguments": tool_call_arguments_string(tc),
+        "call_id": call_id,
+    }))
+}
+
+fn convert_tool_result_item(message: &Value) -> Option<Value> {
+    let call_id = message
+        .get("tool_call_id")
+        .or_else(|| message.get("call_id"))
+        .and_then(|v| v.as_str())?;
+    let output = message
+        .get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+    Some(serde_json::json!({
+        "type": "function_call_output", "call_id": call_id, "output": output,
+    }))
+}
+
+fn extract_system_instructions(messages: &[Value]) -> Option<String> {
+    let joined: String = messages
+        .iter()
+        .filter(|m| {
+            matches!(
+                m.get("role").and_then(|r| r.as_str()),
+                Some("system" | "developer")
+            )
+        })
+        .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+        .filter(|s| !s.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!joined.is_empty()).then_some(joined)
+}
+
+fn convert_single_tool(tool: &Value) -> Value {
+    let Some(function) = tool.get("function").and_then(|f| f.as_object()) else {
+        return tool.clone();
+    };
+
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+        "type".to_owned(),
+        tool.get("type")
+            .cloned()
+            .unwrap_or(Value::String("function".to_owned())),
+    );
+    for (key, default) in [
+        ("name", None),
+        ("description", Some(Value::String(String::new()))),
+        ("parameters", Some(serde_json::json!({}))),
+        ("strict", None),
+    ] {
+        if let Some(val) = function.get(key).cloned().or(default) {
+            entry.insert(key.to_owned(), val);
+        }
+    }
+    Value::Object(entry)
+}
+
 /// All the parameters needed for a single provider call.
 #[derive(Debug, Clone)]
 pub struct TransportCallRequest {
@@ -32,7 +130,7 @@ pub struct TransportCallRequest {
 }
 
 impl LLMCore {
-    /// Build kwargs with the correct max_tokens argument name for the provider.
+    /// Resolve provider-specific max_tokens kwargs.
     pub fn decide_kwargs_for_provider(
         provider: &str,
         max_tokens: Option<u32>,
@@ -49,7 +147,7 @@ impl LLMCore {
         clean
     }
 
-    /// Build kwargs for the responses transport format.
+    /// Resolve kwargs for the responses transport format.
     pub fn decide_responses_kwargs(
         max_tokens: Option<u32>,
         kwargs: &serde_json::Map<String, Value>,
@@ -69,97 +167,52 @@ impl LLMCore {
         clean
     }
 
-    /// Whether to include stream usage options for completion format.
     pub fn should_default_completion_stream_usage(provider_name: &str) -> bool {
         ProviderRuntime::should_include_completion_stream_usage(provider_name)
     }
 
-    /// Add stream_options to kwargs if applicable.
+    /// Inject `stream_options` for providers that support usage reporting.
     pub fn with_default_completion_stream_options(
         provider_name: &str,
         stream: bool,
         kwargs: &serde_json::Map<String, Value>,
     ) -> serde_json::Map<String, Value> {
-        if !stream {
-            return kwargs.clone();
-        }
-        if !Self::should_default_completion_stream_usage(provider_name) {
-            return kwargs.clone();
-        }
-        if kwargs.contains_key("stream_options") {
-            return kwargs.clone();
-        }
+        let should_add = stream
+            && Self::should_default_completion_stream_usage(provider_name)
+            && !kwargs.contains_key("stream_options");
+
         let mut result = kwargs.clone();
-        result.insert(
-            "stream_options".to_owned(),
-            serde_json::json!({"include_usage": true}),
-        );
+        if should_add {
+            result.insert(
+                "stream_options".to_owned(),
+                serde_json::json!({"include_usage": true}),
+            );
+        }
         result
     }
 
-    /// Add reasoning configuration to kwargs if applicable.
+    /// Inject reasoning effort into kwargs when applicable.
     pub fn with_responses_reasoning(
         kwargs: &serde_json::Map<String, Value>,
         reasoning_effort: Option<&Value>,
     ) -> serde_json::Map<String, Value> {
-        let effort = match reasoning_effort {
-            Some(e) if !e.is_null() => e,
-            _ => return kwargs.clone(),
-        };
-        if kwargs.contains_key("reasoning") {
-            return kwargs.clone();
-        }
+        let should_add =
+            reasoning_effort.is_some_and(|e| !e.is_null()) && !kwargs.contains_key("reasoning");
+
         let mut result = kwargs.clone();
-        result.insert(
-            "reasoning".to_owned(),
-            serde_json::json!({"effort": effort}),
-        );
+        if should_add {
+            result.insert(
+                "reasoning".to_owned(),
+                serde_json::json!({"effort": reasoning_effort.expect("SAFETY: checked above")}),
+            );
+        }
         result
     }
 
-    /// Convert completion-format tool schemas to responses format.
+    /// Re-key completion tool schemas into responses format.
     pub fn convert_tools_for_responses(tools_payload: Option<&[Value]>) -> Option<Vec<Value>> {
-        let tools = tools_payload?;
-        if tools.is_empty() {
-            return None;
-        }
-
-        let mut converted = Vec::with_capacity(tools.len());
-        for tool in tools {
-            if let Some(function) = tool.get("function").and_then(|f| f.as_object()) {
-                let mut entry = serde_json::Map::new();
-                entry.insert(
-                    "type".to_owned(),
-                    tool.get("type")
-                        .cloned()
-                        .unwrap_or(Value::String("function".to_owned())),
-                );
-                if let Some(name) = function.get("name") {
-                    entry.insert("name".to_owned(), name.clone());
-                }
-                entry.insert(
-                    "description".to_owned(),
-                    function
-                        .get("description")
-                        .cloned()
-                        .unwrap_or(Value::String(String::new())),
-                );
-                entry.insert(
-                    "parameters".to_owned(),
-                    function
-                        .get("parameters")
-                        .cloned()
-                        .unwrap_or(serde_json::json!({})),
-                );
-                if let Some(strict) = function.get("strict") {
-                    entry.insert("strict".to_owned(), strict.clone());
-                }
-                converted.push(Value::Object(entry));
-            } else {
-                converted.push(tool.clone());
-            }
-        }
-        Some(converted)
+        let tools = tools_payload.filter(|t| !t.is_empty())?;
+        Some(tools.iter().map(convert_single_tool).collect())
     }
 
     /// Determine which transport to use for a given request.
@@ -175,107 +228,20 @@ impl LLMCore {
             .selected_transport(tools_payload, supports_responses, preferred_transport)
     }
 
-    /// Split messages into (instructions, input_items) for the responses format.
-    ///
-    /// System/developer messages are joined into the instructions string.
-    /// Other messages are converted to responses input items.
+    /// Split messages into `(instructions, input_items)` for the responses format.
     pub fn split_messages_for_responses(messages: &[Value]) -> (Option<String>, Vec<Value>) {
-        let mut instruction_parts: Vec<String> = Vec::new();
-        let mut filtered: Vec<&Value> = Vec::new();
-
-        for message in messages {
-            let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("");
-            if role == "system" || role == "developer" {
-                if let Some(content) = message.get("content").and_then(|c| c.as_str())
-                    && !content.is_empty()
-                {
-                    instruction_parts.push(content.to_owned());
-                }
-                continue;
-            }
-            filtered.push(message);
-        }
-
-        let instructions = if instruction_parts.is_empty() {
-            None
-        } else {
-            let joined = instruction_parts
-                .into_iter()
-                .filter(|p| !p.trim().is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            if joined.is_empty() {
-                None
-            } else {
-                Some(joined)
-            }
-        };
-
-        let input_items = Self::convert_messages_to_responses_input(&filtered);
+        let instructions = extract_system_instructions(messages);
+        let input_items = messages
+            .iter()
+            .filter(|m| {
+                !matches!(
+                    m.get("role").and_then(|r| r.as_str()),
+                    Some("system" | "developer")
+                )
+            })
+            .flat_map(convert_message_to_responses_items)
+            .collect();
         (instructions, input_items)
-    }
-
-    /// Convert filtered messages to the responses input format.
-    fn convert_messages_to_responses_input(messages: &[&Value]) -> Vec<Value> {
-        let mut items: Vec<Value> = Vec::new();
-
-        for message in messages {
-            let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("");
-            let content = message.get("content");
-            let content_str = content.and_then(|c| c.as_str()).unwrap_or("");
-
-            // user/assistant messages with content
-            if (role == "user" || role == "assistant") && !content_str.is_empty() {
-                items.push(serde_json::json!({
-                    "role": role,
-                    "content": content_str,
-                    "type": "message",
-                }));
-            }
-
-            // assistant tool calls
-            if role == "assistant"
-                && let Some(tool_calls) = message.get("tool_calls").and_then(|tc| tc.as_array())
-            {
-                for (index, tool_call) in normalize_tool_calls(tool_calls).into_iter().enumerate() {
-                    let name = tool_call_name(&tool_call).unwrap_or("");
-                    if name.is_empty() {
-                        continue;
-                    }
-                    let call_id = tool_call_id(&tool_call)
-                        .map(|s| s.to_owned())
-                        .unwrap_or_else(|| format!("call_{}", index + 1));
-                    let arguments = tool_call_arguments_string(&tool_call);
-                    items.push(serde_json::json!({
-                        "type": "function_call",
-                        "name": name,
-                        "arguments": arguments,
-                        "call_id": call_id,
-                    }));
-                }
-            }
-
-            // tool result messages
-            if role == "tool" {
-                let call_id = message
-                    .get("tool_call_id")
-                    .or_else(|| message.get("call_id"))
-                    .and_then(|v| v.as_str());
-                if let Some(cid) = call_id {
-                    let output = message
-                        .get("content")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("");
-                    items.push(serde_json::json!({
-                        "type": "function_call_output",
-                        "call_id": cid,
-                        "output": output,
-                    }));
-                }
-            }
-        }
-
-        items
     }
 
     /// Build the request URL for a given provider and transport.

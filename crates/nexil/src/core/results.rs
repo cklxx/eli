@@ -8,11 +8,7 @@ use serde_json::Value;
 
 use super::errors::ErrorKind;
 
-// ---------------------------------------------------------------------------
-// ErrorPayload
-// ---------------------------------------------------------------------------
-
-/// A serializable error payload carried inside streams and results.
+/// Serializable error payload for streams and results.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ErrorPayload {
     pub kind: ErrorKind,
@@ -43,26 +39,23 @@ impl ErrorPayload {
         self
     }
 
-    /// Serialize to a JSON-like map, matching the Python `as_dict` method.
+    /// Serialize to a JSON map.
     pub fn as_map(&self) -> serde_json::Map<String, Value> {
-        let mut map = serde_json::Map::new();
-        map.insert(
-            "kind".to_owned(),
-            Value::String(self.kind.as_str().to_owned()),
-        );
-        map.insert("message".to_owned(), Value::String(self.message.clone()));
-        if let Some(ref details) = self.details {
-            map.insert("details".to_owned(), details.clone());
-        }
-        map
+        let required = [
+            ("kind", Value::String(self.kind.as_str().to_owned())),
+            ("message", Value::String(self.message.clone())),
+        ];
+        let optional = self.details.as_ref().map(|d| ("details", d.clone()));
+
+        required
+            .into_iter()
+            .chain(optional)
+            .map(|(k, v)| (k.to_owned(), v))
+            .collect()
     }
 }
 
-// ---------------------------------------------------------------------------
-// StreamState
-// ---------------------------------------------------------------------------
-
-/// Mutable state that accompanies a stream, populated after the stream ends.
+/// Post-stream state: error and usage populated after iteration ends.
 #[derive(Debug, Clone, Default)]
 pub struct StreamState {
     pub error: Option<ErrorPayload>,
@@ -75,11 +68,7 @@ impl StreamState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// TextStream  (sync)
-// ---------------------------------------------------------------------------
-
-/// A synchronous stream of text chunks, backed by any `Iterator<Item = String>`.
+/// Synchronous text chunk stream.
 pub struct TextStream {
     iterator: Box<dyn Iterator<Item = String> + Send>,
     state: StreamState,
@@ -104,8 +93,6 @@ impl TextStream {
         self.state.usage.as_ref()
     }
 
-    /// Obtain a mutable reference to the underlying state so that the
-    /// producer can set `error` or `usage` after iteration finishes.
     pub fn state_mut(&mut self) -> &mut StreamState {
         &mut self.state
     }
@@ -119,11 +106,7 @@ impl Iterator for TextStream {
     }
 }
 
-// ---------------------------------------------------------------------------
-// AsyncTextStream
-// ---------------------------------------------------------------------------
-
-/// An asynchronous stream of text chunks.
+/// Asynchronous text chunk stream.
 pub struct AsyncTextStream {
     stream: Pin<Box<dyn Stream<Item = String> + Send>>,
     state: StreamState,
@@ -152,15 +135,10 @@ impl AsyncTextStream {
         &mut self.state
     }
 
-    /// Consume self and return the inner `Stream`.
     pub fn into_stream(self) -> Pin<Box<dyn Stream<Item = String> + Send>> {
         self.stream
     }
 }
-
-// ---------------------------------------------------------------------------
-// StreamEvent
-// ---------------------------------------------------------------------------
 
 /// The kind tag for a `StreamEvent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -174,7 +152,7 @@ pub enum StreamEventKind {
     Final,
 }
 
-/// A single event produced by a structured event stream.
+/// Single event from a structured stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamEvent {
     pub kind: StreamEventKind,
@@ -187,11 +165,7 @@ impl StreamEvent {
     }
 }
 
-// ---------------------------------------------------------------------------
-// StreamEvents  (sync)
-// ---------------------------------------------------------------------------
-
-/// A synchronous iterator of `StreamEvent` values.
+/// Synchronous `StreamEvent` iterator.
 pub struct StreamEvents {
     iterator: Box<dyn Iterator<Item = StreamEvent> + Send>,
     state: StreamState,
@@ -229,11 +203,7 @@ impl Iterator for StreamEvents {
     }
 }
 
-// ---------------------------------------------------------------------------
-// AsyncStreamEvents
-// ---------------------------------------------------------------------------
-
-/// An asynchronous stream of `StreamEvent` values.
+/// Asynchronous `StreamEvent` stream.
 pub struct AsyncStreamEvents {
     stream: Pin<Box<dyn Stream<Item = StreamEvent> + Send>>,
     state: StreamState,
@@ -262,15 +232,10 @@ impl AsyncStreamEvents {
         &mut self.state
     }
 
-    /// Consume self and return the inner `Stream`.
     pub fn into_stream(self) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send>> {
         self.stream
     }
 }
-
-// ---------------------------------------------------------------------------
-// ToolExecution
-// ---------------------------------------------------------------------------
 
 /// The result of executing tool calls in a single round.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -282,10 +247,6 @@ pub struct ToolExecution {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorPayload>,
 }
-
-// ---------------------------------------------------------------------------
-// UsageEvent
-// ---------------------------------------------------------------------------
 
 /// Token usage from a single API call, including failed attempts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,10 +284,6 @@ impl UsageEvent {
         self.input_tokens + self.output_tokens
     }
 }
-
-// ---------------------------------------------------------------------------
-// ToolAutoResult
-// ---------------------------------------------------------------------------
 
 /// The kind tag for a `ToolAutoResult`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

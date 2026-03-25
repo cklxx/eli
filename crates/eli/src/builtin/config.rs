@@ -61,12 +61,10 @@ impl EliConfig {
             return toml::from_str(&contents).unwrap_or_default();
         }
 
-        // Try migrating from legacy config.json.
         let legacy_path = Self::legacy_config_path();
         if legacy_path.exists()
             && let Some(migrated) = Self::migrate_from_json(&legacy_path)
         {
-            // Persist the migrated config as TOML.
             let _ = migrated.save();
             return migrated;
         }
@@ -133,15 +131,14 @@ impl EliConfig {
         let mut config = EliConfig::default();
 
         if let (Some(provider), Some(model)) = (legacy.default_provider, legacy.default_model) {
-            let profile_name = provider.clone();
             config.add_profile(
-                &profile_name,
+                &provider,
                 Profile {
                     provider: provider.clone(),
                     model,
                 },
             );
-            config.active_profile = Some(profile_name);
+            config.active_profile = Some(provider);
         }
 
         Some(config)
@@ -166,40 +163,43 @@ pub fn load_anthropic_api_key() -> Option<String> {
     let payload: Value = serde_json::from_str(&contents).ok()?;
     let anthropic = payload.get("anthropic")?;
 
-    // Try OAuth access token first.
-    if let Some(access_token) = anthropic.get("access_token").and_then(|v| v.as_str())
-        && !access_token.is_empty()
+    resolve_oauth_token(anthropic).or_else(|| resolve_api_key(anthropic))
+}
+
+fn resolve_oauth_token(anthropic: &Value) -> Option<String> {
+    let access_token = anthropic
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?;
+
+    if is_token_expired_with_buffer(anthropic, 300)
+        && let Some(refresh_token) = anthropic.get("refresh_token").and_then(|v| v.as_str())
+        && let Some(new_token) = refresh_anthropic_token_sync(refresh_token)
     {
-        // Check expiry.
-        let expired = anthropic
-            .get("expires_at")
-            .and_then(|v| v.as_i64())
-            .map(|exp| {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                now >= exp - 300 // refresh 5 minutes early
-            })
-            .unwrap_or(false);
-
-        if expired {
-            // Try to refresh.
-            if let Some(refresh_token) = anthropic.get("refresh_token").and_then(|v| v.as_str())
-                && let Some(new_token) = refresh_anthropic_token_sync(refresh_token)
-            {
-                return Some(new_token);
-            }
-        }
-        return Some(access_token.trim().to_string());
+        return Some(new_token);
     }
+    Some(access_token.trim().to_string())
+}
 
-    // Fall back to legacy api_key.
+fn resolve_api_key(anthropic: &Value) -> Option<String> {
     anthropic
         .get("api_key")
         .and_then(|k| k.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+fn is_token_expired_with_buffer(val: &Value, buffer_seconds: i64) -> bool {
+    val.get("expires_at")
+        .and_then(|v| v.as_i64())
+        .map(|exp| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            now >= exp - buffer_seconds
+        })
+        .unwrap_or(false)
 }
 
 /// Synchronously refresh an Anthropic OAuth token using the refresh_token.
@@ -263,7 +263,6 @@ pub async fn refresh_anthropic_token(refresh_token: &str) -> Option<String> {
         .as_secs() as i64;
     let expires_at = now + expires_in;
 
-    // Save updated tokens.
     let _ = save_anthropic_oauth_tokens(&access_token, &refresh_token_new, expires_at);
 
     Some(access_token)
@@ -275,81 +274,100 @@ pub fn save_anthropic_oauth_tokens(
     refresh_token: &str,
     expires_at: i64,
 ) -> anyhow::Result<()> {
+    let entry = serde_json::json!({
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expires_at": expires_at
+    });
+    save_auth_entry("anthropic", entry)
+}
+
+fn save_auth_entry(provider: &str, value: Value) -> anyhow::Result<()> {
     let home = eli_home();
     std::fs::create_dir_all(&home)?;
 
     let auth_path = home.join("auth.json");
-    let mut auth_data: serde_json::Map<String, Value> = if auth_path.exists() {
-        let contents = std::fs::read_to_string(&auth_path)?;
-        serde_json::from_str(&contents).unwrap_or_default()
-    } else {
-        serde_json::Map::new()
-    };
-
-    auth_data.insert(
-        "anthropic".to_string(),
-        serde_json::json!({
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "expires_at": expires_at
-        }),
-    );
+    let mut auth_data = load_auth_data(&auth_path);
+    auth_data.insert(provider.to_string(), value);
 
     let json_str = serde_json::to_string_pretty(&Value::Object(auth_data))? + "\n";
     std::fs::write(&auth_path, &json_str)?;
+    set_file_private(&auth_path);
+    Ok(())
+}
 
+fn load_auth_data(path: &std::path::Path) -> serde_json::Map<String, Value> {
+    if !path.exists() {
+        return serde_json::Map::new();
+    }
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_default()
+}
+
+fn set_file_private(path: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
+    #[cfg(not(unix))]
+    let _ = path;
+}
 
-    Ok(())
+/// Save an Anthropic API key to ~/.eli/auth.json.
+pub fn save_anthropic_api_key_entry(api_key: &str) -> anyhow::Result<()> {
+    save_auth_entry("anthropic", serde_json::json!({ "api_key": api_key }))
 }
 
 /// Load all stored auth entries from `~/.eli/auth.json`.
 /// Returns a map of provider -> redacted credential info.
 pub fn load_auth_status() -> HashMap<String, String> {
-    let mut result = HashMap::new();
+    let mut result = load_eli_auth_entries();
+    add_external_auth_entries(&mut result);
+    result
+}
+
+fn load_eli_auth_entries() -> HashMap<String, String> {
     let auth_path = eli_home().join("auth.json");
+    let Ok(contents) = std::fs::read_to_string(&auth_path) else {
+        return HashMap::new();
+    };
+    let Ok(payload) = serde_json::from_str::<Value>(&contents) else {
+        return HashMap::new();
+    };
+    let Some(obj) = payload.as_object() else {
+        return HashMap::new();
+    };
+    obj.iter()
+        .map(|(provider, val)| (provider.clone(), describe_credential(val)))
+        .collect()
+}
 
-    if let Ok(contents) = std::fs::read_to_string(&auth_path)
-        && let Ok(payload) = serde_json::from_str::<Value>(&contents)
-        && let Some(obj) = payload.as_object()
-    {
-        for (provider, val) in obj {
-            if let Some(access_token) = val.get("access_token").and_then(|k| k.as_str()) {
-                let expired = val
-                    .get("expires_at")
-                    .and_then(|v| v.as_i64())
-                    .map(|exp| {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64;
-                        now >= exp
-                    })
-                    .unwrap_or(false);
-                let status = if expired {
-                    "(oauth token, expired)"
-                } else {
-                    "(oauth token)"
-                };
-                result.insert(
-                    provider.clone(),
-                    format!("{} {}", redact_key(access_token), status),
-                );
-            } else if let Some(key) = val.get("api_key").and_then(|k| k.as_str()) {
-                result.insert(provider.clone(), redact_key(key));
-            } else if val.get("token").is_some() {
-                result.insert(provider.clone(), "(oauth token)".to_string());
-            } else {
-                result.insert(provider.clone(), "(configured)".to_string());
-            }
-        }
+fn describe_credential(val: &Value) -> String {
+    if let Some(access_token) = val.get("access_token").and_then(|k| k.as_str()) {
+        let expired = is_token_expired(val);
+        let status = if expired {
+            "(oauth token, expired)"
+        } else {
+            "(oauth token)"
+        };
+        format!("{} {}", redact_key(access_token), status)
+    } else if let Some(key) = val.get("api_key").and_then(|k| k.as_str()) {
+        redact_key(key)
+    } else if val.get("token").is_some() {
+        "(oauth token)".to_string()
+    } else {
+        "(configured)".to_string()
     }
+}
 
-    // Also check codex home for OpenAI tokens.
+fn is_token_expired(val: &Value) -> bool {
+    is_token_expired_with_buffer(val, 0)
+}
+
+fn add_external_auth_entries(result: &mut HashMap<String, String>) {
     let codex_home = std::env::var("CODEX_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -357,12 +375,10 @@ pub fn load_auth_status() -> HashMap<String, String> {
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".codex")
         });
-    let codex_auth = codex_home.join("auth.json");
-    if codex_auth.exists() && !result.contains_key("openai") {
+    if codex_home.join("auth.json").exists() && !result.contains_key("openai") {
         result.insert("openai".to_string(), "(codex oauth token)".to_string());
     }
 
-    // Check GitHub Copilot tokens.
     let gh_home = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config")
@@ -373,8 +389,6 @@ pub fn load_auth_status() -> HashMap<String, String> {
             "(copilot oauth token)".to_string(),
         );
     }
-
-    result
 }
 
 /// Redact an API key, showing first 7 and last 4 characters.

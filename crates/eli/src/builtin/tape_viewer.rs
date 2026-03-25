@@ -75,24 +75,20 @@ async fn index_handler() -> impl IntoResponse {
 }
 
 async fn list_tapes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let mut tapes: Vec<TapeListItem> = Vec::new();
-    if let Ok(entries) = fs::read_dir(&state.tapes_dir) {
-        for entry in entries.flatten() {
+    let mut tapes: Vec<TapeListItem> = fs::read_dir(&state.tapes_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            // Include all .jsonl files, not just those with __
-            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            tapes.push(TapeListItem {
+            let is_jsonl = path.extension().and_then(|e| e.to_str()) == Some("jsonl");
+            let stem = path.file_stem().and_then(|s| s.to_str())?;
+            is_jsonl.then(|| TapeListItem {
                 name: stem.to_owned(),
-                size_bytes: size,
-            });
-        }
-    }
+                size_bytes: fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+            })
+        })
+        .collect();
     tapes.sort_by(|a, b| a.name.cmp(&b.name));
     Json(tapes)
 }
@@ -177,85 +173,98 @@ async fn get_tape_info(
     }
 
     let entries = read_jsonl(&path);
-    let total = entries.len();
-
-    let mut anchors: Vec<AnchorInfo> = Vec::new();
-    let mut run_ids: HashMap<String, usize> = HashMap::new();
-    let mut kinds: HashMap<String, usize> = HashMap::new();
-
-    for (i, e) in entries.iter().enumerate() {
-        *kinds.entry(e.kind.clone()).or_default() += 1;
-
-        if e.kind == "anchor" {
-            let anchor_name = e
-                .parsed
-                .get("payload")
-                .and_then(|p| p.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("-")
-                .to_owned();
-            anchors.push(AnchorInfo {
-                index: i,
-                name: anchor_name,
-                date: e.date.clone(),
-            });
-        }
-
-        if let Some(rid) = e
-            .parsed
-            .get("meta")
-            .and_then(|m| m.get("run_id"))
-            .and_then(|r| r.as_str())
-        {
-            *run_ids.entry(rid.to_owned()).or_default() += 1;
-        }
-    }
-
-    let last_anchor_idx = anchors.last().map(|a| a.index);
-    let entries_since_last_anchor = last_anchor_idx
-        .map(|idx| total.saturating_sub(idx + 1))
-        .unwrap_or(total);
-
-    // Token usage from most recent run event
-    let mut last_token_usage: Option<Value> = None;
-    let mut last_model: Option<String> = None;
-    for e in entries.iter().rev() {
-        if e.kind == "event"
-            && e.parsed
-                .get("payload")
-                .and_then(|p| p.get("name"))
-                .and_then(|n| n.as_str())
-                == Some("run")
-        {
-            last_token_usage = e
-                .parsed
-                .get("payload")
-                .and_then(|p| p.get("data"))
-                .and_then(|d| d.get("usage"))
-                .cloned();
-            last_model = e
-                .parsed
-                .get("payload")
-                .and_then(|p| p.get("data"))
-                .and_then(|d| d.get("model"))
-                .and_then(|m| m.as_str())
-                .map(String::from);
-            break;
-        }
-    }
+    let stats = compute_tape_stats(&entries);
 
     let info = serde_json::json!({
         "name": name,
-        "total_entries": total,
-        "anchors": anchors,
-        "entries_since_last_anchor": entries_since_last_anchor,
-        "runs": run_ids.len(),
-        "kinds": kinds,
-        "last_token_usage": last_token_usage,
-        "last_model": last_model,
+        "total_entries": entries.len(),
+        "anchors": stats.anchors,
+        "entries_since_last_anchor": stats.entries_since_last_anchor,
+        "runs": stats.run_count,
+        "kinds": stats.kinds,
+        "last_token_usage": stats.last_token_usage,
+        "last_model": stats.last_model,
         "size_bytes": fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
     });
     Json(info).into_response()
+}
+
+struct TapeStats {
+    anchors: Vec<AnchorInfo>,
+    entries_since_last_anchor: usize,
+    run_count: usize,
+    kinds: HashMap<String, usize>,
+    last_token_usage: Option<Value>,
+    last_model: Option<String>,
+}
+
+fn compute_tape_stats(entries: &[RawEntry]) -> TapeStats {
+    let mut kinds: HashMap<String, usize> = HashMap::new();
+    let mut run_ids: HashMap<String, usize> = HashMap::new();
+
+    let anchors: Vec<AnchorInfo> = entries
+        .iter()
+        .enumerate()
+        .inspect(|(_, e)| {
+            *kinds.entry(e.kind.clone()).or_default() += 1;
+            if let Some(rid) = e
+                .parsed
+                .get("meta")
+                .and_then(|m| m.get("run_id"))
+                .and_then(|r| r.as_str())
+            {
+                *run_ids.entry(rid.to_owned()).or_default() += 1;
+            }
+        })
+        .filter(|(_, e)| e.kind == "anchor")
+        .map(|(i, e)| AnchorInfo {
+            index: i,
+            name: raw_entry_payload_str(e, "name").to_owned(),
+            date: e.date.clone(),
+        })
+        .collect();
+
+    let entries_since_last_anchor = anchors
+        .last()
+        .map(|a| entries.len().saturating_sub(a.index + 1))
+        .unwrap_or(entries.len());
+
+    let (last_token_usage, last_model) = find_last_run_info(entries);
+
+    TapeStats {
+        anchors,
+        entries_since_last_anchor,
+        run_count: run_ids.len(),
+        kinds,
+        last_token_usage,
+        last_model,
+    }
+}
+
+fn raw_entry_payload_str<'a>(entry: &'a RawEntry, field: &str) -> &'a str {
+    entry
+        .parsed
+        .get("payload")
+        .and_then(|p| p.get(field))
+        .and_then(|n| n.as_str())
+        .unwrap_or("-")
+}
+
+fn find_last_run_info(entries: &[RawEntry]) -> (Option<Value>, Option<String>) {
+    entries
+        .iter()
+        .rev()
+        .find(|e| e.kind == "event" && raw_entry_payload_str(e, "name") == "run")
+        .map(|e| {
+            let data = e.parsed.get("payload").and_then(|p| p.get("data"));
+            let usage = data.and_then(|d| d.get("usage")).cloned();
+            let model = data
+                .and_then(|d| d.get("model"))
+                .and_then(|m| m.as_str())
+                .map(String::from);
+            (usage, model)
+        })
+        .unwrap_or((None, None))
 }
 
 async fn get_tape_context(
@@ -272,16 +281,17 @@ async fn get_tape_context(
     }
 
     let entries = read_jsonl(&path);
+    let resp = build_context_response(&entries);
+    Json(resp).into_response()
+}
 
-    // Find last anchor
+fn build_context_response(entries: &[RawEntry]) -> Value {
     let last_anchor_idx = entries.iter().rposition(|e| e.kind == "anchor");
     let start = last_anchor_idx.map(|i| i + 1).unwrap_or(0);
+    let after_anchor = &entries[start..];
 
-    // Context = entries after last anchor
-    let context_entries: Vec<Value> = entries[start..].iter().map(|e| e.parsed.clone()).collect();
-
-    // Also extract just the messages (what LLM actually sees)
-    let messages: Vec<Value> = entries[start..]
+    let context_entries: Vec<Value> = after_anchor.iter().map(|e| e.parsed.clone()).collect();
+    let messages: Vec<Value> = after_anchor
         .iter()
         .filter(|e| e.kind == "message")
         .filter_map(|e| e.parsed.get("payload").cloned())
@@ -296,7 +306,7 @@ async fn get_tape_context(
             .map(String::from)
     });
 
-    let resp = serde_json::json!({
+    serde_json::json!({
         "anchor": anchor_name,
         "anchor_index": last_anchor_idx,
         "total_tape_entries": entries.len(),
@@ -304,8 +314,7 @@ async fn get_tape_context(
         "messages_for_llm": messages.len(),
         "entries": context_entries,
         "messages": messages,
-    });
-    Json(resp).into_response()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -323,38 +332,28 @@ fn read_jsonl(path: &std::path::Path) -> Vec<RawEntry> {
     let Ok(file) = fs::File::open(path) else {
         return Vec::new();
     };
-    let reader = BufReader::new(file);
-    let mut entries = Vec::new();
-
-    for line in reader.lines() {
-        let Ok(raw) = line else { continue };
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(parsed) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
-
-        let kind = parsed
-            .get("kind")
-            .and_then(|k| k.as_str())
-            .unwrap_or("unknown")
-            .to_owned();
-        let date = parsed
-            .get("date")
-            .and_then(|d| d.as_str())
-            .unwrap_or("")
-            .to_owned();
-
-        entries.push(RawEntry {
-            kind,
-            date,
-            raw_json: raw,
-            parsed,
-        });
-    }
-    entries
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|raw| !raw.trim().is_empty())
+        .filter_map(|raw| {
+            let parsed: Value = serde_json::from_str(raw.trim()).ok()?;
+            Some(RawEntry {
+                kind: parsed
+                    .get("kind")
+                    .and_then(|k| k.as_str())
+                    .unwrap_or("unknown")
+                    .to_owned(),
+                date: parsed
+                    .get("date")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("")
+                    .to_owned(),
+                raw_json: raw,
+                parsed,
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

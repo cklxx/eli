@@ -40,65 +40,17 @@ impl ProviderAdapter for AnthropicAdapter {
         let (system_parts, messages) =
             anthropic_messages::split_system_and_conversation(&request.messages_payload);
 
-        if !system_parts.is_empty() {
-            if request.is_anthropic_oauth {
-                let mut system_list = vec![serde_json::json!({
-                    "type": "text",
-                    "text": "You are Claude Code, Anthropic's official CLI for Claude."
-                })];
-                let system_text = system_parts.join("\n\n");
-                system_list.push(serde_json::json!({
-                    "type": "text",
-                    "text": system_text
-                }));
-                body.insert("system".to_owned(), Value::Array(system_list));
-            } else {
-                body.insert(
-                    "system".to_owned(),
-                    Value::String(system_parts.join("\n\n")),
-                );
-            }
-        } else if request.is_anthropic_oauth {
-            body.insert(
-                "system".to_owned(),
-                Value::Array(vec![serde_json::json!({
-                    "type": "text",
-                    "text": "You are Claude Code, Anthropic's official CLI for Claude."
-                })]),
-            );
+        if let Some(system_val) = build_system_value(&system_parts, request.is_anthropic_oauth) {
+            body.insert("system".to_owned(), system_val);
         }
 
         body.insert("messages".to_owned(), Value::Array(messages));
-
-        if request.is_anthropic_oauth {
-            body.insert("stream".to_owned(), Value::Bool(true));
-            body.insert(
-                "thinking".to_owned(),
-                serde_json::json!({"type": "adaptive"}),
-            );
-            body.insert(
-                "output_config".to_owned(),
-                serde_json::json!({"effort": "medium"}),
-            );
-        } else if request.stream {
-            body.insert("stream".to_owned(), Value::Bool(true));
-        }
+        insert_streaming_options(&mut body, request.is_anthropic_oauth, request.stream);
 
         if let Some(ref tools) = request.tools_payload
             && !tools.is_empty()
         {
-            let mut anthropic_tools: Vec<Value> = Vec::new();
-            for tool in tools {
-                if let Some(function) = tool.get("function").and_then(|f| f.as_object()) {
-                    anthropic_tools.push(serde_json::json!({
-                            "name": function.get("name").and_then(|n| n.as_str()).unwrap_or(""),
-                            "description": function.get("description").and_then(|d| d.as_str()).unwrap_or(""),
-                            "input_schema": function.get("parameters").cloned().unwrap_or(serde_json::json!({}))
-                        }));
-                } else {
-                    anthropic_tools.push(tool.clone());
-                }
-            }
+            let anthropic_tools: Vec<Value> = tools.iter().map(convert_to_anthropic_tool).collect();
             body.insert("tools".to_owned(), Value::Array(anthropic_tools));
         }
 
@@ -110,5 +62,57 @@ impl ProviderAdapter for AnthropicAdapter {
         }
 
         Ok(Value::Object(body))
+    }
+}
+
+const CLAUDE_CODE_SYSTEM: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+fn build_system_value(system_parts: &[String], is_anthropic_oauth: bool) -> Option<Value> {
+    let claude_code_block = serde_json::json!({"type": "text", "text": CLAUDE_CODE_SYSTEM});
+    if !system_parts.is_empty() {
+        if is_anthropic_oauth {
+            let system_text = system_parts.join("\n\n");
+            Some(Value::Array(vec![
+                claude_code_block,
+                serde_json::json!({"type": "text", "text": system_text}),
+            ]))
+        } else {
+            Some(Value::String(system_parts.join("\n\n")))
+        }
+    } else if is_anthropic_oauth {
+        Some(Value::Array(vec![claude_code_block]))
+    } else {
+        None
+    }
+}
+
+fn insert_streaming_options(
+    body: &mut serde_json::Map<String, Value>,
+    is_oauth: bool,
+    stream: bool,
+) {
+    if is_oauth {
+        body.insert("stream".to_owned(), Value::Bool(true));
+        body.insert(
+            "thinking".to_owned(),
+            serde_json::json!({"type": "adaptive"}),
+        );
+        body.insert(
+            "output_config".to_owned(),
+            serde_json::json!({"effort": "medium"}),
+        );
+    } else if stream {
+        body.insert("stream".to_owned(), Value::Bool(true));
+    }
+}
+
+fn convert_to_anthropic_tool(tool: &Value) -> Value {
+    match tool.get("function").and_then(|f| f.as_object()) {
+        Some(function) => serde_json::json!({
+            "name": function.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+            "description": function.get("description").and_then(|d| d.as_str()).unwrap_or(""),
+            "input_schema": function.get("parameters").cloned().unwrap_or(serde_json::json!({}))
+        }),
+        None => tool.clone(),
     }
 }

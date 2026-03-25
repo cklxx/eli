@@ -17,12 +17,13 @@ use crate::types::PromptValue;
 use agent_request::{build_system_prompt, build_tool_state};
 use agent_run::{agent_loop, run_command};
 
-/// Default HTTP headers sent with OpenRouter requests.
-#[allow(dead_code)]
-const DEFAULT_ELI_HEADERS: [(&str, &str); 2] = [
-    ("HTTP-Referer", "https://eliagent.github.io/"),
-    ("X-Title", "Eli"),
-];
+fn workspace_from_state(state: &HashMap<String, Value>) -> PathBuf {
+    state
+        .get("_runtime_workspace")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
 
 // ---------------------------------------------------------------------------
 // Agent
@@ -44,7 +45,6 @@ impl Agent {
         }
     }
 
-    /// Ensure the tape service is initialised.
     fn ensure_tapes(&mut self) {
         if self.tapes.is_none() {
             let tapes_dir = self.settings.home.join("tapes");
@@ -54,16 +54,16 @@ impl Agent {
         }
     }
 
-    /// Lazily initialise and return the tape service.
     pub fn tapes(&mut self) -> &TapeService {
         self.ensure_tapes();
-        self.tapes.as_ref().unwrap()
+        // SAFETY: ensure_tapes() guarantees self.tapes is Some
+        self.tapes.as_ref().expect("SAFETY: ensure_tapes called")
     }
 
-    /// Mutable access to the tape service.
     pub fn tapes_mut(&mut self) -> &mut TapeService {
         self.ensure_tapes();
-        self.tapes.as_mut().unwrap()
+        // SAFETY: ensure_tapes() guarantees self.tapes is Some
+        self.tapes.as_mut().expect("SAFETY: ensure_tapes called")
     }
 
     /// Run a prompt to completion within a session.
@@ -80,14 +80,8 @@ impl Agent {
             return Err(ConduitError::new(ErrorKind::InvalidInput, "empty prompt"));
         }
 
-        let workspace = state
-            .get("_runtime_workspace")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
+        let workspace = workspace_from_state(state);
         let tape_name = TapeService::session_tape_name(session_id, &workspace);
-        let _merge_back = !session_id.starts_with("temp/");
 
         let settings = self.settings.clone();
         let tapes = self.tapes_mut();
@@ -117,19 +111,13 @@ impl Agent {
         .await
     }
 
-    /// Build the system prompt from hooks, tools, and skills.
     pub fn system_prompt(
         &self,
         prompt_text: &str,
         state: &HashMap<String, Value>,
         allowed_skills: Option<&HashSet<String>>,
     ) -> String {
-        let workspace = state
-            .get("_runtime_workspace")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
+        let workspace = workspace_from_state(state);
         build_system_prompt(
             &self.settings,
             prompt_text,

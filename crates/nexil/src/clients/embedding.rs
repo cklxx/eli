@@ -22,7 +22,6 @@ impl EmbeddingClient {
         &self.core
     }
 
-    /// Resolve the provider and model for an embedding call.
     fn resolve_provider_model(
         &self,
         model: Option<&str>,
@@ -38,7 +37,6 @@ impl EmbeddingClient {
         LLMCore::resolve_model_provider(model_id, provider)
     }
 
-    /// Build the request URL for embeddings.
     fn build_url(api_base: &str) -> String {
         let base = api_base.trim_end_matches('/');
         format!("{}/embeddings", base)
@@ -71,7 +69,6 @@ impl EmbeddingClient {
             .unwrap_or_else(|| "https://api.openai.com/v1".to_owned());
         let url = Self::build_url(&api_base);
 
-        // Normalize input
         let input_value = match &inputs {
             Value::String(s) => Value::Array(vec![Value::String(s.clone())]),
             Value::Array(_) => inputs.clone(),

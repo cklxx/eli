@@ -66,7 +66,6 @@ pub struct OpenAICodexOAuthTokens {
 // Path helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve the path to `auth.json` inside the Codex home directory.
 fn resolve_codex_auth_path(codex_home: Option<&Path>) -> PathBuf {
     let base = match codex_home {
         Some(p) => p.to_path_buf(),
@@ -105,18 +104,16 @@ fn parse_tokens(payload: &serde_json::Map<String, Value>) -> Option<OpenAICodexO
         return None;
     }
 
-    let expires_at = if let Some(val) = tokens.get("expires_at").and_then(|v| v.as_i64()) {
-        val
-    } else if let Some(val) = tokens.get("expires_at").and_then(|v| v.as_f64()) {
-        val as i64
-    } else {
-        // Fallback: use last_refresh + 1h or now + 1h
-        let last_refresh = payload
-            .get("last_refresh")
-            .and_then(|v| v.as_i64())
-            .unwrap_or_else(|| Utc::now().timestamp());
-        last_refresh + 3600
-    };
+    let expires_at = tokens
+        .get("expires_at")
+        .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+        .unwrap_or_else(|| {
+            let last_refresh = payload
+                .get("last_refresh")
+                .and_then(|v| v.as_i64())
+                .unwrap_or_else(|| Utc::now().timestamp());
+            last_refresh + 3600
+        });
 
     let account_id = tokens
         .get("account_id")
@@ -142,7 +139,6 @@ pub fn save_openai_codex_oauth_tokens(
         fs::create_dir_all(parent)?;
     }
 
-    // Read existing payload or start fresh.
     let mut payload: serde_json::Map<String, Value> = fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -179,7 +175,6 @@ pub fn save_openai_codex_oauth_tokens(
     let json_str = serde_json::to_string_pretty(&payload)? + "\n";
     fs::write(&path, &json_str)?;
 
-    // Best-effort chmod 0o600.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -225,22 +220,20 @@ pub async fn refresh_openai_codex_oauth_tokens(
 
 /// Extract the OpenAI account ID from the JWT access token.
 pub fn extract_openai_codex_account_id(access_token: &str) -> Option<String> {
-    let parts: Vec<&str> = access_token.split('.').collect();
+    let parts: Vec<&str> = access_token.splitn(4, '.').collect();
     if parts.len() != 3 {
         return None;
     }
-    let payload_segment = parts[1];
-    // URL_SAFE_NO_PAD handles the missing padding automatically
-    let decoded = URL_SAFE_NO_PAD.decode(payload_segment).ok()?;
+    let decoded = URL_SAFE_NO_PAD.decode(parts[1]).ok()?;
     let payload: Value = serde_json::from_slice(&decoded).ok()?;
-    let auth = payload.get("https://api.openai.com/auth")?.as_object()?;
-    let account_id = auth.get("chatgpt_account_id")?.as_str()?;
-    let normalized = account_id.trim();
-    if normalized.is_empty() {
-        None
-    } else {
-        Some(normalized.to_string())
-    }
+    payload
+        .get("https://api.openai.com/auth")?
+        .as_object()?
+        .get("chatgpt_account_id")?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 // ---------------------------------------------------------------------------
@@ -419,8 +412,11 @@ async fn wait_for_local_oauth_callback(
         let first_line = request.lines().next().unwrap_or("");
         let path_and_query = first_line.split_whitespace().nth(1).unwrap_or("/");
 
-        let req_url = url::Url::parse(&format!("http://localhost{path_and_query}"))
-            .unwrap_or_else(|_| url::Url::parse("http://localhost/").unwrap());
+        let req_url =
+            url::Url::parse(&format!("http://localhost{path_and_query}")).unwrap_or_else(|_| {
+                url::Url::parse("http://localhost/")
+                    .expect("SAFETY: static literal URL is always valid")
+            });
 
         if req_url.path() != expected_path {
             let resp = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
@@ -528,7 +524,6 @@ pub fn openai_codex_oauth_resolver(
             return Some(tokens.access_token);
         }
 
-        // Try refresh synchronously by spawning a blocking tokio runtime.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -551,7 +546,6 @@ pub fn openai_codex_oauth_resolver(
                 Some(persisted.access_token)
             }
             Err(_) => {
-                // Serve current token if not yet fully expired.
                 if tokens.expires_at > now {
                     Some(tokens.access_token)
                 } else {

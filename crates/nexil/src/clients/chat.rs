@@ -251,7 +251,10 @@ impl ToolCallAssembler {
                 });
                 self.calls.insert(key.clone(), entry);
             }
-            let entry = self.calls.get_mut(&key).unwrap();
+            let entry = self
+                .calls
+                .get_mut(&key)
+                .expect("SAFETY: key was just inserted above if absent");
 
             if let Some(ref call_id) = delta.id
                 && let Some(obj) = entry.as_object_mut()
@@ -318,14 +321,10 @@ impl ChatClient {
         &mut self.core
     }
 
-    // -- Transport detection helpers --
-
-    /// Unwrap a `TransportResponse` into its payload and transport kind.
     pub fn unwrap_response(response: &TransportResponse) -> (&Value, TransportKind) {
         (&response.payload, response.transport)
     }
 
-    /// Detect the transport kind from a raw payload.
     pub fn resolve_transport(payload: &Value, transport: Option<TransportKind>) -> TransportKind {
         if let Some(t) = transport {
             return t;
@@ -344,7 +343,6 @@ impl ChatClient {
         TransportKind::Completion
     }
 
-    /// Get the parser for a given payload, detecting transport if needed.
     pub fn parser_for_payload(
         payload: &Value,
         transport: Option<TransportKind>,
@@ -411,33 +409,26 @@ impl ChatClient {
             .map(|s| s.to_owned())
     }
 
-    // -- Extraction helpers --
-
-    /// Extract text from a response.
     pub fn extract_text(response: &Value, transport: Option<TransportKind>) -> String {
         let parser = Self::parser_for_payload(response, transport);
         parser.extract_text(response)
     }
 
-    /// Extract tool calls from a response.
     pub fn extract_tool_calls(response: &Value, transport: Option<TransportKind>) -> Vec<Value> {
         let parser = Self::parser_for_payload(response, transport);
         parser.extract_tool_calls(response)
     }
 
-    /// Extract usage from a response or chunk.
     pub fn extract_usage(response: &Value, transport: Option<TransportKind>) -> Option<Value> {
         let parser = Self::parser_for_payload(response, transport);
         parser.extract_usage(response)
     }
 
-    /// Extract chunk text from a streaming chunk.
     pub fn extract_chunk_text(chunk: &Value, transport: Option<TransportKind>) -> String {
         let parser = Self::parser_for_payload(chunk, transport);
         parser.extract_chunk_text(chunk)
     }
 
-    /// Extract tool call deltas from a streaming chunk.
     pub fn extract_chunk_tool_call_deltas(
         chunk: &Value,
         transport: Option<TransportKind>,
@@ -446,9 +437,6 @@ impl ChatClient {
         parser.extract_chunk_tool_call_deltas(chunk)
     }
 
-    // -- Validation --
-
-    /// Validate chat input arguments.
     pub fn validate_chat_input(
         prompt: Option<&str>,
         messages: Option<&[Value]>,
@@ -476,11 +464,6 @@ impl ChatClient {
         Ok(())
     }
 
-    // -- Message preparation --
-
-    /// Prepare messages payload from prompt or raw messages.
-    ///
-    /// Returns `(full_payload, new_messages_added)`.
     pub fn prepare_messages(
         prompt: Option<&str>,
         system_prompt: Option<&str>,
@@ -558,9 +541,6 @@ impl ChatClient {
         }
     }
 
-    // -- High-level execution --
-
-    /// Execute a non-streaming chat call, returning the text response.
     #[allow(clippy::too_many_arguments)]
     pub async fn chat(
         &mut self,
@@ -604,7 +584,6 @@ impl ChatClient {
                     if Self::is_completed_responses_metadata_only(payload, Some(transport)) {
                         return Ok(String::new());
                     }
-                    // Signal retry
                     Err(None)
                 },
             )
@@ -711,7 +690,6 @@ impl ChatClient {
                 };
                 buffer.push_str(&String::from_utf8_lossy(&bytes));
 
-                // Parse SSE lines from the buffer
                 while let Some(line_end) = buffer.find('\n') {
                     let line = buffer[..line_end].trim_end_matches('\r').to_owned();
                     buffer = buffer[line_end + 1..].to_owned();
@@ -842,34 +820,29 @@ impl ChatClient {
                             break;
                         }
                         if let Ok(chunk_val) = serde_json::from_str::<Value>(data) {
-                            // Track response.completed
                             if chunk_val.get("type").and_then(|v| v.as_str())
                                 == Some("response.completed")
                             {
                                 response_completed = true;
                             }
 
-                            // Track output item types
                             if let Some(item_type) =
                                 Self::responses_output_item_type(&chunk_val, Some(transport))
                             {
                                 output_item_types.push(item_type);
                             }
 
-                            // Usage
                             let chunk_parser =
                                 Self::parser_for_payload(&chunk_val, Some(transport));
                             if let Some(u) = chunk_parser.extract_usage(&chunk_val) {
                                 usage = Some(u);
                             }
 
-                            // Tool call deltas
                             let deltas = chunk_parser.extract_chunk_tool_call_deltas(&chunk_val);
                             if !deltas.is_empty() {
                                 assembler.add_deltas(&deltas);
                             }
 
-                            // Text
                             let text = chunk_parser.extract_chunk_text(&chunk_val);
                             if !text.is_empty() {
                                 parts.push(text.clone());
@@ -888,7 +861,6 @@ impl ChatClient {
                 }
             }
 
-            // Finalize
             let tool_calls = assembler.finalize();
             for (idx, call) in tool_calls.iter().enumerate() {
                 let _ = emit(
@@ -908,7 +880,6 @@ impl ChatClient {
                 Some(parts.join(""))
             };
 
-            // Check for empty response
             let error = if !had_error
                 && full_text.is_none()
                 && tool_calls.is_empty()
@@ -943,7 +914,6 @@ impl ChatClient {
                 .await;
             }
 
-            // Final event
             let _ = emit(
                 &tx,
                 StreamEvent::new(
@@ -971,18 +941,16 @@ impl ChatClient {
         provider_name: &str,
         model_id: &str,
     ) -> ToolContext {
-        let mut meta = HashMap::new();
-        meta.insert(
-            "provider".to_owned(),
-            Value::String(provider_name.to_owned()),
-        );
-        meta.insert("model".to_owned(), Value::String(model_id.to_owned()));
-
+        let meta = HashMap::from([
+            (
+                "provider".to_owned(),
+                Value::String(provider_name.to_owned()),
+            ),
+            ("model".to_owned(), Value::String(model_id.to_owned())),
+        ]);
         let mut ctx = ToolContext::new(&prepared.run_id);
         ctx.meta = meta;
-        if let Some(ref tape) = prepared.tape {
-            ctx.tape = Some(tape.clone());
-        }
+        ctx.tape = prepared.tape.clone();
         ctx
     }
 }

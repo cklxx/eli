@@ -13,10 +13,6 @@ use nexil::tape::{AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore, Tape
 use nexil::{ConduitError, ErrorKind, TapeEntry, TapeQuery};
 use serde_json::Value;
 
-// ---------------------------------------------------------------------------
-// Context variables (task-local)
-// ---------------------------------------------------------------------------
-
 tokio::task_local! {
     static CURRENT_STORE: InMemoryTapeStore;
     static CURRENT_FORK_TAPE: String;
@@ -74,16 +70,15 @@ impl ForkTapeStore {
             .try_with(|c| c.get())
             .unwrap_or(false);
 
-        let mut parent_entries: Vec<TapeEntry> = Vec::new();
         let is_fork_query = fork_tape.as_deref() == Some(&query.tape);
-        if !(is_fork_query && was_reset) {
-            match self.parent.fetch_all(query).await {
-                Ok(entries) => parent_entries = entries,
-                Err(e) => {
-                    tracing::error!(error = %e, tape = %query.tape, "failed to read parent tape");
-                }
-            }
-        }
+        let mut parent_entries = if is_fork_query && was_reset {
+            Vec::new()
+        } else {
+            self.parent.fetch_all(query).await.unwrap_or_else(|e| {
+                tracing::error!(error = %e, tape = %query.tape, "failed to read parent tape");
+                Vec::new()
+            })
+        };
 
         let mut fork_entries: Vec<TapeEntry> = Vec::new();
         let _ = CURRENT_STORE.try_with(|store| {
@@ -92,18 +87,10 @@ impl ForkTapeStore {
                     if !query.kinds.is_empty() && !query.kinds.contains(&entry.kind) {
                         continue;
                     }
-                    if entry.kind == "anchor" {
-                        let anchor_name = entry
-                            .payload
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if query.after_last || (query.after_anchor.as_deref() == Some(anchor_name))
-                        {
-                            fork_entries.clear();
-                            parent_entries.clear();
-                            continue;
-                        }
+                    if is_anchor_boundary(&entry, query) {
+                        fork_entries.clear();
+                        parent_entries.clear();
+                        continue;
                     }
                     fork_entries.push(entry);
                 }
@@ -220,18 +207,17 @@ impl FileTapeStore {
 
 impl TapeStore for FileTapeStore {
     fn list_tapes(&self) -> Result<Vec<String>, ConduitError> {
-        let mut result: Vec<String> = Vec::new();
-        if let Ok(entries) = fs::read_dir(&self.directory) {
-            for entry in entries.flatten() {
+        let mut result: Vec<String> = fs::read_dir(&self.directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                    && stem.contains("__")
-                {
-                    result.push(stem.to_owned());
-                }
-            }
-        }
+                let is_jsonl = path.extension().and_then(|e| e.to_str()) == Some("jsonl");
+                let stem = path.file_stem().and_then(|s| s.to_str())?;
+                (is_jsonl && stem.contains("__")).then(|| stem.to_owned())
+            })
+            .collect();
         result.sort();
         Ok(result)
     }
@@ -254,29 +240,23 @@ impl TapeStore for FileTapeStore {
     }
 }
 
-/// Substring filter for search queries.
+/// Substring filter for search queries, deduplicating by payload text.
 fn filter_entries(entries: &[TapeEntry], query: &str, limit: usize) -> Vec<TapeEntry> {
     let normalized = query.trim().to_lowercase();
     if normalized.is_empty() {
         return Vec::new();
     }
-    let mut results: Vec<TapeEntry> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for entry in entries.iter().rev() {
-        let payload_text = entry_text(entry).to_lowercase();
-        if seen.contains(&payload_text) {
-            continue;
-        }
-        seen.insert(payload_text.clone());
-        if payload_text.contains(&normalized) {
-            results.push(entry.clone());
-            if results.len() >= limit {
-                break;
-            }
-        }
-    }
-    results
+    let mut seen = std::collections::HashSet::new();
+    entries
+        .iter()
+        .rev()
+        .filter(|entry| {
+            let text = entry_text(entry).to_lowercase();
+            seen.insert(text.clone()) && text.contains(&normalized)
+        })
+        .take(limit)
+        .cloned()
+        .collect()
 }
 
 /// Extract a text representation of a tape entry for search purposes.
@@ -348,38 +328,56 @@ impl TapeFile {
             self.reset_cache();
         }
 
-        if let Ok(file) = fs::File::open(&self.path) {
-            let reader = BufReader::new(file);
-            let mut current_offset: u64 = 0;
-            for line_result in reader.lines() {
-                let Ok(raw_line) = line_result else {
-                    continue;
-                };
-                let line_len = raw_line.len() as u64 + 1;
-                current_offset += line_len;
-                if current_offset <= self.read_offset {
-                    continue;
-                }
-                let line = raw_line.trim().to_owned();
-                if line.is_empty() {
-                    continue;
-                }
-                let Ok(payload) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                if let Some(entry) = entry_from_payload(&payload) {
-                    self.read_entries.push(entry);
-                }
-            }
-            self.read_offset = file_size;
-        }
-
+        self.read_new_entries(file_size);
         self.read_entries.clone()
+    }
+
+    fn read_new_entries(&mut self, file_size: u64) {
+        let Ok(file) = fs::File::open(&self.path) else {
+            return;
+        };
+        let reader = BufReader::new(file);
+        let mut current_offset: u64 = 0;
+        for line_result in reader.lines() {
+            let Ok(raw_line) = line_result else {
+                continue;
+            };
+            current_offset += raw_line.len() as u64 + 1;
+            if current_offset <= self.read_offset {
+                continue;
+            }
+            let line = raw_line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(payload) = serde_json::from_str::<Value>(line)
+                && let Some(entry) = entry_from_payload(&payload)
+            {
+                self.read_entries.push(entry);
+            }
+        }
+        self.read_offset = file_size;
     }
 
     pub fn append(&mut self, entry: &TapeEntry) -> Result<(), ConduitError> {
         let _ = self.read();
+        self.ensure_parent_dir()?;
 
+        let stored = TapeEntry::new(
+            self.next_id(),
+            entry.kind.clone(),
+            entry.payload.clone(),
+            entry.meta.clone(),
+            entry.date.clone(),
+        );
+
+        let line = self.write_entry_to_file(&stored)?;
+        self.read_entries.push(stored);
+        self.read_offset += line.len() as u64;
+        Ok(())
+    }
+
+    fn ensure_parent_dir(&self) -> Result<(), ConduitError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|e| {
                 ConduitError::new(
@@ -388,76 +386,58 @@ impl TapeFile {
                 )
             })?;
         }
+        Ok(())
+    }
 
-        let next_id = self.next_id();
-        let stored = TapeEntry::new(
-            next_id,
-            entry.kind.clone(),
-            entry.payload.clone(),
-            entry.meta.clone(),
-            entry.date.clone(),
-        );
-
-        let mut file = match fs::OpenOptions::new()
+    fn write_entry_to_file(&self, entry: &TapeEntry) -> Result<String, ConduitError> {
+        let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
-        {
-            Ok(file) => file,
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    path = %self.path.display(),
-                    "failed to open tape file for append"
-                );
-                return Err(ConduitError::new(
+            .map_err(|e| {
+                ConduitError::new(
                     ErrorKind::Unknown,
                     format!(
                         "failed to open tape file {} for append: {e}",
                         self.path.display()
                     ),
-                ));
-            }
-        };
+                )
+            })?;
 
-        let json = match serde_json::to_string(&stored) {
-            Ok(json) => json,
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    path = %self.path.display(),
-                    "failed to serialize tape entry"
-                );
-                return Err(ConduitError::new(
-                    ErrorKind::Unknown,
-                    format!(
-                        "failed to serialize tape entry for {}: {e}",
-                        self.path.display()
-                    ),
-                ));
-            }
-        };
+        let json = serde_json::to_string(entry).map_err(|e| {
+            ConduitError::new(
+                ErrorKind::Unknown,
+                format!(
+                    "failed to serialize tape entry for {}: {e}",
+                    self.path.display()
+                ),
+            )
+        })?;
 
         let line = format!("{json}\n");
-        if let Err(e) = file.write_all(line.as_bytes()) {
-            tracing::error!(
-                error = %e,
-                path = %self.path.display(),
-                "failed to append tape entry"
-            );
-            return Err(ConduitError::new(
+        file.write_all(line.as_bytes()).map_err(|e| {
+            ConduitError::new(
                 ErrorKind::Unknown,
                 format!(
                     "failed to append tape entry to {}: {e}",
                     self.path.display()
                 ),
-            ));
-        }
-
-        self.read_entries.push(stored);
-        self.read_offset += line.len() as u64;
-        Ok(())
+            )
+        })?;
+        Ok(line)
     }
+}
+
+fn is_anchor_boundary(entry: &TapeEntry, query: &TapeQuery) -> bool {
+    if entry.kind != "anchor" {
+        return false;
+    }
+    let anchor_name = entry
+        .payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    query.after_last || query.after_anchor.as_deref() == Some(anchor_name)
 }
 
 /// Parse a single JSON object into a `TapeEntry`.

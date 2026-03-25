@@ -12,7 +12,7 @@ import type {
   OutboundResult,
 } from "../src/types.js";
 
-export interface CapturedMessage {
+interface CapturedMessage {
   to: string;
   text: string;
   accountId: string;

@@ -178,45 +178,45 @@ fn push_blocks(role: &str, blocks: Vec<Value>, conversation: &mut Vec<Value>) {
 
 pub fn normalize_messages(messages: Vec<Value>) -> Vec<Value> {
     if messages.is_empty() {
-        return vec![
-            serde_json::json!({"role": "user", "content": [{"type": "text", "text": "Continue."}]}),
-        ];
+        return vec![continue_message()];
     }
 
+    let mut merged = merge_consecutive_roles(messages);
+    ensure_user_bookends(&mut merged);
+    merged
+}
+
+fn continue_message() -> Value {
+    serde_json::json!({"role": "user", "content": [{"type": "text", "text": "Continue."}]})
+}
+
+fn merge_consecutive_roles(messages: Vec<Value>) -> Vec<Value> {
     let mut merged: Vec<Value> = Vec::with_capacity(messages.len());
     for msg in messages {
-        let role = message_role(&msg).to_owned();
-        let last_role = merged
-            .last()
-            .map(message_role)
-            .unwrap_or_default()
-            .to_owned();
+        let role = message_role(&msg);
+        let same_as_last = merged.last().is_some_and(|last| message_role(last) == role);
 
-        if !merged.is_empty() && role == last_role {
-            if let Some(last) = merged.last_mut() {
-                let existing = last.get("content").cloned().unwrap_or(Value::Null);
-                let new_content = msg.get("content").cloned().unwrap_or(Value::Null);
-                last["content"] = Value::Array(merge_blocks(existing, new_content));
-            }
-            continue;
+        if same_as_last {
+            let last = merged
+                .last_mut()
+                .expect("SAFETY: same_as_last implies non-empty");
+            let existing = last.get("content").cloned().unwrap_or(Value::Null);
+            let new_content = msg.get("content").cloned().unwrap_or(Value::Null);
+            last["content"] = Value::Array(merge_blocks(existing, new_content));
+        } else {
+            merged.push(msg);
         }
-        merged.push(msg);
     }
-
-    if merged.first().map(message_role) != Some("user") {
-        merged.insert(
-            0,
-            serde_json::json!({"role": "user", "content": [{"type": "text", "text": "Continue."}]}),
-        );
-    }
-
-    if merged.last().map(message_role) != Some("user") {
-        merged.push(
-            serde_json::json!({"role": "user", "content": [{"type": "text", "text": "Continue."}]}),
-        );
-    }
-
     merged
+}
+
+fn ensure_user_bookends(merged: &mut Vec<Value>) {
+    if merged.first().map(message_role) != Some("user") {
+        merged.insert(0, continue_message());
+    }
+    if merged.last().map(message_role) != Some("user") {
+        merged.push(continue_message());
+    }
 }
 
 fn has_tool_calls(msg: &Value) -> bool {
@@ -240,79 +240,66 @@ fn assistant_content_blocks(msg: &Value, allowed_tool_ids: Option<&HashSet<Strin
     let mut blocks = content_blocks(msg.get("content").cloned().unwrap_or(Value::Null));
 
     if let Some(tool_calls) = msg.get("tool_calls").and_then(|value| value.as_array()) {
-        for tool_call in normalize_tool_calls(tool_calls) {
-            let id = tool_call_id(&tool_call).unwrap_or_default();
-
-            if let Some(allowed) = allowed_tool_ids
-                && !allowed.contains(id)
-            {
-                continue;
-            }
-
-            let name = tool_call_name(&tool_call).unwrap_or_default();
-            let arguments = tool_call_arguments_string(&tool_call);
-            let input = serde_json::from_str(&arguments).unwrap_or_else(|_| serde_json::json!({}));
-
-            blocks.push(serde_json::json!({
-                "type": "tool_use",
-                "id": id,
-                "name": name,
-                "input": input,
-            }));
-        }
+        let tool_use_blocks = normalize_tool_calls(tool_calls)
+            .into_iter()
+            .filter_map(|tc| tool_call_to_tool_use_block(&tc, allowed_tool_ids));
+        blocks.extend(tool_use_blocks);
     }
 
     blocks
+}
+
+fn tool_call_to_tool_use_block(
+    tool_call: &Value,
+    allowed_tool_ids: Option<&HashSet<String>>,
+) -> Option<Value> {
+    let id = tool_call_id(tool_call).unwrap_or_default();
+    if let Some(allowed) = allowed_tool_ids
+        && !allowed.contains(id)
+    {
+        return None;
+    }
+    let name = tool_call_name(tool_call).unwrap_or_default();
+    let arguments = tool_call_arguments_string(tool_call);
+    let input = serde_json::from_str(&arguments).unwrap_or_else(|_| serde_json::json!({}));
+    Some(serde_json::json!({
+        "type": "tool_use",
+        "id": id,
+        "name": name,
+        "input": input,
+    }))
 }
 
 fn tool_result_block(msg: &Value) -> Option<(String, Value)> {
     let tool_use_id = msg
         .get("tool_call_id")
         .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .to_owned();
-    if tool_use_id.is_empty() {
-        return None;
-    }
+        .filter(|s| !s.is_empty())?;
 
     let content = msg
         .get("content")
         .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .to_owned();
+        .unwrap_or_default();
 
-    Some((
-        tool_use_id.clone(),
-        serde_json::json!({
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": content,
-        }),
-    ))
+    let block = serde_json::json!({
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": content,
+    });
+    Some((tool_use_id.to_owned(), block))
 }
 
 fn extract_system_text(content: Option<&Value>) -> Option<String> {
     match content {
         Some(Value::String(text)) => Some(text.clone()),
         Some(Value::Array(items)) => {
-            let joined = items
+            let parts: Vec<&str> = items
                 .iter()
-                .filter_map(|item| {
-                    if item.get("type").and_then(|value| value.as_str()) == Some("text") {
-                        item.get("text")
-                            .and_then(|value| value.as_str())
-                            .map(ToOwned::to_owned)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            if joined.is_empty() {
-                None
-            } else {
-                Some(joined)
-            }
+                .filter(|item| item.get("type").and_then(|v| v.as_str()) == Some("text"))
+                .filter_map(|item| item.get("text").and_then(|v| v.as_str()))
+                .collect();
+            let joined = parts.join("\n\n");
+            (!joined.is_empty()).then_some(joined)
         }
         _ => None,
     }

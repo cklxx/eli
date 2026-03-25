@@ -2,8 +2,6 @@
 
 use std::path::PathBuf;
 
-use serde_json::Value;
-
 use crate::builtin::config::{EliConfig, Profile, default_model_for_provider, normalize_provider};
 
 /// Login to a provider.
@@ -154,7 +152,6 @@ async fn login_claude_oauth(_open_browser: bool) -> anyhow::Result<()> {
         );
     }
 
-    // Save with long expiry (1 year).
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -188,32 +185,9 @@ async fn login_claude_api_key() -> anyhow::Result<()> {
         anyhow::bail!("API key cannot be empty");
     }
 
-    // Save to ~/.eli/auth.json under "anthropic" key.
-    let home = crate::builtin::config::eli_home();
-    std::fs::create_dir_all(&home)?;
+    crate::builtin::config::save_anthropic_api_key_entry(&api_key)?;
 
-    let auth_path = home.join("auth.json");
-    let mut auth_data: serde_json::Map<String, Value> = if auth_path.exists() {
-        let contents = std::fs::read_to_string(&auth_path)?;
-        serde_json::from_str(&contents).unwrap_or_default()
-    } else {
-        serde_json::Map::new()
-    };
-
-    auth_data.insert(
-        "anthropic".to_string(),
-        serde_json::json!({ "api_key": api_key }),
-    );
-
-    let json_str = serde_json::to_string_pretty(&Value::Object(auth_data))? + "\n";
-    std::fs::write(&auth_path, &json_str)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600));
-    }
-
+    let auth_path = crate::builtin::config::eli_home().join("auth.json");
     println!("API key saved to: {}", auth_path.display());
 
     post_login_save_profile("anthropic")?;

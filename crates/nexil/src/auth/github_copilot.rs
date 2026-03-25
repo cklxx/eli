@@ -187,15 +187,11 @@ pub fn save_github_copilot_oauth_tokens(
 // ---------------------------------------------------------------------------
 
 fn load_github_token_from_env() -> Option<String> {
-    for env_name in GITHUB_TOKEN_ENV_VARS {
-        if let Ok(val) = std::env::var(env_name) {
-            let trimmed = val.trim().to_string();
-            if !trimmed.is_empty() {
-                return Some(trimmed);
-            }
-        }
-    }
-    None
+    GITHUB_TOKEN_ENV_VARS
+        .iter()
+        .filter_map(|env_name| std::env::var(env_name).ok())
+        .map(|val| val.trim().to_string())
+        .find(|trimmed| !trimmed.is_empty())
 }
 
 /// Load a GitHub token from the `gh` CLI hosts.yml configuration file.
@@ -262,13 +258,10 @@ pub fn load_github_cli_oauth_token_via_command(
     if !output.status.success() {
         return None;
     }
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let trimmed = stdout.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn resolve_github_token(
@@ -276,20 +269,11 @@ fn resolve_github_token(
     gh_config_dir: Option<&Path>,
     host: &str,
 ) -> Option<String> {
-    // 1. Check stored tokens
-    if let Some(stored) = load_github_copilot_oauth_tokens(config_home) {
-        return Some(stored.github_token);
-    }
-    // 2. Check environment variables
-    if let Some(env_token) = load_github_token_from_env() {
-        return Some(env_token);
-    }
-    // 3. Check gh CLI config file
-    if let Some(cli_token) = load_github_cli_oauth_token(gh_config_dir, host) {
-        return Some(cli_token);
-    }
-    // 4. Check gh CLI command
-    load_github_cli_oauth_token_via_command(host, 5.0)
+    load_github_copilot_oauth_tokens(config_home)
+        .map(|stored| stored.github_token)
+        .or_else(load_github_token_from_env)
+        .or_else(|| load_github_cli_oauth_token(gh_config_dir, host))
+        .or_else(|| load_github_cli_oauth_token_via_command(host, 5.0))
 }
 
 // ---------------------------------------------------------------------------
@@ -297,17 +281,15 @@ fn resolve_github_token(
 // ---------------------------------------------------------------------------
 
 fn github_headers(token: Option<&str>) -> Vec<(String, String)> {
-    let mut headers = vec![
-        ("Accept".to_string(), "application/json".to_string()),
-        (
-            "X-GitHub-Api-Version".to_string(),
-            DEFAULT_GITHUB_API_VERSION.to_string(),
-        ),
-        (
-            "User-Agent".to_string(),
-            "conduit-github-copilot-auth/0".to_string(),
-        ),
+    let base = [
+        ("Accept", "application/json"),
+        ("X-GitHub-Api-Version", DEFAULT_GITHUB_API_VERSION),
+        ("User-Agent", "conduit-github-copilot-auth/0"),
     ];
+    let mut headers: Vec<(String, String)> = base
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     if let Some(t) = token {
         headers.push(("Authorization".to_string(), format!("Bearer {t}")));
     }

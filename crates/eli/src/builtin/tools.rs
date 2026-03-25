@@ -28,17 +28,10 @@ tokio::task_local! {
     static CURRENT_TAPE_SERVICE: TapeService;
 }
 
-// ---------------------------------------------------------------------------
-// Tool registry (populated at first access)
-// ---------------------------------------------------------------------------
-
 /// Register all builtin tools into the global `REGISTRY`.
 pub fn register_builtin_tools() {
-    let tools = builtin_tools();
     let mut reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-    for tool in tools {
-        reg.insert(tool.name.clone(), tool);
-    }
+    reg.extend(builtin_tools().into_iter().map(|t| (t.name.clone(), t)));
 }
 
 /// Run a future with the current tape service bound for tool handlers.
@@ -72,7 +65,6 @@ fn builtin_tools() -> Vec<Tool> {
         tool_help(),
         tool_quit(),
     ];
-    // Only register the sidecar bridge tool if a sidecar URL is configured.
     if crate::tools::SIDECAR_URL
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -82,10 +74,6 @@ fn builtin_tools() -> Vec<Tool> {
     }
     tools
 }
-
-// ---------------------------------------------------------------------------
-// Helper: resolve a path relative to the workspace.
-// ---------------------------------------------------------------------------
 
 fn resolve_path(state: &HashMap<String, Value>, raw_path: &str) -> Result<PathBuf, ConduitError> {
     let path = PathBuf::from(shellexpand::tilde(raw_path).as_ref());
@@ -137,32 +125,34 @@ fn tape_name_from_context(ctx: Option<&ToolContext>) -> Result<String, ConduitEr
 }
 
 async fn maybe_send_user_facing_notice(ctx: Option<&ToolContext>, args: &Value) {
-    let Some(description) = get_notice_description(args) else {
-        return;
-    };
-    let Some(ctx) = ctx else {
-        return;
-    };
-    let Some(output_channel) = ctx.state.get("output_channel").and_then(|v| v.as_str()) else {
-        return;
-    };
+    if let Some((description, session_id, url)) = extract_notice_params(ctx, args) {
+        send_notice(&url, session_id, description).await;
+    }
+}
+
+fn extract_notice_params<'a>(
+    ctx: Option<&'a ToolContext>,
+    args: &'a Value,
+) -> Option<(&'a str, &'a str, String)> {
+    let description = get_notice_description(args)?;
+    let ctx = ctx?;
+    let output_channel = ctx.state.get("output_channel").and_then(|v| v.as_str())?;
     if output_channel != "webhook" {
-        return;
+        return None;
     }
-    let Some(session_id) = ctx.state.get("session_id").and_then(|v| v.as_str()) else {
-        return;
-    };
-    if session_id.trim().is_empty() {
-        return;
-    }
-    let Some(url) = crate::tools::SIDECAR_URL
+    let session_id = ctx
+        .state
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())?;
+    let url = crate::tools::SIDECAR_URL
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    else {
-        return;
-    };
+        .clone()?;
+    Some((description, session_id, url))
+}
 
+async fn send_notice(url: &str, session_id: &str, description: &str) {
     let payload = serde_json::json!({
         "session_id": session_id,
         "text": description,
@@ -228,24 +218,13 @@ fn entry_search_text(entry: &TapeEntry) -> String {
 }
 
 fn render_search_entry(entry: &TapeEntry) -> String {
-    let preview = match entry.kind.as_str() {
-        "message" => entry
-            .payload
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(|content| shorten_text(content, 160))
-            .unwrap_or_else(|| shorten_text(&entry.payload.to_string(), 160)),
-        "system" => entry
-            .payload
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(|content| shorten_text(content, 160))
-            .unwrap_or_else(|| "(empty system message)".to_owned()),
-        "tool_result" | "tool_call" | "event" | "error" | "anchor" => {
-            shorten_text(&entry.payload.to_string(), 160)
-        }
-        _ => shorten_text(&entry.payload.to_string(), 160),
-    };
+    let preview = entry
+        .payload
+        .get("content")
+        .and_then(|v| v.as_str())
+        .filter(|_| matches!(entry.kind.as_str(), "message" | "system"))
+        .map(|content| shorten_text(content, 160))
+        .unwrap_or_else(|| shorten_text(&entry.payload.to_string(), 160));
     format!("#{} [{}] {} {}", entry.id, entry.kind, entry.date, preview)
 }
 
@@ -635,7 +614,6 @@ fn tool_skill() -> Tool {
                     .to_owned();
                 let state = ctx.map(|c| c.state).unwrap_or_default();
 
-                // Check allowed skills.
                 if let Some(Value::Array(allowed)) = state.get("allowed_skills") {
                     let allowed_set: std::collections::HashSet<String> = allowed
                         .iter()
@@ -1038,7 +1016,6 @@ fn tool_web_fetch() -> Tool {
                 let mut request = client.get(&url);
                 request = request.header("accept", "text/markdown");
 
-                // Merge user-provided headers.
                 if let Some(Value::Object(headers)) = args.get("headers") {
                     for (k, v) in headers {
                         if let Some(val) = v.as_str() {
@@ -1108,8 +1085,6 @@ fn tool_subagent() -> Tool {
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                // The subagent tool requires the full agent runtime in state.
-                // In the initial Rust port we return the prompt as acknowledgement.
                 let prompt = match args.get("prompt") {
                     Some(Value::String(s)) => s.clone(),
                     Some(other) => serde_json::to_string(other).unwrap_or_default(),
@@ -1230,8 +1205,6 @@ fn tool_sidecar() -> Tool {
                     return Err(ConduitError::new(ErrorKind::Tool, "sidecar not running"));
                 }
 
-                // Extract session_id from tool context so the sidecar bridge
-                // can look up auth / channel context for this session.
                 let session_id = ctx
                     .as_ref()
                     .and_then(|c| c.state.get("session_id"))

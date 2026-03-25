@@ -53,9 +53,8 @@ impl SkillMetadata {
         }
     }
 
-    /// Read the skill body, stripping YAML frontmatter.
+    /// Read the skill body, stripping YAML frontmatter and substituting template variables.
     pub fn body(&self) -> Option<String> {
-        // In-memory content takes precedence.
         if let Some(ref content) = self.content {
             return if content.is_empty() {
                 None
@@ -64,28 +63,28 @@ impl SkillMetadata {
             };
         }
 
-        let content = std::fs::read_to_string(&self.location).ok()?;
-        let trimmed = content.trim();
+        let raw = std::fs::read_to_string(&self.location).ok()?;
+        let trimmed = raw.trim();
         if trimmed.is_empty() {
             return None;
         }
 
-        // Substitute template variables.
+        let substituted = self.substitute_template_vars(trimmed);
+        let body = FRONTMATTER_RE.replace(&substituted, "").trim().to_owned();
+        if body.is_empty() { None } else { Some(body) }
+    }
+
+    fn substitute_template_vars(&self, text: &str) -> String {
         let skill_dir = self
             .location
             .parent()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_owned());
-        let substituted = trimmed
-            .replace("$SKILL_DIR", &skill_dir)
+        text.replace("$SKILL_DIR", &skill_dir)
             .replace("${SKILL_DIR}", &skill_dir)
             .replace("$PYTHON", &python)
-            .replace("${PYTHON}", &python);
-
-        // Strip frontmatter.
-        let body = FRONTMATTER_RE.replace(&substituted, "").trim().to_owned();
-        if body.is_empty() { None } else { Some(body) }
+            .replace("${PYTHON}", &python)
     }
 }
 
@@ -182,10 +181,8 @@ fn parse_yaml_to_string_map(yaml_str: &str) -> std::collections::HashMap<String,
         return map;
     };
     for (k, v) in mapping {
-        if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
-            map.insert(key.to_lowercase(), val.to_owned());
-        } else if let (Some(key), Some(val)) = (k.as_str(), Some(format_yaml_value(v))) {
-            map.insert(key.to_lowercase(), val);
+        if let Some(key) = k.as_str() {
+            map.insert(key.to_lowercase(), format_yaml_value(v));
         }
     }
     map
@@ -204,14 +201,10 @@ fn is_valid_frontmatter(
     skill_dir: &Path,
     metadata: &std::collections::HashMap<String, String>,
 ) -> bool {
-    let Some(name) = metadata.get("name") else {
-        return false;
-    };
-    let Some(description) = metadata.get("description") else {
-        return false;
-    };
-
-    is_valid_name(name, skill_dir) && is_valid_description(description)
+    metadata
+        .get("name")
+        .zip(metadata.get("description"))
+        .is_some_and(|(name, desc)| is_valid_name(name, skill_dir) && is_valid_description(desc))
 }
 
 fn is_valid_name(name: &str, skill_dir: &Path) -> bool {
@@ -232,11 +225,11 @@ fn is_valid_description(description: &str) -> bool {
 }
 
 fn iter_skill_roots(workspace_path: &Path) -> Vec<(PathBuf, String)> {
-    let mut roots: Vec<(PathBuf, String)> = Vec::new();
-    for source in &SKILL_SOURCES {
-        match *source {
+    SKILL_SOURCES
+        .iter()
+        .flat_map(|source| match *source {
             "project" => {
-                roots.push((workspace_path.join(PROJECT_SKILLS_DIR), source.to_string()));
+                let mut roots = vec![(workspace_path.join(PROJECT_SKILLS_DIR), source.to_string())];
                 let legacy = workspace_path.join(LEGACY_SKILLS_DIR);
                 if legacy.is_dir() {
                     tracing::warn!(
@@ -245,16 +238,14 @@ fn iter_skill_roots(workspace_path: &Path) -> Vec<(PathBuf, String)> {
                     );
                     roots.push((legacy, source.to_string()));
                 }
+                roots
             }
-            "global" => {
-                if let Some(home) = dirs::home_dir() {
-                    roots.push((home.join(PROJECT_SKILLS_DIR), source.to_string()));
-                }
-            }
-            _ => {}
-        }
-    }
-    roots
+            "global" => dirs::home_dir()
+                .map(|home| vec![(home.join(PROJECT_SKILLS_DIR), source.to_string())])
+                .unwrap_or_default(),
+            _ => vec![],
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -266,8 +257,7 @@ pub fn render_skills_prompt(skills: &[SkillMetadata], expanded_skills: &HashSet<
     if skills.is_empty() {
         return String::new();
     }
-    let mut lines: Vec<String> = vec!["<available_skills>".to_owned()];
-    for skill in skills {
+    let skill_lines = skills.iter().map(|skill| {
         let mut line = format!("- {}: {}", skill.name, skill.description);
         if expanded_skills.contains(&skill.name) {
             line.push_str(&format!("  Location: {}", skill.location.display()));
@@ -276,10 +266,13 @@ pub fn render_skills_prompt(skills: &[SkillMetadata], expanded_skills: &HashSet<
                 line.push_str(&body);
             }
         }
-        lines.push(line);
-    }
-    lines.push("</available_skills>".to_owned());
-    lines.join("\n")
+        line
+    });
+    std::iter::once("<available_skills>".to_owned())
+        .chain(skill_lines)
+        .chain(std::iter::once("</available_skills>".to_owned()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]

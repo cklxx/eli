@@ -50,6 +50,14 @@ pub struct SkillTriggers {
     pub cooldown_secs: Option<u64>,
 }
 
+impl SkillTriggers {
+    fn has_any_signal(&self) -> bool {
+        !self.intent_patterns.is_empty()
+            || !self.tool_signals.is_empty()
+            || !self.context_keywords.is_empty()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Match context & result
 // ---------------------------------------------------------------------------
@@ -220,90 +228,65 @@ impl SkillMatcher {
         let input_lower = ctx.task_input.to_lowercase();
         let recent_set: HashSet<&str> = ctx.recent_tools.iter().map(|s| s.as_str()).collect();
 
-        // 1. Score each skill.
-        let mut candidates: Vec<SkillMatch> = Vec::new();
-        for skill in skills {
-            let triggers = Self::parse_triggers(&skill.metadata);
+        let candidates = self.score_candidates(skills, ctx, &input_lower, &recent_set);
+        let active = resolve_exclusive_groups(candidates);
+        let result = self.apply_token_budget(skills, &active);
 
-            // Skip skills with no triggers (backward compat: these are just listed, not activated).
-            if triggers.intent_patterns.is_empty()
-                && triggers.tool_signals.is_empty()
-                && triggers.context_keywords.is_empty()
-            {
-                continue;
-            }
-
-            let signals = score_signals(&triggers, &input_lower, &recent_set);
-            let score = signals.intent_score * WEIGHT_INTENT
-                + signals.tool_score * WEIGHT_TOOL
-                + signals.keyword_score * WEIGHT_KEYWORD;
-
-            if score < triggers.confidence_threshold {
-                continue;
-            }
-
-            // Cooldown check.
-            if let Some(cd) = triggers.cooldown_secs
-                && !self
-                    .cooldowns
-                    .is_cooled_down(ctx.session_id, &skill.name, cd)
-            {
-                continue;
-            }
-
-            candidates.push(SkillMatch {
-                skill_name: skill.name.clone(),
-                score,
-                signals,
-                priority: triggers.priority,
-                exclusive_group: triggers.exclusive_group,
-            });
+        for name in &result {
+            self.cooldowns.record_activation(ctx.session_id, name);
         }
 
-        // 2. Resolve exclusive groups: keep only highest score per group.
-        let mut group_winners: HashMap<String, usize> = HashMap::new();
-        for (i, m) in candidates.iter().enumerate() {
-            if let Some(ref group) = m.exclusive_group {
-                let entry = group_winners.entry(group.clone()).or_insert(i);
-                let current = &candidates[*entry];
-                if m.score > current.score
-                    || (m.score == current.score && m.priority > current.priority)
+        result
+    }
+
+    fn score_candidates(
+        &self,
+        skills: &[SkillMetadata],
+        ctx: &MatchContext,
+        input_lower: &str,
+        recent_set: &HashSet<&str>,
+    ) -> Vec<SkillMatch> {
+        skills
+            .iter()
+            .filter_map(|skill| {
+                let triggers = Self::parse_triggers(&skill.metadata);
+                if !triggers.has_any_signal() {
+                    return None;
+                }
+
+                let signals = score_signals(&triggers, input_lower, recent_set);
+                let score = composite_score(&signals);
+
+                if score < triggers.confidence_threshold {
+                    return None;
+                }
+                if let Some(cd) = triggers.cooldown_secs
+                    && !self
+                        .cooldowns
+                        .is_cooled_down(ctx.session_id, &skill.name, cd)
                 {
-                    *entry = i;
+                    return None;
                 }
-            }
-        }
-        let excluded: HashSet<usize> = candidates
-            .iter()
-            .enumerate()
-            .filter(|(i, m)| {
-                if let Some(ref group) = m.exclusive_group {
-                    group_winners.get(group) != Some(i)
-                } else {
-                    false
-                }
+
+                Some(SkillMatch {
+                    skill_name: skill.name.clone(),
+                    score,
+                    signals,
+                    priority: triggers.priority,
+                    exclusive_group: triggers.exclusive_group,
+                })
             })
-            .map(|(i, _)| i)
-            .collect();
+            .collect()
+    }
 
-        // 3. Filter excluded, sort by score descending.
-        let mut active: Vec<&SkillMatch> = candidates
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !excluded.contains(i))
-            .map(|(_, m)| m)
-            .collect();
-        active.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // 4. Apply token budget.
+    fn apply_token_budget(
+        &self,
+        skills: &[SkillMetadata],
+        active: &[SkillMatch],
+    ) -> HashSet<String> {
         let mut budget_remaining = self.token_budget;
         let mut result = HashSet::new();
-        for m in &active {
-            // Estimate body size from the matching skill metadata.
+        for m in active {
             let body_size = skills
                 .iter()
                 .find(|s| s.name == m.skill_name)
@@ -316,14 +299,57 @@ impl SkillMatcher {
             budget_remaining -= body_size;
             result.insert(m.skill_name.clone());
         }
-
-        // 5. Record activations for cooldown.
-        for name in &result {
-            self.cooldowns.record_activation(ctx.session_id, name);
-        }
-
         result
     }
+}
+
+// ---------------------------------------------------------------------------
+// Group resolution
+// ---------------------------------------------------------------------------
+
+fn composite_score(signals: &MatchSignals) -> f64 {
+    signals.intent_score * WEIGHT_INTENT
+        + signals.tool_score * WEIGHT_TOOL
+        + signals.keyword_score * WEIGHT_KEYWORD
+}
+
+fn resolve_exclusive_groups(candidates: Vec<SkillMatch>) -> Vec<SkillMatch> {
+    let mut group_winners: HashMap<String, usize> = HashMap::new();
+    for (i, m) in candidates.iter().enumerate() {
+        if let Some(ref group) = m.exclusive_group {
+            let entry = group_winners.entry(group.clone()).or_insert(i);
+            let current = &candidates[*entry];
+            if m.score > current.score
+                || (m.score == current.score && m.priority > current.priority)
+            {
+                *entry = i;
+            }
+        }
+    }
+
+    let excluded: HashSet<usize> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| {
+            m.exclusive_group
+                .as_ref()
+                .is_some_and(|group| group_winners.get(group) != Some(i))
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut active: Vec<SkillMatch> = candidates
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !excluded.contains(i))
+        .map(|(_, m)| m)
+        .collect();
+    active.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    active
 }
 
 // ---------------------------------------------------------------------------
@@ -335,43 +361,45 @@ fn score_signals(
     input_lower: &str,
     recent_tools: &HashSet<&str>,
 ) -> MatchSignals {
-    let intent_score = if triggers.intent_patterns.is_empty() {
-        0.0
-    } else {
-        let matched = triggers.intent_patterns.iter().any(|pat| {
-            Regex::new(pat)
-                .map(|re| re.is_match(input_lower))
-                .unwrap_or(false)
-        });
-        if matched { 1.0 } else { 0.0 }
-    };
+    let intent_score = match_ratio_any(&triggers.intent_patterns, |pat| {
+        Regex::new(pat)
+            .map(|re| re.is_match(input_lower))
+            .unwrap_or(false)
+    });
 
-    let tool_score = if triggers.tool_signals.is_empty() {
-        0.0
-    } else {
-        let matched = triggers
-            .tool_signals
-            .iter()
-            .filter(|t| recent_tools.contains(t.as_str()))
-            .count();
-        matched as f64 / triggers.tool_signals.len() as f64
-    };
+    let tool_score = match_ratio(&triggers.tool_signals, |t| {
+        recent_tools.contains(t.as_str())
+    });
 
-    let keyword_score = if triggers.context_keywords.is_empty() {
-        0.0
-    } else {
-        let matched = triggers
-            .context_keywords
-            .iter()
-            .filter(|kw| input_lower.contains(&kw.to_lowercase()))
-            .count();
-        matched as f64 / triggers.context_keywords.len() as f64
-    };
+    let keyword_score = match_ratio(&triggers.context_keywords, |kw| {
+        input_lower.contains(&kw.to_lowercase())
+    });
 
     MatchSignals {
         intent_score,
         tool_score,
         keyword_score,
+    }
+}
+
+/// Fraction of items matching the predicate (0.0 if empty).
+fn match_ratio(items: &[String], predicate: impl Fn(&String) -> bool) -> f64 {
+    if items.is_empty() {
+        return 0.0;
+    }
+    let matched = items.iter().filter(|i| predicate(i)).count();
+    matched as f64 / items.len() as f64
+}
+
+/// 1.0 if any item matches, 0.0 otherwise (0.0 if empty).
+fn match_ratio_any(items: &[String], predicate: impl Fn(&String) -> bool) -> f64 {
+    if items.is_empty() {
+        return 0.0;
+    }
+    if items.iter().any(predicate) {
+        1.0
+    } else {
+        0.0
     }
 }
 

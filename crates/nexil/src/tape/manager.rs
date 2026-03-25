@@ -9,11 +9,6 @@ use crate::tape::entries::{TapeEntry, latest_system_content};
 use crate::tape::query::TapeQuery;
 use crate::tape::store::{AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore, TapeStore};
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-/// Build the run-event data object for a chat turn.
 fn run_event_data(
     error: Option<&ErrorPayload>,
     usage: Option<Value>,
@@ -39,8 +34,6 @@ fn run_event_data(
     Value::Object(data)
 }
 
-/// Build all non-system entries for a chat turn in correct order:
-/// context_error → messages → tool_calls → response_text → tool_results → error → run event.
 #[allow(clippy::too_many_arguments)]
 fn build_chat_entries(
     meta: &Value,
@@ -54,13 +47,16 @@ fn build_chat_entries(
     provider: Option<&str>,
     model: Option<&str>,
 ) -> Vec<TapeEntry> {
-    let mut entries = Vec::new();
-    if let Some(ce) = context_error {
-        entries.push(TapeEntry::error(ce, meta.clone()));
-    }
-    for msg in new_messages {
-        entries.push(TapeEntry::message(msg.clone(), meta.clone()));
-    }
+    let mut entries: Vec<TapeEntry> = context_error
+        .iter()
+        .map(|ce| TapeEntry::error(ce, meta.clone()))
+        .chain(
+            new_messages
+                .iter()
+                .map(|msg| TapeEntry::message(msg.clone(), meta.clone())),
+        )
+        .collect();
+
     if let Some(tc) = tool_calls
         && !tc.is_empty()
     {

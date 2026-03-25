@@ -26,7 +26,6 @@ impl CliRenderer {
         Self
     }
 
-    /// Print the welcome banner.
     pub fn welcome(&self, model: &str, workspace: &str) {
         let mut out = io::stdout();
         let border = "─".repeat(60);
@@ -51,7 +50,6 @@ impl CliRenderer {
         );
     }
 
-    /// Print informational text in dim grey.
     pub fn info(&self, text: &str) {
         if text.trim().is_empty() {
             return;
@@ -66,7 +64,6 @@ impl CliRenderer {
         );
     }
 
-    /// Print command output inside a green bordered panel.
     pub fn command_output(&self, text: &str) {
         if text.trim().is_empty() {
             return;
@@ -74,7 +71,6 @@ impl CliRenderer {
         self.panel(text, "Command", Color::Green);
     }
 
-    /// Print assistant output inside a blue bordered panel.
     pub fn assistant_output(&self, text: &str) {
         if text.trim().is_empty() {
             return;
@@ -82,7 +78,6 @@ impl CliRenderer {
         self.panel(text, "Assistant", Color::Blue);
     }
 
-    /// Print error output inside a red bordered panel.
     pub fn error(&self, text: &str) {
         if text.trim().is_empty() {
             return;
@@ -93,18 +88,24 @@ impl CliRenderer {
     fn panel(&self, text: &str, title: &str, color: Color) {
         let mut out = io::stdout();
         let width = 60usize;
-        let border = "─".repeat(width);
+        Self::panel_header(&mut out, title, width, color);
+        Self::panel_body(&mut out, text, width, color);
+        Self::panel_footer(&mut out, width, color);
+    }
+
+    fn panel_header(out: &mut io::Stdout, title: &str, width: usize, color: Color) {
         let title_line = format!("─ {title} ");
         let padding = if title_line.len() < width {
             "─".repeat(width - title_line.len())
         } else {
             String::new()
         };
-
         let _ = execute!(out, SetForegroundColor(color), Print("┌"),);
         let _ = execute!(out, Print(&title_line), Print(&padding), Print("┐\n"),);
         let _ = execute!(out, ResetColor,);
+    }
 
+    fn panel_body(out: &mut io::Stdout, text: &str, width: usize, color: Color) {
         for line in text.lines() {
             let _ = execute!(
                 out,
@@ -113,14 +114,16 @@ impl CliRenderer {
                 ResetColor,
                 Print(line),
             );
-            // Pad to the panel width.
-            let visible_len = line.len();
-            if visible_len + 2 < width {
-                let pad = " ".repeat(width - 2 - visible_len);
+            if line.len() + 2 < width {
+                let pad = " ".repeat(width - 2 - line.len());
                 let _ = execute!(out, Print(&pad),);
             }
             let _ = execute!(out, SetForegroundColor(color), Print(" │\n"), ResetColor,);
         }
+    }
+
+    fn panel_footer(out: &mut io::Stdout, width: usize, color: Color) {
+        let border = "─".repeat(width);
         let _ = execute!(
             out,
             SetForegroundColor(color),
@@ -143,16 +146,12 @@ impl Default for CliRenderer {
 /// An interactive CLI channel that runs a REPL, reads user input, and
 /// forwards it to the framework as [`ChannelMessage`]s.
 pub struct CliChannel {
-    /// Sender half passed in by the framework (typically `ChannelManager::on_receive`).
     on_receive_tx: mpsc::UnboundedSender<ChannelMessage>,
     renderer: CliRenderer,
     mode: Mutex<CliMode>,
     model: String,
     workspace: PathBuf,
-    /// Handle for the spawned REPL task.
     repl_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// Signaled after the framework finishes processing a request so the REPL
-    /// can prompt again.
     request_done: Arc<Notify>,
 }
 
@@ -179,20 +178,8 @@ impl CliChannel {
         }
     }
 
-    /// Notify the REPL that the latest request has been processed so it can
-    /// prompt for the next input.
     pub fn notify_request_done(&self) {
         self.request_done.notify_one();
-    }
-
-    #[allow(dead_code)]
-    fn session_id(&self) -> String {
-        "cli_session".to_owned()
-    }
-
-    #[allow(dead_code)]
-    fn chat_id(&self) -> String {
-        "cli_chat".to_owned()
     }
 
     fn prompt_symbol(mode: CliMode) -> &'static str {
@@ -202,7 +189,6 @@ impl CliChannel {
         }
     }
 
-    /// The directory name used in the prompt.
     fn cwd_name() -> String {
         std::env::current_dir()
             .ok()
@@ -210,15 +196,62 @@ impl CliChannel {
             .unwrap_or_else(|| "?".to_owned())
     }
 
-    /// Normalize user input based on the current mode.
     fn normalize_input(raw: &str, mode: CliMode) -> String {
-        if mode != CliMode::Shell {
-            return raw.to_owned();
+        match mode {
+            CliMode::Agent => raw.to_owned(),
+            CliMode::Shell if raw.starts_with('/') => raw.to_owned(),
+            CliMode::Shell => format!("/{raw}"),
         }
-        if raw.starts_with('/') {
-            return raw.to_owned();
+    }
+
+    fn mode_name(mode: CliMode) -> &'static str {
+        match mode {
+            CliMode::Agent => "agent",
+            CliMode::Shell => "shell",
         }
-        format!("/{raw}")
+    }
+
+    fn show_help() {
+        let r = CliRenderer::new();
+        r.info("Commands:");
+        r.info("  /quit / /exit   — exit the REPL");
+        r.info("  /help           — show this help");
+        r.info("  Ctrl-X          — toggle agent/shell mode");
+        r.info("");
+    }
+
+    fn read_line(reader: &mut io::StdinLock<'_>) -> Option<String> {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(line),
+        }
+    }
+
+    fn send_and_wait(
+        tx: &mpsc::UnboundedSender<ChannelMessage>,
+        raw: &str,
+        mode: CliMode,
+        rt: &tokio::runtime::Handle,
+        request_done: &Notify,
+        cancel: &CancellationToken,
+    ) -> bool {
+        let request = Self::normalize_input(raw, mode);
+        let message = ChannelMessage::new("cli_session", "cli", &request)
+            .with_chat_id("cli_chat")
+            .finalize();
+
+        if tx.send(message).is_err() {
+            return false;
+        }
+
+        rt.block_on(async {
+            tokio::select! {
+                () = request_done.notified() => {}
+                () = cancel.cancelled() => {}
+            }
+        });
+        true
     }
 }
 
@@ -233,10 +266,7 @@ impl Channel for CliChannel {
         let renderer = CliRenderer::new();
         let model = self.model.clone();
         let workspace = self.workspace.clone();
-        let mode_mutex = &self.mode;
-        // We cannot move the mutex into the task, so we read the initial mode
-        // and the spawned task manages its own copy.
-        let initial_mode = *mode_mutex.lock().await;
+        let initial_mode = *self.mode.lock().await;
         let request_done = Arc::clone(&self.request_done);
 
         renderer.welcome(&model, &workspace.display().to_string());
@@ -252,33 +282,21 @@ impl Channel for CliChannel {
                     break;
                 }
 
-                let cwd = Self::cwd_name();
-                let symbol = Self::prompt_symbol(mode);
-                print!("{cwd} {symbol}");
+                print!("{} {}", Self::cwd_name(), Self::prompt_symbol(mode));
                 let _ = io::stdout().flush();
 
-                let mut line = String::new();
-                match reader.read_line(&mut line) {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-
+                let Some(line) = Self::read_line(&mut reader) else {
+                    break;
+                };
                 let raw = line.trim().to_owned();
                 if raw.is_empty() {
                     continue;
                 }
 
-                // Built-in commands.
                 match raw.as_str() {
                     "/quit" | "/exit" => break,
                     "/help" => {
-                        let r = CliRenderer::new();
-                        r.info("Commands:");
-                        r.info("  /quit / /exit   — exit the REPL");
-                        r.info("  /help           — show this help");
-                        r.info("  Ctrl-X          — toggle agent/shell mode");
-                        r.info("");
+                        Self::show_help();
                         continue;
                     }
                     "/mode" => {
@@ -286,40 +304,19 @@ impl Channel for CliChannel {
                             CliMode::Agent => CliMode::Shell,
                             CliMode::Shell => CliMode::Agent,
                         };
-                        let r = CliRenderer::new();
-                        r.info(&format!(
-                            "Mode switched to {}",
-                            match mode {
-                                CliMode::Agent => "agent",
-                                CliMode::Shell => "shell",
-                            }
-                        ));
+                        CliRenderer::new()
+                            .info(&format!("Mode switched to {}", Self::mode_name(mode)));
                         continue;
                     }
                     _ => {}
                 }
 
-                let request = Self::normalize_input(&raw, mode);
-                let message = ChannelMessage::new("cli_session", "cli", &request)
-                    .with_chat_id("cli_chat")
-                    .finalize();
-
-                if tx.send(message).is_err() {
+                if !Self::send_and_wait(&tx, &raw, mode, &rt, &request_done, &cancel) {
                     break;
                 }
-
-                // Wait for the framework to finish processing before prompting
-                // again, unless cancelled.
-                rt.block_on(async {
-                    tokio::select! {
-                        () = request_done.notified() => {}
-                        () = cancel.cancelled() => {}
-                    }
-                });
             }
 
-            let r = CliRenderer::new();
-            r.info("Bye.");
+            CliRenderer::new().info("Bye.");
             cancel.cancel();
         });
 
@@ -342,7 +339,6 @@ impl Channel for CliChannel {
             MessageKind::Command => self.renderer.command_output(&message.content),
             MessageKind::Normal => self.renderer.assistant_output(&message.content),
         }
-        // Signal the REPL that the response has been delivered.
         self.request_done.notify_one();
         Ok(())
     }

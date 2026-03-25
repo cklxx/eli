@@ -95,7 +95,6 @@ async fn handle_inbound(
     State(state): State<AppState>,
     Json(mut msg): Json<ChannelMessage>,
 ) -> StatusCode {
-    // Ensure channel and output_channel are set correctly.
     if msg.channel.is_empty() {
         msg.channel = "webhook".to_owned();
     }

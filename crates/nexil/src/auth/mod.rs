@@ -20,12 +20,7 @@ pub type APIKeyResolver = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 /// Chain multiple resolvers; the first to return `Some` wins.
 pub fn multi_api_key_resolver(resolvers: Vec<APIKeyResolver>) -> APIKeyResolver {
     Box::new(move |provider: &str| -> Option<String> {
-        for resolver in &resolvers {
-            if let Some(value) = resolver(provider) {
-                return Some(value);
-            }
-        }
-        None
+        resolvers.iter().find_map(|resolver| resolver(provider))
     })
 }
 

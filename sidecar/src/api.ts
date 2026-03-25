@@ -12,17 +12,6 @@ import { pluginLogger } from "./log.js";
 
 const pluginEventListeners = new Map<string, Array<(...args: any[]) => any>>();
 
-export function removePluginEventListener(event: string, handler: (...args: any[]) => any): void {
-  const handlers = pluginEventListeners.get(event);
-  if (!handlers) return;
-  const idx = handlers.indexOf(handler);
-  if (idx >= 0) handlers.splice(idx, 1);
-}
-
-export function removeAllPluginEventListeners(): void {
-  pluginEventListeners.clear();
-}
-
 export async function emitPluginEvent(event: string, ...args: any[]): Promise<void> {
   for (const handler of pluginEventListeners.get(event) ?? []) {
     try {

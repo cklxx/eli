@@ -3,8 +3,6 @@
 use crate::builtin::config::EliConfig;
 use crate::builtin::settings::EnvConfig;
 
-type Config = EliConfig;
-
 /// Manage model selection: show, list, or switch.
 pub(crate) async fn model_command(name: Option<String>) -> anyhow::Result<()> {
     match name.as_deref() {
@@ -31,7 +29,6 @@ fn model_show() -> anyhow::Result<()> {
         }
     }
 
-    // Show env var override if set.
     if let Some(env_model) = EnvConfig::model_override() {
         println!();
         println!("Note: ELI_MODEL environment variable is set to: {env_model}");
@@ -43,7 +40,7 @@ fn model_show() -> anyhow::Result<()> {
 
 /// Resolve an API key for the given provider for model listing purposes.
 fn resolve_api_key_for_provider(provider: &str) -> anyhow::Result<String> {
-    let config = Config::load();
+    let config = EliConfig::load();
     if let Some(key) = resolve_from_env(provider) {
         return Ok(key);
     }
@@ -66,7 +63,7 @@ fn resolve_from_env(provider: &str) -> Option<String> {
         .filter(|key| !key.is_empty())
 }
 
-fn resolve_from_config(provider: &str, _config: &Config) -> Option<String> {
+fn resolve_from_config(provider: &str, _config: &EliConfig) -> Option<String> {
     match provider {
         "anthropic" => crate::builtin::config::load_anthropic_api_key(),
         _ => None,
@@ -134,8 +131,6 @@ async fn fetch_models(provider: &str, api_key: &str) -> anyhow::Result<Vec<Strin
     }
 }
 
-/// Fetch models from OpenAI Codex backend (chatgpt.com/backend-api/codex/models).
-/// Codex OAuth tokens work against this endpoint, not api.openai.com/v1/models.
 async fn fetch_models_openai_codex(
     client: &reqwest::Client,
     api_key: &str,
@@ -147,13 +142,11 @@ async fn fetch_models_openai_codex(
         .await?;
 
     if !resp.status().is_success() {
-        // Fallback to standard OpenAI API (works with API keys, not OAuth).
         return fetch_models_openai_compatible(client, api_key, "https://api.openai.com/v1").await;
     }
 
     let body: serde_json::Value = resp.json().await?;
 
-    // Codex returns { "models": [ { "slug": "...", "visibility": "..." }, ... ] }
     let models = body["models"]
         .as_array()
         .map(|arr| {
@@ -195,14 +188,10 @@ async fn fetch_models_openai_compatible(
     Ok(models)
 }
 
-/// Fetch models from the GitHub Copilot API.
-///
-/// The GitHub token must first be exchanged for a Copilot session token.
 async fn fetch_models_github_copilot(
     client: &reqwest::Client,
     github_token: &str,
 ) -> anyhow::Result<Vec<String>> {
-    // Exchange GitHub token for Copilot session token.
     let token_resp = client
         .get("https://api.github.com/copilot_internal/v2/token")
         .header("Authorization", format!("Bearer {github_token}"))
@@ -225,7 +214,6 @@ async fn fetch_models_github_copilot(
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Copilot token response missing 'token' field"))?;
 
-    // Fetch models from the Copilot API.
     let resp = client
         .get("https://api.githubcopilot.com/models")
         .header("Authorization", format!("Bearer {session_token}"))
@@ -242,7 +230,6 @@ async fn fetch_models_github_copilot(
 
     let body: serde_json::Value = resp.json().await?;
 
-    // Copilot returns { "data": [...] } or a flat array of model objects.
     let models = if let Some(arr) = body["data"].as_array() {
         arr.iter()
             .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
@@ -263,13 +250,11 @@ async fn fetch_models_github_copilot(
     Ok(models)
 }
 
-/// Filter out non-chat models for OpenAI provider.
 fn filter_chat_models(provider: &str, models: &[String]) -> Vec<String> {
     if provider != "openai" {
         return models.to_vec();
     }
 
-    // Skip embedding, tts, whisper, dall-e, and moderation models.
     let skip_prefixes = [
         "text-embedding",
         "tts-",
@@ -390,8 +375,16 @@ async fn model_list() -> anyhow::Result<()> {
     println!("Fetching models from {provider}...");
     println!();
 
-    let api_key = resolve_api_key_for_provider(provider);
-    let mut models = match api_key {
+    let mut models = fetch_or_fallback_models(provider).await;
+    models.sort();
+    models.dedup();
+
+    print_model_list(provider, &models, &config);
+    Ok(())
+}
+
+async fn fetch_or_fallback_models(provider: &str) -> Vec<String> {
+    match resolve_api_key_for_provider(provider) {
         Ok(key) => match fetch_models(provider, &key).await {
             Ok(m) => {
                 let filtered = filter_chat_models(provider, &m);
@@ -409,28 +402,22 @@ async fn model_list() -> anyhow::Result<()> {
             eprintln!();
             known_models(provider)
         }
-    };
-    models.sort();
-    models.dedup();
+    }
+}
 
+fn print_model_list(provider: &str, models: &[String], config: &EliConfig) {
     if models.is_empty() {
         println!("No models found.");
-    } else {
-        println!("Available models ({provider}):");
-        for model in &models {
-            let marker = if config
-                .active_profile()
-                .is_some_and(|p| p.model == *model || p.model == format!("{provider}:{model}"))
-            {
-                " *"
-            } else {
-                ""
-            };
-            println!("  {model}{marker}");
-        }
+        return;
     }
-
-    Ok(())
+    println!("Available models ({provider}):");
+    for model in models {
+        let is_active = config
+            .active_profile()
+            .is_some_and(|p| p.model == *model || p.model == format!("{provider}:{model}"));
+        let marker = if is_active { " *" } else { "" };
+        println!("  {model}{marker}");
+    }
 }
 
 /// Switch the active profile's model.
@@ -447,7 +434,6 @@ fn model_switch(model_name: &str) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Active profile '{profile_name}' not found in config"))?;
 
     let old_model = profile.model.clone();
-    // Ensure model is stored in provider:model format.
     let new_model = if model_name.contains(':') {
         model_name.to_string()
     } else {

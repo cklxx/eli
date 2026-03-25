@@ -73,7 +73,6 @@ const NO_ACCESS_MESSAGE: &str =
 // Message type detection
 // ---------------------------------------------------------------------------
 
-/// Detect the high-level message type from a teloxide `Message`.
 fn detect_message_type(msg: &Message) -> &'static str {
     match &msg.kind {
         TgMessageKind::Common(common) => match &common.media_kind {
@@ -95,8 +94,6 @@ fn detect_message_type(msg: &Message) -> &'static str {
 // EliMessageFilter logic
 // ---------------------------------------------------------------------------
 
-/// Determine whether a message should be processed (mirrors the Python
-/// `EliMessageFilter.filter` logic).
 fn should_process_message(msg: &Message, bot_id: UserId, bot_username: &str) -> bool {
     let msg_type = detect_message_type(msg);
     if msg_type == "unknown" {
@@ -120,7 +117,6 @@ fn should_process_message(msg: &Message, bot_id: UserId, bot_username: &str) -> 
 
         let reply_to_bot = is_reply_to_bot(msg, bot_id);
 
-        // Non-text media without caption: only process if replying to bot.
         if msg_type != "text" && extract_caption(msg).is_none() {
             return reply_to_bot;
         }
@@ -131,20 +127,16 @@ fn should_process_message(msg: &Message, bot_id: UserId, bot_username: &str) -> 
     false
 }
 
-/// Check whether the message is a reply to the bot.
 fn is_reply_to_bot(msg: &Message, bot_id: UserId) -> bool {
-    match msg.reply_to_message() {
-        Some(reply) => reply.from.as_ref().is_some_and(|u| u.id == bot_id),
-        None => false,
-    }
+    msg.reply_to_message()
+        .and_then(|reply| reply.from.as_ref())
+        .is_some_and(|u| u.id == bot_id)
 }
 
-/// Extract text content from a message.
 fn extract_text_content(msg: &Message) -> Option<&str> {
     msg.text().or_else(|| msg.caption())
 }
 
-/// Extract caption from a message (photos, videos, documents, etc.).
 fn extract_caption(msg: &Message) -> Option<&str> {
     msg.caption()
 }
@@ -243,7 +235,6 @@ fn map_media_kind(media_kind: &MediaKind) -> Option<MediaItemData> {
     }
 }
 
-/// Build a [`MediaItem`] from a teloxide `Message`, if it contains media.
 fn extract_media_item(msg: &Message, bot: Bot) -> Option<MediaItem> {
     let (media_type, file_id, mime_type, filename) = map_media_kind(common_media_kind(msg)?)?;
     Some(MediaItem {
@@ -254,36 +245,29 @@ fn extract_media_item(msg: &Message, bot: Bot) -> Option<MediaItem> {
     })
 }
 
-/// Download a file from Telegram by file ID. Returns an empty Vec on failure.
 async fn download_file(bot: &Bot, file_id: &str) -> Vec<u8> {
-    match bot.get_file(file_id).await {
-        Ok(file) => {
-            use futures::StreamExt as _;
-            let stream = bot.download_file_stream(&file.path);
-            let mut buf = Vec::new();
-            let mut stream = std::pin::pin!(stream);
-            let mut download_err = None;
-            while let Some(chunk) = stream.next().await {
-                match chunk {
-                    Ok(bytes) => buf.extend_from_slice(&bytes),
-                    Err(e) => {
-                        download_err = Some(e);
-                        break;
-                    }
-                }
-            }
-            if let Some(e) = download_err {
-                error!(error = %e, file_id = %file_id, "failed to download telegram file");
-                Vec::new()
-            } else {
-                buf
-            }
-        }
+    match try_download_file(bot, file_id).await {
+        Ok(buf) => buf,
         Err(e) => {
-            error!(error = %e, file_id = %file_id, "failed to get telegram file info");
+            error!(error = %e, file_id = %file_id, "failed to download telegram file");
             Vec::new()
         }
     }
+}
+
+async fn try_download_file(
+    bot: &Bot,
+    file_id: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use futures::StreamExt as _;
+    let file = bot.get_file(file_id).await?;
+    let stream = bot.download_file_stream(&file.path);
+    let mut buf = Vec::new();
+    let mut stream = std::pin::pin!(stream);
+    while let Some(chunk) = stream.next().await {
+        buf.extend_from_slice(&chunk?);
+    }
+    Ok(buf)
 }
 
 fn format_captioned_content(base: String, caption: &str) -> String {
@@ -355,7 +339,6 @@ fn video_note_duration_seconds(msg: &Message) -> u32 {
     }
 }
 
-/// Build a human-readable content string from the message.
 fn format_message_content(msg: &Message) -> String {
     let caption = extract_caption(msg).unwrap_or("");
 
@@ -375,10 +358,7 @@ fn format_message_content(msg: &Message) -> String {
     }
 }
 
-/// Extract links from message entities.
 fn extract_links(msg: &Message) -> Vec<String> {
-    let mut links = Vec::new();
-
     let (entities, source_text) = if let Some(text) = msg.text() {
         (
             msg.entities().map(|e| e.to_vec()).unwrap_or_default(),
@@ -392,35 +372,155 @@ fn extract_links(msg: &Message) -> Vec<String> {
             caption.to_owned(),
         )
     } else {
-        return links;
+        return Vec::new();
     };
 
-    for entity in &entities {
-        match entity.kind {
-            teloxide::types::MessageEntityKind::TextLink { ref url } => {
-                let url_str = url.as_str().to_owned();
-                if !links.contains(&url_str) {
-                    links.push(url_str);
-                }
+    let mut seen = HashSet::new();
+    entities
+        .iter()
+        .filter_map(|entity| extract_link_from_entity(entity, &source_text))
+        .filter(|url| seen.insert(url.clone()))
+        .collect()
+}
+
+fn extract_link_from_entity(
+    entity: &teloxide::types::MessageEntity,
+    source_text: &str,
+) -> Option<String> {
+    match &entity.kind {
+        teloxide::types::MessageEntityKind::TextLink { url } => Some(url.as_str().to_owned()),
+        teloxide::types::MessageEntityKind::Url => {
+            let candidate: String = source_text
+                .chars()
+                .skip(entity.offset)
+                .take(entity.length)
+                .collect::<String>()
+                .trim()
+                .to_owned();
+            if candidate.is_empty() {
+                None
+            } else {
+                Some(candidate)
             }
-            teloxide::types::MessageEntityKind::Url => {
-                let offset = entity.offset;
-                let length = entity.length;
-                let candidate: String = source_text
-                    .chars()
-                    .skip(offset)
-                    .take(length)
-                    .collect::<String>()
-                    .trim()
-                    .to_owned();
-                if !candidate.is_empty() && !links.contains(&candidate) {
-                    links.push(candidate);
-                }
-            }
-            _ => {}
+        }
+        _ => None,
+    }
+}
+
+fn strip_eli_prefix(content: String) -> String {
+    content
+        .strip_prefix("/eli ")
+        .map(|rest| rest.to_owned())
+        .unwrap_or(content)
+}
+
+enum AccessResult {
+    Allowed,
+    DeniedChat,
+    DeniedUser,
+    StartCommand,
+}
+
+fn check_access(
+    msg: &Message,
+    allow_chats: &HashSet<String>,
+    allow_users: &HashSet<String>,
+) -> AccessResult {
+    let chat_id = msg.chat.id.to_string();
+
+    if !allow_chats.is_empty() && !allow_chats.contains(&chat_id) {
+        if msg.text().is_some_and(|t| t.starts_with("/start")) {
+            return AccessResult::DeniedChat;
+        }
+        return AccessResult::DeniedChat;
+    }
+
+    if let Some(user) = msg.from.as_ref()
+        && !allow_users.is_empty()
+    {
+        let uid = user.id.0.to_string();
+        let uname = user.username.clone().unwrap_or_default();
+        if !allow_users.contains(&uid) && !allow_users.contains(&uname) {
+            return AccessResult::DeniedUser;
         }
     }
-    links
+
+    if msg.text().is_some_and(|t| t.starts_with("/start")) {
+        return AccessResult::StartCommand;
+    }
+
+    AccessResult::Allowed
+}
+
+fn build_channel_message(
+    msg: &Message,
+    bot: &Bot,
+    bot_id: UserId,
+    bot_username: &str,
+) -> ChannelMessage {
+    let chat_id = msg.chat.id.to_string();
+    let session_id = format!("telegram:{chat_id}");
+    let content = strip_eli_prefix(format_message_content(msg));
+
+    if content.trim().starts_with('/') {
+        return ChannelMessage::new(&session_id, "telegram", content.trim())
+            .with_chat_id(&chat_id)
+            .finalize();
+    }
+
+    let media_items = collect_media_items(msg, bot);
+    let json_content = build_message_metadata(msg, &content);
+    let is_active = should_process_message(msg, bot_id, bot_username);
+
+    ChannelMessage::new(&session_id, "telegram", &json_content)
+        .with_chat_id(&chat_id)
+        .with_is_active(is_active)
+        .with_media(media_items)
+        .with_output_channel("null")
+        .finalize()
+}
+
+fn collect_media_items(msg: &Message, bot: &Bot) -> Vec<MediaItem> {
+    [Some(msg), msg.reply_to_message()]
+        .into_iter()
+        .flatten()
+        .filter_map(|m| extract_media_item(m, bot.clone()))
+        .collect()
+}
+
+fn build_message_metadata(msg: &Message, content: &str) -> String {
+    let links = extract_links(msg);
+    let sender_name = msg.from.as_ref().map(|u| u.full_name()).unwrap_or_default();
+    let sender_username = msg
+        .from
+        .as_ref()
+        .and_then(|u| u.username.clone())
+        .unwrap_or_default();
+    let sender_id = msg
+        .from
+        .as_ref()
+        .map(|u| u.id.0.to_string())
+        .unwrap_or_default();
+
+    let mut metadata = serde_json::json!({
+        "message_id": msg.id.0,
+        "type": detect_message_type(msg),
+        "username": sender_username,
+        "full_name": sender_name,
+        "sender_id": sender_id,
+        "message": content,
+    });
+    if !links.is_empty() {
+        metadata["links"] = json!(links);
+    }
+    metadata.to_string()
+}
+
+async fn resolve_bot_identity(bot: &Bot) -> (UserId, String) {
+    match bot.get_me().await {
+        Ok(me) => (me.id, me.username.clone().unwrap_or_default()),
+        Err(_) => (UserId(0), String::new()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -489,118 +589,33 @@ impl Channel for TelegramChannel {
                 let allow_chats = allow_chats.clone();
 
                 async move {
-                    let chat_id = msg.chat.id.to_string();
-
-                    // Access control.
-                    if !allow_chats.is_empty() && !allow_chats.contains(&chat_id) {
-                        if let Some(text) = msg.text()
-                            && text.starts_with("/start")
-                        {
-                            let _ = bot.send_message(msg.chat.id, NO_ACCESS_MESSAGE).await;
+                    match check_access(&msg, &allow_chats, &allow_users) {
+                        AccessResult::DeniedChat => {
+                            if msg.text().is_some_and(|t| t.starts_with("/start")) {
+                                let _ = bot.send_message(msg.chat.id, NO_ACCESS_MESSAGE).await;
+                            }
+                            return respond(());
                         }
-                        return respond(());
-                    }
-
-                    if let Some(user) = msg.from.as_ref()
-                        && !allow_users.is_empty()
-                    {
-                        let uid = user.id.0.to_string();
-                        let uname = user.username.clone().unwrap_or_default();
-                        if !allow_users.contains(&uid) && !allow_users.contains(&uname) {
+                        AccessResult::DeniedUser => {
                             let _ = bot.send_message(msg.chat.id, "Access denied.").await;
                             return Ok(());
                         }
+                        AccessResult::StartCommand => {
+                            let _ = bot
+                                .send_message(msg.chat.id, "Eli is online. Send text to start.")
+                                .await;
+                            return Ok(());
+                        }
+                        AccessResult::Allowed => {}
                     }
 
-                    // Handle /start command.
-                    if let Some(text) = msg.text()
-                        && text.starts_with("/start")
-                    {
-                        let _ = bot
-                            .send_message(msg.chat.id, "Eli is online. Send text to start.")
-                            .await;
-                        return Ok(());
-                    }
-
-                    // Build and send the channel message.
-                    let session_id = format!("telegram:{chat_id}");
-                    let content = format_message_content(&msg);
-
-                    // Strip /eli prefix.
-                    let content = if let Some(rest) = content.strip_prefix("/eli ") {
-                        rest.to_owned()
-                    } else {
-                        content
-                    };
-
-                    // Slash commands pass through directly.
-                    if content.trim().starts_with('/') {
-                        let channel_msg =
-                            ChannelMessage::new(&session_id, "telegram", content.trim())
-                                .with_chat_id(&chat_id)
-                                .finalize();
-                        let _ = tx.send(channel_msg);
-                        return Ok(());
-                    }
-
-                    let mut media_items = Vec::new();
-                    if let Some(item) = extract_media_item(&msg, bot.clone()) {
-                        media_items.push(item);
-                    }
-                    if let Some(reply) = msg.reply_to_message()
-                        && let Some(item) = extract_media_item(reply, bot.clone())
-                    {
-                        media_items.push(item);
-                    }
-
-                    let links = extract_links(&msg);
-                    let msg_type = detect_message_type(&msg);
-                    let sender_name = msg.from.as_ref().map(|u| u.full_name()).unwrap_or_default();
-                    let sender_username = msg
-                        .from
-                        .as_ref()
-                        .and_then(|u| u.username.clone())
-                        .unwrap_or_default();
-                    let sender_id = msg
-                        .from
-                        .as_ref()
-                        .map(|u| u.id.0.to_string())
-                        .unwrap_or_default();
-
-                    let mut metadata = serde_json::Map::new();
-                    metadata.insert("message_id".to_owned(), json!(msg.id.0));
-                    metadata.insert("type".to_owned(), json!(msg_type));
-                    metadata.insert("username".to_owned(), json!(sender_username));
-                    metadata.insert("full_name".to_owned(), json!(sender_name));
-                    metadata.insert("sender_id".to_owned(), json!(sender_id));
-                    if !links.is_empty() {
-                        metadata.insert("links".to_owned(), json!(links));
-                    }
-                    metadata.insert("message".to_owned(), json!(content));
-
-                    let json_content = serde_json::Value::Object(metadata).to_string();
-
-                    let bot_me = bot.get_me().await;
-                    let (bot_id, bot_uname) = match bot_me {
-                        Ok(me) => (me.id, me.username.clone().unwrap_or_default()),
-                        Err(_) => (UserId(0), String::new()),
-                    };
-                    let is_active = should_process_message(&msg, bot_id, &bot_uname);
-
-                    let channel_msg = ChannelMessage::new(&session_id, "telegram", &json_content)
-                        .with_chat_id(&chat_id)
-                        .with_is_active(is_active)
-                        .with_media(media_items)
-                        .with_output_channel("null")
-                        .finalize();
-
+                    let (bot_id, bot_uname) = resolve_bot_identity(&bot).await;
+                    let channel_msg = build_channel_message(&msg, &bot, bot_id, &bot_uname);
                     let _ = tx.send(channel_msg);
                     Ok(())
                 }
             });
 
-            // Use a 5-second long-poll timeout so the select loop can
-            // respond to cancellation within a few seconds at most.
             let listener = Polling::builder(bot_for_handler.clone())
                 .timeout(std::time::Duration::from_secs(5))
                 .delete_webhook()
@@ -626,8 +641,6 @@ impl Channel for TelegramChannel {
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
-        // Abort the dispatcher task so it exits immediately even if stuck
-        // on a long-poll GetUpdates request.
         if let Some(handle) = self.dispatcher_handle.lock().await.take() {
             handle.abort();
             let _ = handle.await;
@@ -651,23 +664,20 @@ impl Channel for TelegramChannel {
             anyhow::bail!("invalid chat_id: {}", message.chat_id);
         }
 
-        let text = match serde_json::from_str::<serde_json::Value>(&message.content) {
-            Ok(val) => {
-                // Try "message" first, then "content" field
+        let text = serde_json::from_str::<serde_json::Value>(&message.content)
+            .ok()
+            .and_then(|val| {
                 val.get("message")
                     .or_else(|| val.get("content"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned()
-            }
-            Err(_) => message.content.clone(),
-        };
+                    .map(|s| s.to_owned())
+            })
+            .unwrap_or_else(|| message.content.clone());
 
         if text.trim().is_empty() {
             return Ok(());
         }
 
-        // Try MarkdownV2 first, fallback to plain text if formatting is invalid
         let md_result = bot
             .send_message(ChatId(chat_id), &text)
             .parse_mode(ParseMode::MarkdownV2)

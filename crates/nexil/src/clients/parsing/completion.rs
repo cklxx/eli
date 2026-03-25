@@ -8,17 +8,90 @@ use super::types::{BaseTransportParser, ToolCallDelta};
 /// Parser for the OpenAI chat-completions response format.
 pub struct CompletionTransportParser;
 
+fn first_choice(response: &Value) -> Option<&Value> {
+    field(response, "choices")
+        .and_then(|c| c.as_array())
+        .filter(|c| !c.is_empty())
+        .map(|c| &c[0])
+}
+
+fn first_choice_delta(chunk: &Value) -> Option<&Value> {
+    first_choice(chunk).and_then(|c| field(c, "delta"))
+}
+
+fn first_choice_message(response: &Value) -> Option<&Value> {
+    first_choice(response).and_then(|c| field(c, "message"))
+}
+
+fn normalize_completion_tool_call(tool_call: &Value) -> Option<Value> {
+    let function = field(tool_call, "function").filter(|f| f.is_object())?;
+    let name = field(function, "name").cloned().unwrap_or(Value::Null);
+    let arguments = field(function, "arguments").cloned().unwrap_or(Value::Null);
+
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+        "function".to_owned(),
+        serde_json::json!({"name": name, "arguments": arguments}),
+    );
+
+    for key in ["id", "type"] {
+        if let Some(v) = field(tool_call, key).filter(|v| !v.is_null()) {
+            entry.insert(key.to_owned(), v.clone());
+        }
+    }
+
+    Some(Value::Object(entry))
+}
+
+fn delta_to_tool_call_delta(tc: &Value) -> ToolCallDelta {
+    let func = tc.get("function");
+    ToolCallDelta {
+        id: tc.get("id").and_then(|v| v.as_str()).map(|s| s.to_owned()),
+        index: tc.get("index").cloned(),
+        call_type: tc
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned()),
+        name: func
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        arguments: func
+            .and_then(|f| f.get("arguments"))
+            .and_then(|a| a.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        arguments_complete: false,
+    }
+}
+
+const USAGE_KEY_MAPPINGS: &[(&[&str], &str)] = &[
+    (&["input_tokens", "prompt_tokens"], "input_tokens"),
+    (&["output_tokens", "completion_tokens"], "output_tokens"),
+    (&["total_tokens"], "total_tokens"),
+    (&["requests"], "requests"),
+];
+
+fn normalize_usage_fields(
+    usage_obj: &serde_json::Map<String, Value>,
+) -> serde_json::Map<String, Value> {
+    USAGE_KEY_MAPPINGS
+        .iter()
+        .filter_map(|(source_keys, target_key)| {
+            let value = source_keys.iter().find_map(|key| usage_obj.get(*key))?;
+            Some(((*target_key).to_owned(), value.clone()))
+        })
+        .collect()
+}
+
 impl BaseTransportParser for CompletionTransportParser {
     fn is_non_stream_response(&self, response: &Value) -> bool {
         response.is_string() || response.get("choices").is_some()
     }
 
     fn extract_chunk_tool_call_deltas(&self, chunk: &Value) -> Vec<ToolCallDelta> {
-        let choices = match field(chunk, "choices").and_then(|c| c.as_array()) {
-            Some(c) if !c.is_empty() => c,
-            _ => return Vec::new(),
-        };
-        let delta = match field(&choices[0], "delta") {
+        let delta = match first_choice_delta(chunk) {
             Some(d) => d,
             None => return Vec::new(),
         };
@@ -27,142 +100,42 @@ impl BaseTransportParser for CompletionTransportParser {
             None => return Vec::new(),
         };
 
-        tool_calls
-            .iter()
-            .map(|tc| {
-                let func = tc.get("function");
-                let name = func
-                    .and_then(|f| f.get("name"))
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-                let arguments = func
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-                ToolCallDelta {
-                    id: tc.get("id").and_then(|v| v.as_str()).map(|s| s.to_owned()),
-                    index: tc.get("index").cloned(),
-                    call_type: tc
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_owned()),
-                    name,
-                    arguments,
-                    arguments_complete: false,
-                }
-            })
-            .collect()
+        tool_calls.iter().map(delta_to_tool_call_delta).collect()
     }
 
     fn extract_chunk_text(&self, chunk: &Value) -> String {
-        let choices = match field(chunk, "choices").and_then(|c| c.as_array()) {
-            Some(c) if !c.is_empty() => c,
-            _ => return String::new(),
-        };
-        let delta = match field(&choices[0], "delta") {
-            Some(d) => d,
-            None => return String::new(),
-        };
-        field_str(delta, "content").to_owned()
+        first_choice_delta(chunk)
+            .map(|d| field_str(d, "content").to_owned())
+            .unwrap_or_default()
     }
 
     fn extract_text(&self, response: &Value) -> String {
         if let Some(s) = response.as_str() {
             return s.to_owned();
         }
-        let choices = match field(response, "choices").and_then(|c| c.as_array()) {
-            Some(c) if !c.is_empty() => c,
-            _ => return String::new(),
-        };
-        let message = match field(&choices[0], "message") {
-            Some(m) => m,
-            None => return String::new(),
-        };
-        field_str(message, "content").to_owned()
+        first_choice_message(response)
+            .map(|m| field_str(m, "content").to_owned())
+            .unwrap_or_default()
     }
 
     fn extract_tool_calls(&self, response: &Value) -> Vec<Value> {
-        let choices = match field(response, "choices").and_then(|c| c.as_array()) {
-            Some(c) if !c.is_empty() => c,
-            _ => return Vec::new(),
+        let tool_calls = first_choice_message(response)
+            .and_then(|m| field(m, "tool_calls"))
+            .and_then(|tc| tc.as_array());
+        let Some(tool_calls) = tool_calls else {
+            return Vec::new();
         };
-        let message = match field(&choices[0], "message") {
-            Some(m) => m,
-            None => return Vec::new(),
-        };
-        let tool_calls = match field(message, "tool_calls").and_then(|tc| tc.as_array()) {
-            Some(tc) => tc,
-            None => return Vec::new(),
-        };
-
-        let mut calls = Vec::new();
-        for tool_call in tool_calls {
-            let function = match field(tool_call, "function") {
-                Some(f) if f.is_object() => f,
-                _ => continue,
-            };
-            let name = field(function, "name").cloned().unwrap_or(Value::Null);
-            let arguments = field(function, "arguments").cloned().unwrap_or(Value::Null);
-
-            let mut entry = serde_json::Map::new();
-            let mut func_map = serde_json::Map::new();
-            func_map.insert("name".to_owned(), name);
-            func_map.insert("arguments".to_owned(), arguments);
-            entry.insert("function".to_owned(), Value::Object(func_map));
-
-            if let Some(id) = field(tool_call, "id")
-                && !id.is_null()
-            {
-                entry.insert("id".to_owned(), id.clone());
-            }
-            if let Some(t) = field(tool_call, "type")
-                && !t.is_null()
-            {
-                entry.insert("type".to_owned(), t.clone());
-            }
-
-            calls.push(Value::Object(entry));
-        }
-
+        let calls = tool_calls
+            .iter()
+            .filter_map(normalize_completion_tool_call)
+            .collect();
         expand_tool_calls(calls)
     }
 
     fn extract_usage(&self, response: &Value) -> Option<Value> {
-        let usage = field(response, "usage")?;
-        if !usage.is_object() {
-            return None;
-        }
-        let usage_obj = usage.as_object()?;
-
-        let mut normalized = serde_json::Map::new();
-
-        if let Some(v) = usage_obj.get("input_tokens") {
-            normalized.insert("input_tokens".to_owned(), v.clone());
-        } else if let Some(v) = usage_obj.get("prompt_tokens") {
-            normalized.insert("input_tokens".to_owned(), v.clone());
-        }
-
-        if let Some(v) = usage_obj.get("output_tokens") {
-            normalized.insert("output_tokens".to_owned(), v.clone());
-        } else if let Some(v) = usage_obj.get("completion_tokens") {
-            normalized.insert("output_tokens".to_owned(), v.clone());
-        }
-
-        if let Some(v) = usage_obj.get("total_tokens") {
-            normalized.insert("total_tokens".to_owned(), v.clone());
-        }
-
-        if let Some(v) = usage_obj.get("requests") {
-            normalized.insert("requests".to_owned(), v.clone());
-        }
-
-        if normalized.is_empty() {
-            None
-        } else {
-            Some(Value::Object(normalized))
-        }
+        let usage_obj = field(response, "usage")?.as_object()?;
+        let normalized = normalize_usage_fields(usage_obj);
+        (!normalized.is_empty()).then_some(Value::Object(normalized))
     }
 }
 
