@@ -1586,3 +1586,436 @@ fn test_spill_truncated_output_has_head_and_tail() {
     // File path reference
     assert!(truncated.contains("c.txt"));
 }
+
+// ===== E2E: image persistence round-trip =====
+
+#[tokio::test]
+async fn test_e2e_image_stripped_in_tape_but_full_in_memory() {
+    let llm = LLM::builder()
+        .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+        .build()
+        .unwrap();
+    let tape = "test__img_roundtrip";
+
+    // Multimodal user message with image
+    let user_content = vec![
+        json!({"type": "text", "text": "what is this?"}),
+        json!({"type": "image_base64", "mime_type": "image/png", "data": "iVBORw0KGgo="}),
+    ];
+    let initial = build_messages(None, Some(&user_content), Some("you are helpful"), None);
+    llm.persist_initial_messages(tape, &initial).await.unwrap();
+
+    // Tape should have placeholder, not base64
+    let entries = llm
+        .async_tape
+        .fetch_entries(&llm.async_tape.query_tape(tape))
+        .await
+        .unwrap();
+    let user_entry = entries
+        .iter()
+        .find(|e| {
+            e.kind == "message" && e.payload.get("role").and_then(|r| r.as_str()) == Some("user")
+        })
+        .unwrap();
+    let tape_content = user_entry.payload["content"].as_array().unwrap();
+    // Image block replaced with placeholder text
+    assert_eq!(tape_content[1]["type"], "text");
+    assert!(
+        tape_content[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("[image:")
+    );
+    // No base64 data in tape
+    let tape_json = serde_json::to_string(&user_entry.payload).unwrap();
+    assert!(!tape_json.contains("iVBORw0KGgo="));
+
+    // But in_memory_msgs (from run_tools init) should have full image.
+    // Simulate what run_tools does: build_tape_messages + prepend
+    let tape_msgs = llm.build_tape_messages(tape, None).await;
+    let mut in_memory = initial.clone();
+    prepend_tape_history(&mut in_memory, tape_msgs);
+    // The last user message should have the original multimodal content
+    let last_user = in_memory
+        .iter()
+        .rev()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        .unwrap();
+    let content = last_user["content"].as_array().unwrap();
+    assert_eq!(content[1]["type"], "image_base64");
+    assert_eq!(content[1]["data"], "iVBORw0KGgo=");
+}
+
+#[tokio::test]
+async fn test_e2e_next_turn_sees_placeholder_not_image() {
+    let llm = LLM::builder()
+        .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+        .build()
+        .unwrap();
+    let tape = "test__img_next_turn";
+
+    // Turn 1: user sends image
+    let user_content = vec![
+        json!({"type": "text", "text": "describe this"}),
+        json!({"type": "image_base64", "mime_type": "image/jpeg", "data": "BIGBASE64DATA"}),
+    ];
+    let initial1 = build_messages(None, Some(&user_content), Some("system"), None);
+    llm.persist_initial_messages(tape, &initial1).await.unwrap();
+
+    // Simulate assistant response
+    let meta = json!({"run_id": "r1"});
+    let assistant = json!({"role": "assistant", "content": "I see a cat"});
+    llm.async_tape
+        .append_entry(tape, &TapeEntry::message(assistant, meta))
+        .await
+        .unwrap();
+
+    // Turn 2: user sends text only
+    let initial2 = build_messages(Some("what color is it?"), None, Some("system"), None);
+    llm.persist_initial_messages(tape, &initial2).await.unwrap();
+
+    // Build context for turn 2 — should see placeholder, not image
+    let tape_msgs = llm.build_tape_messages(tape, None).await;
+    let mut context = initial2.clone();
+    prepend_tape_history(&mut context, tape_msgs);
+
+    // Find the old user message (turn 1)
+    let user_msgs: Vec<_> = context
+        .iter()
+        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        .collect();
+    assert!(user_msgs.len() >= 2);
+    // First user message should have placeholder, not base64
+    let first_user_content = &user_msgs[0]["content"];
+    let full_json = serde_json::to_string(first_user_content).unwrap();
+    assert!(
+        !full_json.contains("BIGBASE64DATA"),
+        "old image should not be in context"
+    );
+    assert!(full_json.contains("[image:"), "should have placeholder");
+}
+
+// ===== E2E: tool result spill round-trip =====
+
+#[tokio::test]
+async fn test_e2e_spill_tool_result_in_tape_full_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = LLM::builder()
+        .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+        .spill_dir(dir.path())
+        .build()
+        .unwrap();
+    let tape = "test__spill_roundtrip";
+
+    let large_result: String = (0..200)
+        .map(|i| format!("line {i}: data here"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let execution = ToolExecution {
+        tool_calls: vec![json!({
+            "id": "call_42",
+            "type": "function",
+            "function": {"name": "fs.read", "arguments": "{\"path\": \"big.txt\"}"}
+        })],
+        tool_results: vec![json!(large_result)],
+        error: None,
+    };
+    let response = json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_42",
+                    "type": "function",
+                    "function": {"name": "fs.read", "arguments": "{\"path\": \"big.txt\"}"}
+                }]
+            }
+        }]
+    });
+
+    let mut in_memory = vec![
+        json!({"role": "system", "content": "system"}),
+        json!({"role": "user", "content": "read big.txt"}),
+    ];
+    llm._persist_round(Some(tape), &response, &execution, &mut in_memory)
+        .await
+        .unwrap();
+
+    // in_memory should have FULL result
+    let tool_msg = in_memory
+        .iter()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool"))
+        .unwrap();
+    assert_eq!(tool_msg["content"].as_str().unwrap(), large_result);
+
+    // Tape should have SPILLED (truncated) result
+    let entries = llm
+        .async_tape
+        .fetch_entries(&llm.async_tape.query_tape(tape))
+        .await
+        .unwrap();
+    let result_entry = entries.iter().find(|e| e.kind == "tool_result").unwrap();
+    let tape_output = result_entry.payload["results"][0]["output"]
+        .as_str()
+        .unwrap();
+    assert!(tape_output.len() < large_result.len());
+    assert!(tape_output.contains("chars omitted"));
+
+    // Spill file should have full content
+    let spill_file = dir.path().join("test__spill_roundtrip.d/call_42.txt");
+    assert!(spill_file.exists());
+    assert_eq!(std::fs::read_to_string(&spill_file).unwrap(), large_result);
+}
+
+#[tokio::test]
+async fn test_e2e_spill_tool_args_in_tape_full_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = LLM::builder()
+        .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+        .spill_dir(dir.path())
+        .build()
+        .unwrap();
+    let tape = "test__spill_args";
+
+    let large_args: String = (0..200)
+        .map(|i| format!("content line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let execution = ToolExecution {
+        tool_calls: vec![json!({
+            "id": "call_w1",
+            "type": "function",
+            "function": {"name": "fs.write", "arguments": large_args}
+        })],
+        tool_results: vec![json!("ok")],
+        error: None,
+    };
+    let response = json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_w1",
+                    "type": "function",
+                    "function": {"name": "fs.write", "arguments": large_args}
+                }]
+            }
+        }]
+    });
+
+    let mut in_memory = vec![json!({"role": "user", "content": "write file"})];
+    llm._persist_round(Some(tape), &response, &execution, &mut in_memory)
+        .await
+        .unwrap();
+
+    // in_memory should have FULL args in assistant message
+    let assistant = in_memory
+        .iter()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+        .unwrap();
+    let mem_args = assistant["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .unwrap();
+    assert_eq!(mem_args, large_args);
+
+    // Tape should have SPILLED args
+    let entries = llm
+        .async_tape
+        .fetch_entries(&llm.async_tape.query_tape(tape))
+        .await
+        .unwrap();
+    let call_entry = entries.iter().find(|e| e.kind == "tool_call").unwrap();
+    let tape_args = call_entry.payload["calls"][0]["function"]["arguments"]
+        .as_str()
+        .unwrap();
+    assert!(tape_args.len() < large_args.len());
+    assert!(tape_args.contains("chars omitted"));
+
+    // Spill file has full args
+    let spill_file = dir.path().join("test__spill_args.d/call_w1.args.txt");
+    assert!(spill_file.exists());
+    assert_eq!(std::fs::read_to_string(&spill_file).unwrap(), large_args);
+}
+
+// ===== Edge cases =====
+
+#[tokio::test]
+async fn test_e2e_small_tool_result_not_spilled() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = LLM::builder()
+        .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+        .spill_dir(dir.path())
+        .build()
+        .unwrap();
+    let tape = "test__small_result";
+
+    let execution = ToolExecution {
+        tool_calls: vec![json!({
+            "id": "call_s",
+            "type": "function",
+            "function": {"name": "tape.info", "arguments": "{}"}
+        })],
+        tool_results: vec![json!("small output")],
+        error: None,
+    };
+    let response = json!({
+        "choices": [{"message": {"role": "assistant", "tool_calls": [{
+            "id": "call_s", "type": "function",
+            "function": {"name": "tape.info", "arguments": "{}"}
+        }]}}]
+    });
+
+    let mut in_memory = vec![];
+    llm._persist_round(Some(tape), &response, &execution, &mut in_memory)
+        .await
+        .unwrap();
+
+    // No spill file created
+    let spill_dir = dir.path().join("test__small_result.d");
+    assert!(!spill_dir.exists());
+
+    // Tape has exact same content as in-memory
+    let entries = llm
+        .async_tape
+        .fetch_entries(&llm.async_tape.query_tape(tape))
+        .await
+        .unwrap();
+    let result_entry = entries.iter().find(|e| e.kind == "tool_result").unwrap();
+    let tape_output = result_entry.payload["results"][0]["output"]
+        .as_str()
+        .unwrap();
+    assert_eq!(tape_output, "small output");
+}
+
+#[tokio::test]
+async fn test_e2e_no_spill_dir_passes_through() {
+    // LLM without spill_dir — everything stored as-is
+    let llm = LLM::builder()
+        .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+        .build()
+        .unwrap();
+    let tape = "test__no_spill";
+
+    let large: String = (0..200)
+        .map(|i| format!("L{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let execution = ToolExecution {
+        tool_calls: vec![json!({
+            "id": "call_ns",
+            "type": "function",
+            "function": {"name": "test", "arguments": "{}"}
+        })],
+        tool_results: vec![json!(large)],
+        error: None,
+    };
+    let response = json!({
+        "choices": [{"message": {"role": "assistant", "tool_calls": [{
+            "id": "call_ns", "type": "function",
+            "function": {"name": "test", "arguments": "{}"}
+        }]}}]
+    });
+
+    let mut in_memory = vec![];
+    llm._persist_round(Some(tape), &response, &execution, &mut in_memory)
+        .await
+        .unwrap();
+
+    // Without spill_dir, tape stores FULL content
+    let entries = llm
+        .async_tape
+        .fetch_entries(&llm.async_tape.query_tape(tape))
+        .await
+        .unwrap();
+    let result_entry = entries.iter().find(|e| e.kind == "tool_result").unwrap();
+    let tape_output = result_entry.payload["results"][0]["output"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        tape_output, large,
+        "without spill_dir, tape has full content"
+    );
+}
+
+#[test]
+fn test_strip_images_text_only_message_unchanged() {
+    // Edge: user message with only text blocks (no images)
+    let msg = json!({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "hello"},
+            {"type": "text", "text": "world"},
+        ]
+    });
+    let stripped = strip_image_blocks_for_persistence(&msg);
+    assert_eq!(stripped, msg, "text-only multimodal should be unchanged");
+}
+
+#[test]
+fn test_strip_images_empty_content_array() {
+    let msg = json!({"role": "user", "content": []});
+    let stripped = strip_image_blocks_for_persistence(&msg);
+    assert_eq!(stripped["content"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn test_strip_images_system_message_untouched() {
+    let msg = json!({
+        "role": "system",
+        "content": [
+            {"type": "image_base64", "mime_type": "image/png", "data": "X"},
+        ]
+    });
+    let stripped = strip_image_blocks_for_persistence(&msg);
+    assert_eq!(stripped, msg, "system messages should not be stripped");
+}
+
+#[tokio::test]
+async fn test_e2e_multiple_tool_rounds_in_memory_accumulates() {
+    let llm = LLM::builder()
+        .tape_store(AsyncTapeStoreAdapter::new(InMemoryTapeStore::new()))
+        .build()
+        .unwrap();
+    let tape = "test__multi_round";
+
+    // Simulate two tool rounds
+    let mut in_memory = vec![
+        json!({"role": "system", "content": "sys"}),
+        json!({"role": "user", "content": "do things"}),
+    ];
+
+    for i in 0..2 {
+        let call_id = format!("call_{i}");
+        let execution = ToolExecution {
+            tool_calls: vec![json!({
+                "id": call_id,
+                "type": "function",
+                "function": {"name": "test", "arguments": "{}"}
+            })],
+            tool_results: vec![json!(format!("result_{i}"))],
+            error: None,
+        };
+        let response = json!({
+            "choices": [{"message": {"role": "assistant", "tool_calls": [{
+                "id": call_id, "type": "function",
+                "function": {"name": "test", "arguments": "{}"}
+            }]}}]
+        });
+        llm._persist_round(Some(tape), &response, &execution, &mut in_memory)
+            .await
+            .unwrap();
+    }
+
+    // in_memory should have: system, user, assistant+tool_calls, tool_result, assistant+tool_calls, tool_result
+    assert_eq!(in_memory.len(), 6);
+    assert_eq!(in_memory[0]["role"], "system");
+    assert_eq!(in_memory[1]["role"], "user");
+    assert_eq!(in_memory[2]["role"], "assistant");
+    assert_eq!(in_memory[3]["role"], "tool");
+    assert_eq!(in_memory[3]["content"], "result_0");
+    assert_eq!(in_memory[4]["role"], "assistant");
+    assert_eq!(in_memory[5]["role"], "tool");
+    assert_eq!(in_memory[5]["content"], "result_1");
+}

@@ -1,7 +1,8 @@
 //! Builtin tool implementations: bash, fs, tape, web, subagent, etc.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -9,6 +10,7 @@ use nexil::tools::schema::ToolResult;
 use nexil::{ConduitError, ErrorKind};
 use nexil::{TapeEntry, TapeQuery, Tool, ToolContext};
 use serde_json::Value;
+use tempfile::NamedTempFile;
 
 use crate::builtin::shell_manager::shell_manager;
 use crate::builtin::tape::TapeService;
@@ -19,7 +21,6 @@ use crate::tools::{REGISTRY, shorten_text};
 const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10MB
-const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024; // 50MB
 
 static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(reqwest::Client::new);
@@ -93,61 +94,212 @@ fn resolve_path(state: &HashMap<String, Value>, raw_path: &str) -> Result<PathBu
     Ok(PathBuf::from(workspace).join(&path))
 }
 
-fn read_text_file(path: &std::path::Path) -> Result<String, ConduitError> {
-    let meta = std::fs::metadata(path)
-        .map_err(|e| ConduitError::new(ErrorKind::Tool, format!("read failed: {e}")))?;
-    if meta.len() > MAX_FILE_BYTES {
-        return Err(ConduitError::new(
-            ErrorKind::Tool,
-            format!(
-                "file too large ({} bytes, limit {})",
-                meta.len(),
-                MAX_FILE_BYTES
-            ),
-        ));
-    }
-    std::fs::read_to_string(path)
-        .map_err(|e| ConduitError::new(ErrorKind::Tool, format!("read failed: {e}")))
+fn read_err(error: impl std::fmt::Display) -> ConduitError {
+    ConduitError::new(ErrorKind::Tool, format!("read failed: {error}"))
 }
 
-fn line_start_offset(text: &str, line: usize) -> usize {
-    if line == 0 {
-        return 0;
-    }
-    let mut seen = 0;
-    for (idx, ch) in text.char_indices() {
-        if ch == '\n' {
-            seen += 1;
-            if seen == line {
-                return idx + 1;
-            }
+fn write_err(error: impl std::fmt::Display) -> ConduitError {
+    ConduitError::new(ErrorKind::Tool, format!("write failed: {error}"))
+}
+
+fn resolve_tool_path(ctx: Option<ToolContext>, raw_path: &str) -> Result<PathBuf, ConduitError> {
+    resolve_path(&ctx.map(|c| c.state).unwrap_or_default(), raw_path)
+}
+
+fn open_text_reader(path: &Path) -> Result<BufReader<std::fs::File>, ConduitError> {
+    std::fs::File::open(path)
+        .map(BufReader::new)
+        .map_err(read_err)
+}
+
+fn read_next_line(reader: &mut impl BufRead, line: &mut String) -> Result<bool, ConduitError> {
+    line.clear();
+    reader
+        .read_line(line)
+        .map(|count| count > 0)
+        .map_err(read_err)
+}
+
+fn line_limit_reached(index: usize, offset: usize, limit: Option<usize>) -> bool {
+    limit.is_some_and(|limit| index >= offset.saturating_add(limit))
+}
+
+fn read_text_window(
+    path: &Path,
+    offset: usize,
+    limit: Option<usize>,
+) -> Result<String, ConduitError> {
+    let mut line = String::new();
+    let mut index = 0;
+    let mut output = String::new();
+    let mut reader = open_text_reader(path)?;
+    while !line_limit_reached(index, offset, limit) && read_next_line(&mut reader, &mut line)? {
+        if index >= offset {
+            output.push_str(&line);
         }
+        index += 1;
     }
-    text.len()
+    Ok(output)
 }
 
-fn replace_text_from_line(
-    text: &str,
+fn create_parent_dir(path: &Path) -> Result<(), ConduitError> {
+    path.parent().map_or(Ok(()), |parent| {
+        std::fs::create_dir_all(parent).map_err(write_err)
+    })
+}
+
+fn existing_permissions(path: &Path) -> Option<std::fs::Permissions> {
+    std::fs::metadata(path).ok().map(|meta| meta.permissions())
+}
+
+fn apply_permissions(
+    path: &Path,
+    permissions: Option<std::fs::Permissions>,
+) -> Result<(), ConduitError> {
+    permissions.map_or(Ok(()), |permissions| {
+        std::fs::set_permissions(path, permissions).map_err(write_err)
+    })
+}
+
+struct AtomicTextWriter {
+    path: PathBuf,
+    permissions: Option<std::fs::Permissions>,
+    writer: BufWriter<NamedTempFile>,
+}
+
+impl AtomicTextWriter {
+    fn new(path: &Path) -> Result<Self, ConduitError> {
+        create_parent_dir(path)?;
+        let temp = tempfile::Builder::new()
+            .prefix(".eli.")
+            .tempfile_in(path.parent().unwrap_or_else(|| Path::new(".")))
+            .map_err(write_err)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            permissions: existing_permissions(path),
+            writer: BufWriter::new(temp),
+        })
+    }
+
+    fn write_str(&mut self, text: &str) -> Result<(), ConduitError> {
+        self.writer.write_all(text.as_bytes()).map_err(write_err)
+    }
+
+    fn copy_from(&mut self, reader: &mut impl std::io::Read) -> Result<(), ConduitError> {
+        std::io::copy(reader, &mut self.writer)
+            .map(|_| ())
+            .map_err(write_err)
+    }
+
+    fn persist(self) -> Result<(), ConduitError> {
+        let mut temp = self.writer.into_inner().map_err(|e| write_err(e.error()))?;
+        apply_permissions(temp.path(), self.permissions)?;
+        temp.as_file_mut().sync_all().map_err(write_err)?;
+        temp.persist(&self.path)
+            .map(|_| ())
+            .map_err(|e| write_err(e.error))
+    }
+}
+
+fn write_text_file(path: &Path, content: &str) -> Result<(), ConduitError> {
+    let mut writer = AtomicTextWriter::new(path)?;
+    writer.write_str(content)?;
+    writer.persist()
+}
+
+fn invalid_edit(path: &Path, old: &str, start: usize) -> ConduitError {
+    ConduitError::new(
+        ErrorKind::InvalidInput,
+        format!("'{old}' not found in {} from line {start}", path.display()),
+    )
+}
+
+fn non_empty_old(old: &str) -> Result<(), ConduitError> {
+    (!old.is_empty())
+        .then_some(())
+        .ok_or_else(|| ConduitError::new(ErrorKind::InvalidInput, "'old' must not be empty"))
+}
+
+fn flushable_prefix_len(text: &str, keep: usize) -> usize {
+    let mut split = text.len().saturating_sub(keep);
+    while split > 0 && !text.is_char_boundary(split) {
+        split -= 1;
+    }
+    split
+}
+
+fn flush_pending(
+    writer: &mut AtomicTextWriter,
+    pending: &mut String,
+    keep: usize,
+) -> Result<(), ConduitError> {
+    let split = flushable_prefix_len(pending, keep);
+    if split == 0 {
+        return Ok(());
+    }
+    writer.write_str(&pending[..split])?;
+    pending.drain(..split);
+    Ok(())
+}
+
+fn write_replacement(
+    writer: &mut AtomicTextWriter,
+    pending: &str,
+    split: usize,
     old: &str,
     new: &str,
+) -> Result<(), ConduitError> {
+    writer.write_str(&pending[..split])?;
+    writer.write_str(new)?;
+    writer.write_str(&pending[split + old.len()..])
+}
+
+fn copy_prefix_lines(
+    reader: &mut impl BufRead,
+    writer: &mut AtomicTextWriter,
     start: usize,
-    path: &std::path::Path,
-) -> Result<String, ConduitError> {
-    let split = line_start_offset(text, start);
-    let prefix = &text[..split];
-    let suffix = &text[split..];
-    if !suffix.contains(old) {
-        return Err(ConduitError::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "'{}' not found in {} from line {start}",
-                old,
-                path.display()
-            ),
-        ));
+) -> Result<(), ConduitError> {
+    let mut line = String::new();
+    for _ in 0..start {
+        if !read_next_line(reader, &mut line)? {
+            break;
+        }
+        writer.write_str(&line)?;
     }
-    let replaced = suffix.replacen(old, new, 1);
-    Ok(format!("{prefix}{replaced}"))
+    Ok(())
+}
+
+fn replace_stream(
+    reader: &mut impl BufRead,
+    writer: &mut AtomicTextWriter,
+    old: &str,
+    new: &str,
+) -> Result<bool, ConduitError> {
+    let mut line = String::new();
+    let mut pending = String::new();
+    while read_next_line(reader, &mut line)? {
+        pending.push_str(&line);
+        if let Some(split) = pending.find(old) {
+            write_replacement(writer, &pending, split, old, new)?;
+            writer.copy_from(reader)?;
+            return Ok(true);
+        }
+        flush_pending(writer, &mut pending, old.len().saturating_sub(1))?;
+    }
+    writer.write_str(&pending)?;
+    Ok(false)
+}
+
+fn edit_text_file(path: &Path, old: &str, new: &str, start: usize) -> Result<(), ConduitError> {
+    non_empty_old(old)?;
+    let mut reader = open_text_reader(path)?;
+    let mut writer = AtomicTextWriter::new(path)?;
+    copy_prefix_lines(&mut reader, &mut writer, start)?;
+    if replace_stream(&mut reader, &mut writer, old, new)? {
+        writer.persist()
+    } else {
+        Err(invalid_edit(path, old, start))
+    }
 }
 
 fn invalid_input(error: anyhow::Error) -> ConduitError {
@@ -480,41 +632,107 @@ fn tool_bash_kill() -> Tool {
 // fs.read
 // ---------------------------------------------------------------------------
 
+struct FsReadRequest {
+    raw_path: String,
+    offset: usize,
+    limit: Option<usize>,
+}
+
+struct FsWriteRequest {
+    raw_path: String,
+    content: String,
+}
+
+struct FsEditRequest {
+    raw_path: String,
+    old: String,
+    new: String,
+    start: usize,
+}
+
+fn fs_read_request(args: &Value) -> Result<FsReadRequest, ConduitError> {
+    Ok(FsReadRequest {
+        raw_path: args
+            .require_str_field("path")
+            .map_err(invalid_input)?
+            .to_owned(),
+        offset: args.get_i64_field("offset").unwrap_or(0).max(0) as usize,
+        limit: args
+            .get_i64_field("limit")
+            .map(|value| value.max(0) as usize),
+    })
+}
+
+fn fs_write_request(args: &Value) -> Result<FsWriteRequest, ConduitError> {
+    Ok(FsWriteRequest {
+        raw_path: args
+            .require_str_field("path")
+            .map_err(invalid_input)?
+            .to_owned(),
+        content: args
+            .require_str_field("content")
+            .map_err(invalid_input)?
+            .to_owned(),
+    })
+}
+
+fn fs_edit_request(args: &Value) -> Result<FsEditRequest, ConduitError> {
+    Ok(FsEditRequest {
+        raw_path: args
+            .require_str_field("path")
+            .map_err(invalid_input)?
+            .to_owned(),
+        old: args
+            .require_str_field("old")
+            .map_err(invalid_input)?
+            .to_owned(),
+        new: args
+            .require_str_field("new")
+            .map_err(invalid_input)?
+            .to_owned(),
+        start: args.get_i64_field("start").unwrap_or(0).max(0) as usize,
+    })
+}
+
+async fn run_fs_read(args: Value, ctx: Option<ToolContext>) -> ToolResult {
+    maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+    let request = fs_read_request(&args)?;
+    let path = resolve_tool_path(ctx, &request.raw_path)?;
+    ok_val(read_text_window(&path, request.offset, request.limit)?)
+}
+
+async fn run_fs_write(args: Value, ctx: Option<ToolContext>) -> ToolResult {
+    maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+    let request = fs_write_request(&args)?;
+    let path = resolve_tool_path(ctx, &request.raw_path)?;
+    write_text_file(&path, &request.content)?;
+    ok_val(format!("wrote: {}", path.display()))
+}
+
+async fn run_fs_edit(args: Value, ctx: Option<ToolContext>) -> ToolResult {
+    maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+    let request = fs_edit_request(&args)?;
+    let path = resolve_tool_path(ctx, &request.raw_path)?;
+    edit_text_file(&path, &request.old, &request.new, request.start)?;
+    ok_val(format!("edited: {}", path.display()))
+}
+
 fn tool_fs_read() -> Tool {
     Tool::with_context(
         "fs.read",
-        "Read a file and return its text content.\n\nExamples: inspect source code, check a config file, view build logs, examine generated output. Use offset/limit to paginate large files. Prefer over bash(cat/head).",
+        "Read exact text from a file.\n\nExamples: inspect source code, check a config file, view build logs, examine generated output. Use offset/limit to paginate large files and keep token usage low. Returns the original line endings so fs.edit can reuse snippets exactly.",
         serde_json::json!({
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path (absolute or relative to workspace)."},
                 "description": {"type": "string", "description": "Brief user-facing status text to send before reading when the channel supports it."},
                 "offset": {"type": "integer", "description": "Line number to start reading from (0-based)."},
-                "limit": {"type": "integer", "description": "Max number of lines to return."}
+                "limit": {"type": "integer", "description": "Max number of lines to return. Set this for large files to avoid wasted tokens."}
             },
             "required": ["path"]
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
-            Box::pin(async move {
-                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                let raw_path = args
-                    .require_str_field("path")
-                    .map_err(invalid_input)?
-                    .to_owned();
-                let offset = args.get_i64_field("offset").unwrap_or(0).max(0) as usize;
-                let limit = args.get_i64_field("limit").map(|v| v.max(0) as usize);
-
-                let state = ctx.map(|c| c.state).unwrap_or_default();
-                let resolved = resolve_path(&state, &raw_path)?;
-                let text = read_text_file(&resolved)?;
-                let lines: Vec<&str> = text.lines().collect();
-                let start = offset.min(lines.len());
-                let end = match limit {
-                    Some(l) => (start + l).min(lines.len()),
-                    None => lines.len(),
-                };
-                ok_val(lines[start..end].join("\n"))
-            })
+            Box::pin(run_fs_read(args, ctx))
         },
     )
 }
@@ -526,7 +744,7 @@ fn tool_fs_read() -> Tool {
 fn tool_fs_write() -> Tool {
     Tool::with_context(
         "fs.write",
-        "Create a new file or fully overwrite an existing one.\n\nExamples: scaffold a new module, generate a config, write test fixtures, save structured output. Auto-creates parent dirs. For partial changes, use fs.edit.",
+        "Create a new text file or fully overwrite an existing one.\n\nExamples: scaffold a new module, generate a config, write test fixtures, save structured output. Auto-creates parent dirs and writes atomically. For partial changes, use fs.edit.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -537,28 +755,7 @@ fn tool_fs_write() -> Tool {
             "required": ["path", "content"]
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
-            Box::pin(async move {
-                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                let raw_path = args
-                    .require_str_field("path")
-                    .map_err(invalid_input)?
-                    .to_owned();
-                let content = args
-                    .require_str_field("content")
-                    .map_err(invalid_input)?
-                    .to_owned();
-
-                let state = ctx.map(|c| c.state).unwrap_or_default();
-                let resolved = resolve_path(&state, &raw_path)?;
-
-                if let Some(parent) = resolved.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                std::fs::write(&resolved, &content).map_err(|e| {
-                    ConduitError::new(ErrorKind::Tool, format!("write failed: {e}"))
-                })?;
-                ok_val(format!("wrote: {}", resolved.display()))
-            })
+            Box::pin(run_fs_write(args, ctx))
         },
     )
 }
@@ -570,7 +767,7 @@ fn tool_fs_write() -> Tool {
 fn tool_fs_edit() -> Tool {
     Tool::with_context(
         "fs.edit",
-        "Find-and-replace text in a file (first match only).\n\nExamples: rename a variable, fix a typo, update an import path, change a config value. Use start line to disambiguate when old text appears multiple times. For full rewrites, use fs.write.",
+        "Find-and-replace exact text in a file (first match only).\n\nExamples: rename a variable, fix a typo, update an import path, change a config value. Read the smallest matching window with fs.read, then pass that exact snippet here. Uses a streaming rewrite so large files do not need full reads.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -583,32 +780,7 @@ fn tool_fs_edit() -> Tool {
             "required": ["path", "old", "new"]
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
-            Box::pin(async move {
-                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                let raw_path = args
-                    .require_str_field("path")
-                    .map_err(invalid_input)?
-                    .to_owned();
-                let old = args
-                    .require_str_field("old")
-                    .map_err(invalid_input)?
-                    .to_owned();
-                let new = args
-                    .require_str_field("new")
-                    .map_err(invalid_input)?
-                    .to_owned();
-                let start = args.get_i64_field("start").unwrap_or(0).max(0) as usize;
-
-                let state = ctx.map(|c| c.state).unwrap_or_default();
-                let resolved = resolve_path(&state, &raw_path)?;
-
-                let text = read_text_file(&resolved)?;
-                let final_text = replace_text_from_line(&text, &old, &new, start, &resolved)?;
-                std::fs::write(&resolved, final_text).map_err(|e| {
-                    ConduitError::new(ErrorKind::Tool, format!("write failed: {e}"))
-                })?;
-                ok_val(format!("edited: {}", resolved.display()))
-            })
+            Box::pin(run_fs_edit(args, ctx))
         },
     )
 }
@@ -1331,6 +1503,11 @@ mod tests {
     use super::*;
     use crate::builtin::store::{FileTapeStore, ForkTapeStore};
     use serde_json::json;
+    use std::io::BufWriter;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    const LARGE_FILE_BYTES: u64 = 50 * 1024 * 1024;
 
     fn test_tape_service() -> (tempfile::TempDir, TapeService, String) {
         let tmp = tempfile::tempdir().unwrap();
@@ -1432,22 +1609,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fs_edit_rejects_large_files() {
+    async fn test_fs_read_preserves_original_newlines() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("huge.txt");
-        std::fs::File::create(&path)
-            .unwrap()
-            .set_len(MAX_FILE_BYTES + 1)
-            .unwrap();
-        let err = tool_fs_edit()
+        let path = tmp.path().join("note.txt");
+        std::fs::write(&path, "first\r\nsecond\r\nthird").unwrap();
+        let value = tool_fs_read()
             .run(
-                json!({"path": path.to_string_lossy(), "old": "a", "new": "b"}),
+                json!({"path": path.to_string_lossy(), "offset": 1, "limit": 1}),
                 Some(ToolContext::new("test-run")),
             )
             .await
-            .unwrap_err();
-        assert_eq!(err.kind, ErrorKind::Tool);
-        assert!(err.message.contains("file too large"));
+            .unwrap();
+        assert_eq!(value.as_str().unwrap(), "second\r\n");
+    }
+
+    #[tokio::test]
+    async fn test_fs_edit_streams_large_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("huge.txt");
+        let line = "a".repeat(8 * 1024);
+        let mut writer = BufWriter::new(std::fs::File::create(&path).unwrap());
+        for _ in 0..6_300 {
+            writeln!(writer, "{line}").unwrap();
+        }
+        writeln!(writer, "prefix NEEDLE suffix").unwrap();
+        for _ in 0..200 {
+            writeln!(writer, "{line}").unwrap();
+        }
+        writer.flush().unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > LARGE_FILE_BYTES);
+        tool_fs_edit()
+            .run(
+                json!({"path": path.to_string_lossy(), "old": "NEEDLE", "new": "updated"}),
+                Some(ToolContext::new("test-run")),
+            )
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("prefix updated suffix"));
+        assert!(!text.contains("prefix NEEDLE suffix"));
+    }
+
+    #[tokio::test]
+    async fn test_fs_edit_start_skips_earlier_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("note.txt");
+        std::fs::write(&path, "target\nkeep\ntarget\n").unwrap();
+        tool_fs_edit()
+            .run(
+                json!({"path": path.to_string_lossy(), "old": "target", "new": "done", "start": 2}),
+                Some(ToolContext::new("test-run")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "target\nkeep\ndone\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_fs_write_preserves_existing_permissions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("script.sh");
+        std::fs::write(&path, "echo hi\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        tool_fs_write()
+            .run(
+                json!({"path": path.to_string_lossy(), "content": "echo bye\n"}),
+                Some(ToolContext::new("test-run")),
+            )
+            .await
+            .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
     }
 
     #[test]

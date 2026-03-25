@@ -658,7 +658,19 @@ impl LLM {
             system_prompt,
             messages.as_deref(),
         );
-        let mut in_memory_msgs = initial_round_msgs.clone();
+
+        // Build the base context: tape history + current turn messages.
+        // Tape history is compact (spilled results, image placeholders).
+        // Current turn messages are full (images, complete content).
+        // This mirrors the stream() approach with prepend_tape_history.
+        let mut in_memory_msgs = if let Some(tape_name) = tape {
+            let tape_history = self.build_tape_messages(tape_name, tape_context).await;
+            let mut merged = initial_round_msgs.clone();
+            prepend_tape_history(&mut merged, tape_history);
+            merged
+        } else {
+            initial_round_msgs.clone()
+        };
 
         if let Some(tape_name) = tape
             && !initial_round_msgs.is_empty()
@@ -701,9 +713,9 @@ impl LLM {
                 ));
             }
 
-            let msgs = self
-                ._prepare_messages(tape, tape_context, &in_memory_msgs)
-                .await?;
+            // Use in_memory_msgs: tape history (compact) + current turn
+            // (full images, complete tool results from this run_tools call).
+            let msgs = in_memory_msgs.clone();
 
             let round = self._execute_tool_round(&msgs, &round_params).await?;
 
@@ -890,19 +902,44 @@ impl LLM {
         execution: &ToolExecution,
         in_memory_msgs: &mut Vec<Value>,
     ) -> Result<(), ConduitError> {
+        // Always maintain in_memory_msgs with full (unspilled) content so
+        // the current run_tools invocation sees complete context.
+        let assistant_msg = build_assistant_tool_call_message(response);
+        in_memory_msgs.push(assistant_msg);
+        for (i, result) in execution.tool_results.iter().enumerate() {
+            let call_id = execution
+                .tool_calls
+                .get(i)
+                .and_then(|c| c.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let content_str = match result {
+                Value::String(s) => s.clone(),
+                other => serde_json::to_string(other).unwrap_or_default(),
+            };
+            in_memory_msgs.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": content_str,
+            }));
+        }
+
+        // Persist to tape with spilled (compact) versions.
         if let Some(tape_name) = tape {
             let meta = serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
-            let assistant_msg = build_assistant_tool_call_message(response);
-            let assistant_text = assistant_msg
-                .get("content")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned);
             let spilled_calls: Vec<Value> = execution
                 .tool_calls
                 .iter()
                 .map(|call| self.maybe_spill_tool_call(call, tape_name))
                 .collect();
+            let assistant_text = in_memory_msgs
+                .iter()
+                .rev()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+                .and_then(|m| m.get("content"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
             self.async_tape
                 .append_entry(
                     tape_name,
@@ -923,42 +960,6 @@ impl LLM {
             self.async_tape
                 .append_entry(tape_name, &TapeEntry::tool_result(paired, meta))
                 .await?;
-        } else {
-            let mut assistant_msg = build_assistant_tool_call_message(response);
-            // Spill large arguments in the in-memory assistant message too
-            if let Some(calls) = assistant_msg
-                .get("tool_calls")
-                .and_then(|v| v.as_array())
-                .cloned()
-            {
-                let spilled: Vec<Value> = calls
-                    .iter()
-                    .map(|c| self.maybe_spill_tool_call_in_memory(c))
-                    .collect();
-                assistant_msg["tool_calls"] = Value::Array(spilled);
-            }
-            in_memory_msgs.push(assistant_msg);
-
-            for (i, result) in execution.tool_results.iter().enumerate() {
-                let call_id = execution
-                    .tool_calls
-                    .get(i)
-                    .and_then(|c| c.get("id"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let content_str = match result {
-                    Value::String(s) => s.clone(),
-                    other => serde_json::to_string(other).unwrap_or_default(),
-                };
-                let spilled_content = self
-                    .maybe_spill(&content_str, "in_memory", call_id)
-                    .unwrap_or(content_str);
-                in_memory_msgs.push(serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": spilled_content,
-                }));
-            }
         }
         Ok(())
     }
@@ -992,15 +993,6 @@ impl LLM {
     /// Spill tool call arguments if the arguments string is large.
     /// Returns a new tool call with truncated arguments, or the original.
     fn maybe_spill_tool_call(&self, call: &Value, tape_name: &str) -> Value {
-        self.spill_call_args(call, tape_name)
-    }
-
-    /// Same as [`maybe_spill_tool_call`] but for in-memory (non-tape) sessions.
-    fn maybe_spill_tool_call_in_memory(&self, call: &Value) -> Value {
-        self.spill_call_args(call, "in_memory")
-    }
-
-    fn spill_call_args(&self, call: &Value, tape_name: &str) -> Value {
         let call_id = call.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
         let Some(func) = call.get("function") else {
             return call.clone();

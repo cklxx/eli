@@ -44,6 +44,7 @@ base64 = "0.22"
 rand = "0.8"
 open = "5"
 axum = { version = "0.8", optional = true }
+tempfile = "3"
 
 [features]
 default = ["telegram", "gateway", "tape-viewer"]
@@ -56,9 +57,6 @@ name = "custom_tool"
 
 [[example]]
 name = "hook_plugin"
-
-[dev-dependencies]
-tempfile = "3"
 
 [package.metadata.docs.rs]
 all-features = true
