@@ -193,23 +193,28 @@ fn start_sidecar(wh: &crate::channels::webhook::WebhookSettings) -> Option<std::
 /// Wait for the sidecar to be ready and register its URL for the bridge tool.
 /// Skills are discovered from .agents/skills/ SKILL.md files (standard protocol)
 /// — the sidecar writes them to disk on startup.
+fn sidecar_retry_delay(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis((200u64 << attempt.min(4)).min(3000))
+}
+
+async fn sidecar_is_ready(client: &reqwest::Client, sidecar_url: &str) -> bool {
+    client
+        .get(format!("{sidecar_url}/health"))
+        .send()
+        .await
+        .is_ok_and(|resp| resp.status().is_success())
+}
+
 async fn wait_for_sidecar(sidecar_url: &str) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
-
     for attempt in 0..15u32 {
-        match client.get(format!("{sidecar_url}/health")).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                *crate::tools::SIDECAR_URL.lock().unwrap() = Some(sidecar_url.to_owned());
-                println!("Sidecar ready at {sidecar_url} (skills via .agents/skills/)");
-                return Ok(());
-            }
-            _ => {
-                if attempt < 14 {
-                    // Exponential backoff: 200, 400, 800, 1600, 3000, 3000... ms
-                    let delay_ms = (200u64 << (attempt).min(4)).min(3000);
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                }
-            }
+        if sidecar_is_ready(&client, sidecar_url).await {
+            *crate::tools::SIDECAR_URL.lock().unwrap() = Some(sidecar_url.to_owned());
+            println!("Sidecar ready at {sidecar_url} (skills via .agents/skills/)");
+            return Ok(());
+        }
+        if attempt < 14 {
+            tokio::time::sleep(sidecar_retry_delay(attempt)).await;
         }
     }
     anyhow::bail!("sidecar not reachable at {sidecar_url}");

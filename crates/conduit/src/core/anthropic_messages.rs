@@ -6,110 +6,165 @@ use crate::core::tool_calls::{
     normalize_tool_calls, tool_call_arguments_string, tool_call_id, tool_call_name,
 };
 
+struct ToolResolution {
+    next_index: usize,
+    resolved_ids: HashSet<String>,
+    tool_result_blocks: Vec<Value>,
+    trailing_user_blocks: Vec<Value>,
+}
+
 pub fn split_system_and_conversation(messages_payload: &[Value]) -> (Vec<String>, Vec<Value>) {
     let mut system_parts = Vec::new();
     let mut conversation = Vec::new();
     let mut index = 0;
 
     while index < messages_payload.len() {
-        let msg = &messages_payload[index];
-        let role = message_role(msg);
-
-        match role {
-            "system" | "developer" => {
-                if let Some(text) = extract_system_text(msg.get("content"))
-                    && !text.is_empty()
-                {
-                    system_parts.push(text);
-                }
-                index += 1;
-            }
-            "assistant" if has_tool_calls(msg) => {
-                let call_ids = tool_call_ids(msg);
-                let mut lookahead = index + 1;
-                let mut resolved_ids: HashSet<String> = HashSet::new();
-                let mut tool_result_blocks = Vec::new();
-                let mut trailing_user_blocks = Vec::new();
-
-                while lookahead < messages_payload.len() {
-                    let next = &messages_payload[lookahead];
-                    match message_role(next) {
-                        "assistant" => break,
-                        "tool" => {
-                            if let Some((tool_use_id, block)) = tool_result_block(next)
-                                && call_ids.contains(&tool_use_id)
-                            {
-                                resolved_ids.insert(tool_use_id);
-                                tool_result_blocks.push(block);
-                            }
-                        }
-                        "user" => trailing_user_blocks.extend(content_blocks(
-                            next.get("content").cloned().unwrap_or(Value::Null),
-                        )),
-                        "system" | "developer" => {}
-                        _ => trailing_user_blocks.extend(content_blocks(
-                            next.get("content").cloned().unwrap_or(Value::Null),
-                        )),
-                    }
-                    lookahead += 1;
-                }
-
-                if !resolved_ids.is_empty() {
-                    let assistant_blocks = assistant_content_blocks(msg, Some(&resolved_ids));
-                    if !assistant_blocks.is_empty() {
-                        conversation.push(serde_json::json!({
-                            "role": "assistant",
-                            "content": assistant_blocks,
-                        }));
-                    }
-
-                    tool_result_blocks.extend(trailing_user_blocks);
-                    if !tool_result_blocks.is_empty() {
-                        conversation.push(serde_json::json!({
-                            "role": "user",
-                            "content": tool_result_blocks,
-                        }));
-                    }
-
-                    index = lookahead;
-                } else {
-                    let assistant_blocks = assistant_content_blocks(msg, Some(&HashSet::new()));
-                    if !assistant_blocks.is_empty() {
-                        conversation.push(serde_json::json!({
-                            "role": "assistant",
-                            "content": assistant_blocks,
-                        }));
-                    }
-                    index += 1;
-                }
-            }
-            "tool" => {
-                index += 1;
-            }
-            "assistant" => {
-                let blocks = content_blocks(msg.get("content").cloned().unwrap_or(Value::Null));
-                if !blocks.is_empty() {
-                    conversation.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": blocks,
-                    }));
-                }
-                index += 1;
-            }
-            role => {
-                let blocks = content_blocks(msg.get("content").cloned().unwrap_or(Value::Null));
-                if !blocks.is_empty() {
-                    conversation.push(serde_json::json!({
-                        "role": role,
-                        "content": blocks,
-                    }));
-                }
-                index += 1;
-            }
-        }
+        index = split_message(messages_payload, index, &mut system_parts, &mut conversation);
     }
 
     (system_parts, normalize_messages(conversation))
+}
+
+fn split_message(
+    messages_payload: &[Value],
+    index: usize,
+    system_parts: &mut Vec<String>,
+    conversation: &mut Vec<Value>,
+) -> usize {
+    let msg = &messages_payload[index];
+    if collect_system_block(msg, system_parts) {
+        return index + 1;
+    }
+    if is_tool_assistant(msg) {
+        return process_tool_assistant(messages_payload, index, msg, conversation);
+    }
+    if message_role(msg) != "tool" {
+        push_conversation_entry(msg, conversation);
+    }
+    index + 1
+}
+
+fn collect_system_block(msg: &Value, system_parts: &mut Vec<String>) -> bool {
+    if !matches!(message_role(msg), "system" | "developer") {
+        return false;
+    }
+    if let Some(text) = extract_system_text(msg.get("content"))
+        && !text.is_empty()
+    {
+        system_parts.push(text);
+    }
+    true
+}
+
+fn is_tool_assistant(msg: &Value) -> bool {
+    message_role(msg) == "assistant" && has_tool_calls(msg)
+}
+
+fn process_tool_assistant(
+    messages_payload: &[Value],
+    index: usize,
+    msg: &Value,
+    conversation: &mut Vec<Value>,
+) -> usize {
+    let resolution = resolve_tool_results(messages_payload, index + 1, &tool_call_ids(msg));
+    if resolution.resolved_ids.is_empty() {
+        push_assistant_entry(msg, conversation, &HashSet::new());
+        return index + 1;
+    }
+    push_assistant_entry(msg, conversation, &resolution.resolved_ids);
+    push_tool_result_entry(resolution.tool_result_blocks, resolution.trailing_user_blocks, conversation);
+    resolution.next_index
+}
+
+fn resolve_tool_results(
+    messages_payload: &[Value],
+    mut lookahead: usize,
+    call_ids: &HashSet<String>,
+) -> ToolResolution {
+    let mut resolved_ids = HashSet::new();
+    let mut tool_result_blocks = Vec::new();
+    let mut trailing_user_blocks = Vec::new();
+
+    while lookahead < messages_payload.len() {
+        let next = &messages_payload[lookahead];
+        if message_role(next) == "assistant" {
+            break;
+        }
+        process_followup_message(
+            next,
+            call_ids,
+            &mut resolved_ids,
+            &mut tool_result_blocks,
+            &mut trailing_user_blocks,
+        );
+        lookahead += 1;
+    }
+
+    ToolResolution {
+        next_index: lookahead,
+        resolved_ids,
+        tool_result_blocks,
+        trailing_user_blocks,
+    }
+}
+
+fn process_followup_message(
+    msg: &Value,
+    call_ids: &HashSet<String>,
+    resolved_ids: &mut HashSet<String>,
+    tool_result_blocks: &mut Vec<Value>,
+    trailing_user_blocks: &mut Vec<Value>,
+) {
+    match message_role(msg) {
+        "tool" => resolve_tool_result(msg, call_ids, resolved_ids, tool_result_blocks),
+        "system" | "developer" => {}
+        _ => trailing_user_blocks.extend(message_blocks(msg)),
+    }
+}
+
+fn resolve_tool_result(
+    msg: &Value,
+    call_ids: &HashSet<String>,
+    resolved_ids: &mut HashSet<String>,
+    tool_result_blocks: &mut Vec<Value>,
+) {
+    if let Some((tool_use_id, block)) = tool_result_block(msg)
+        && call_ids.contains(&tool_use_id)
+    {
+        resolved_ids.insert(tool_use_id);
+        tool_result_blocks.push(block);
+    }
+}
+
+fn push_assistant_entry(
+    msg: &Value,
+    conversation: &mut Vec<Value>,
+    allowed_tool_ids: &HashSet<String>,
+) {
+    let blocks = assistant_content_blocks(msg, Some(allowed_tool_ids));
+    push_blocks("assistant", blocks, conversation);
+}
+
+fn push_tool_result_entry(
+    mut tool_result_blocks: Vec<Value>,
+    trailing_user_blocks: Vec<Value>,
+    conversation: &mut Vec<Value>,
+) {
+    tool_result_blocks.extend(trailing_user_blocks);
+    push_blocks("user", tool_result_blocks, conversation);
+}
+
+fn push_conversation_entry(msg: &Value, conversation: &mut Vec<Value>) {
+    push_blocks(message_role(msg), message_blocks(msg), conversation);
+}
+
+fn push_blocks(role: &str, blocks: Vec<Value>, conversation: &mut Vec<Value>) {
+    if !blocks.is_empty() {
+        conversation.push(serde_json::json!({
+            "role": role,
+            "content": blocks,
+        }));
+    }
 }
 
 pub fn normalize_messages(messages: Vec<Value>) -> Vec<Value> {
@@ -258,6 +313,10 @@ fn merge_blocks(existing: Value, new_content: Value) -> Vec<Value> {
     let mut blocks = content_blocks(existing);
     blocks.extend(content_blocks(new_content));
     blocks
+}
+
+fn message_blocks(msg: &Value) -> Vec<Value> {
+    content_blocks(msg.get("content").cloned().unwrap_or(Value::Null))
 }
 
 fn content_blocks(content: Value) -> Vec<Value> {

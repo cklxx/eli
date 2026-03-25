@@ -141,6 +141,10 @@ impl LLMCore {
         1u32.max(1 + self.max_retries)
     }
 
+    fn retry_attempts(&self) -> std::ops::Range<u32> {
+        0..self.max_attempts()
+    }
+
     /// Apply the custom error classifier, if set.
     pub(crate) fn custom_classify(&self, error: &ConduitError) -> Option<ErrorKind> {
         if let Some(ref classifier) = self.error_classifier
@@ -251,7 +255,6 @@ impl LLMCore {
     {
         let candidates = self.model_candidates(model, provider)?;
         let mut last_error: Option<ConduitError> = None;
-        let max_attempts = self.max_attempts();
 
         for (provider_name, model_id) in &candidates {
             let client = self.get_client(provider_name);
@@ -265,7 +268,7 @@ impl LLMCore {
                 self.api_format,
             );
 
-            for attempt in 0..max_attempts {
+            for attempt in self.retry_attempts() {
                 let transport = match runtime.selected_transport(
                     tools_payload.as_deref(),
                     false, // supports_responses -- caller can override
@@ -462,7 +465,6 @@ impl LLMCore {
     ) -> Result<(reqwest::Response, TransportKind, String, String), ConduitError> {
         let candidates = self.model_candidates(model, provider)?;
         let mut last_error: Option<ConduitError> = None;
-        let max_attempts = self.max_attempts();
 
         for (provider_name, model_id) in &candidates {
             let client = self.get_client(provider_name);
@@ -476,7 +478,7 @@ impl LLMCore {
                 self.api_format,
             );
 
-            for attempt in 0..max_attempts {
+            for attempt in self.retry_attempts() {
                 let transport =
                     match runtime.selected_transport(tools_payload.as_deref(), false, None) {
                         Ok(t) => t,

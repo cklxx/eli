@@ -91,17 +91,6 @@ fn detect_message_type(msg: &Message) -> &'static str {
     }
 }
 
-/// Map telegram message types to our [`MediaType`].
-fn msg_type_to_media_type(msg_type: &str) -> MediaType {
-    match msg_type {
-        "photo" | "sticker" => MediaType::Image,
-        "audio" | "voice" => MediaType::Audio,
-        "video" | "video_note" => MediaType::Video,
-        "document" => MediaType::Document,
-        _ => MediaType::Document,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // EliMessageFilter logic
 // ---------------------------------------------------------------------------
@@ -164,156 +153,105 @@ fn extract_caption(msg: &Message) -> Option<&str> {
 // Media extraction helpers
 // ---------------------------------------------------------------------------
 
-/// Build a [`MediaItem`] from a teloxide `Message`, if it contains media.
-fn extract_media_item(msg: &Message, bot: Bot) -> Option<MediaItem> {
-    let msg_type = detect_message_type(msg);
-    let _media_type = msg_type_to_media_type(msg_type);
+type MediaItemData = (MediaType, String, String, Option<String>);
 
+fn common_media_kind(msg: &Message) -> Option<&MediaKind> {
     match &msg.kind {
-        TgMessageKind::Common(common) => match &common.media_kind {
-            MediaKind::Photo(photo) => {
-                let largest = photo.photo.last()?;
-                let file_id = largest.file.id.clone();
-                let bot_clone = bot.clone();
-                let fetcher: DataFetcher = Arc::new(move || {
-                    let bot = bot_clone.clone();
-                    let fid = file_id.clone();
-                    Box::pin(async move { download_file(&bot, &fid).await })
-                });
-                Some(MediaItem {
-                    media_type: MediaType::Image,
-                    mime_type: "image/jpeg".to_owned(),
-                    filename: None,
-                    data_fetcher: Some(fetcher),
-                })
-            }
-            MediaKind::Audio(audio) => {
-                let file_id = audio.audio.file.id.clone();
-                let mime = audio
-                    .audio
-                    .mime_type
-                    .as_ref()
-                    .map(|m| m.to_string())
-                    .unwrap_or_else(|| "audio/mpeg".to_owned());
-                let fname = audio.audio.file_name.clone();
-                let bot_clone = bot.clone();
-                let fetcher: DataFetcher = Arc::new(move || {
-                    let bot = bot_clone.clone();
-                    let fid = file_id.clone();
-                    Box::pin(async move { download_file(&bot, &fid).await })
-                });
-                Some(MediaItem {
-                    media_type: MediaType::Audio,
-                    mime_type: mime,
-                    filename: fname,
-                    data_fetcher: Some(fetcher),
-                })
-            }
-            MediaKind::Voice(voice) => {
-                let file_id = voice.voice.file.id.clone();
-                let mime = voice
-                    .voice
-                    .mime_type
-                    .as_ref()
-                    .map(|m| m.to_string())
-                    .unwrap_or_else(|| "audio/ogg".to_owned());
-                let bot_clone = bot.clone();
-                let fetcher: DataFetcher = Arc::new(move || {
-                    let bot = bot_clone.clone();
-                    let fid = file_id.clone();
-                    Box::pin(async move { download_file(&bot, &fid).await })
-                });
-                Some(MediaItem {
-                    media_type: MediaType::Audio,
-                    mime_type: mime,
-                    filename: None,
-                    data_fetcher: Some(fetcher),
-                })
-            }
-            MediaKind::Video(video) => {
-                let file_id = video.video.file.id.clone();
-                let mime = video
-                    .video
-                    .mime_type
-                    .as_ref()
-                    .map(|m| m.to_string())
-                    .unwrap_or_else(|| "video/mp4".to_owned());
-                let fname = video.video.file_name.clone();
-                let bot_clone = bot.clone();
-                let fetcher: DataFetcher = Arc::new(move || {
-                    let bot = bot_clone.clone();
-                    let fid = file_id.clone();
-                    Box::pin(async move { download_file(&bot, &fid).await })
-                });
-                Some(MediaItem {
-                    media_type: MediaType::Video,
-                    mime_type: mime,
-                    filename: fname,
-                    data_fetcher: Some(fetcher),
-                })
-            }
-            MediaKind::VideoNote(vn) => {
-                let file_id = vn.video_note.file.id.clone();
-                let bot_clone = bot.clone();
-                let fetcher: DataFetcher = Arc::new(move || {
-                    let bot = bot_clone.clone();
-                    let fid = file_id.clone();
-                    Box::pin(async move { download_file(&bot, &fid).await })
-                });
-                Some(MediaItem {
-                    media_type: MediaType::Video,
-                    mime_type: "video/mp4".to_owned(),
-                    filename: None,
-                    data_fetcher: Some(fetcher),
-                })
-            }
-            MediaKind::Document(doc) => {
-                let file_id = doc.document.file.id.clone();
-                let mime = doc
-                    .document
-                    .mime_type
-                    .as_ref()
-                    .map(|m| m.to_string())
-                    .unwrap_or_else(|| "application/octet-stream".to_owned());
-                let fname = doc.document.file_name.clone();
-                let bot_clone = bot.clone();
-                let fetcher: DataFetcher = Arc::new(move || {
-                    let bot = bot_clone.clone();
-                    let fid = file_id.clone();
-                    Box::pin(async move { download_file(&bot, &fid).await })
-                });
-                Some(MediaItem {
-                    media_type: MediaType::Document,
-                    mime_type: mime,
-                    filename: fname,
-                    data_fetcher: Some(fetcher),
-                })
-            }
-            MediaKind::Sticker(sticker) => {
-                let file_id = sticker.sticker.file.id.clone();
-                let mime = if sticker.sticker.is_animated() {
-                    "video/webm"
-                } else {
-                    "image/webp"
-                }
-                .to_owned();
-                let bot_clone = bot.clone();
-                let fetcher: DataFetcher = Arc::new(move || {
-                    let bot = bot_clone.clone();
-                    let fid = file_id.clone();
-                    Box::pin(async move { download_file(&bot, &fid).await })
-                });
-                Some(MediaItem {
-                    media_type: MediaType::Image,
-                    mime_type: mime,
-                    filename: None,
-                    data_fetcher: Some(fetcher),
-                })
-            }
-            _ => None,
-        },
+        TgMessageKind::Common(common) => Some(&common.media_kind),
         _ => None,
     }
+}
+
+fn build_data_fetcher(bot: Bot, file_id: String) -> DataFetcher {
+    Arc::new(move || {
+        let bot = bot.clone();
+        let file_id = file_id.clone();
+        Box::pin(async move { download_file(&bot, &file_id).await })
+    })
+}
+
+fn media_item_data(
+    media_type: MediaType,
+    file_id: String,
+    mime_type: String,
+    filename: Option<String>,
+) -> MediaItemData {
+    (media_type, file_id, mime_type, filename)
+}
+
+fn mime_or_default<T: ToString>(mime_type: Option<&T>, default: &str) -> String {
+    mime_type
+        .map(ToString::to_string)
+        .unwrap_or_else(|| default.to_owned())
+}
+
+fn map_media_kind(media_kind: &MediaKind) -> Option<MediaItemData> {
+    match media_kind {
+        MediaKind::Photo(photo) => photo.photo.last().map(|size| {
+            media_item_data(
+                MediaType::Image,
+                size.file.id.clone(),
+                "image/jpeg".to_owned(),
+                None,
+            )
+        }),
+        MediaKind::Audio(audio) => Some(media_item_data(
+            MediaType::Audio,
+            audio.audio.file.id.clone(),
+            mime_or_default(audio.audio.mime_type.as_ref(), "audio/mpeg"),
+            audio.audio.file_name.clone(),
+        )),
+        MediaKind::Voice(voice) => Some(media_item_data(
+            MediaType::Audio,
+            voice.voice.file.id.clone(),
+            mime_or_default(voice.voice.mime_type.as_ref(), "audio/ogg"),
+            None,
+        )),
+        MediaKind::Video(video) => Some(media_item_data(
+            MediaType::Video,
+            video.video.file.id.clone(),
+            mime_or_default(video.video.mime_type.as_ref(), "video/mp4"),
+            video.video.file_name.clone(),
+        )),
+        MediaKind::VideoNote(video_note) => Some(media_item_data(
+            MediaType::Video,
+            video_note.video_note.file.id.clone(),
+            "video/mp4".to_owned(),
+            None,
+        )),
+        MediaKind::Document(document) => Some(media_item_data(
+            MediaType::Document,
+            document.document.file.id.clone(),
+            mime_or_default(
+                document.document.mime_type.as_ref(),
+                "application/octet-stream",
+            ),
+            document.document.file_name.clone(),
+        )),
+        MediaKind::Sticker(sticker) => Some(media_item_data(
+            MediaType::Image,
+            sticker.sticker.file.id.clone(),
+            if sticker.sticker.is_animated() {
+                "video/webm"
+            } else {
+                "image/webp"
+            }
+            .to_owned(),
+            None,
+        )),
+        _ => None,
+    }
+}
+
+/// Build a [`MediaItem`] from a teloxide `Message`, if it contains media.
+fn extract_media_item(msg: &Message, bot: Bot) -> Option<MediaItem> {
+    let (media_type, file_id, mime_type, filename) = map_media_kind(common_media_kind(msg)?)?;
+    Some(MediaItem {
+        media_type,
+        mime_type,
+        filename,
+        data_fetcher: Some(build_data_fetcher(bot, file_id)),
+    })
 }
 
 /// Download a file from Telegram by file ID. Returns an empty Vec on failure.

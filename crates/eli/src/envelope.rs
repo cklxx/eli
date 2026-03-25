@@ -1,5 +1,6 @@
 //! Utilities for reading and normalizing envelopes (serde_json::Value).
 
+use anyhow::anyhow;
 use serde_json::Value;
 
 use crate::types::Envelope;
@@ -11,6 +12,18 @@ pub trait ValueExt {
 
     /// Read a field as a string, with an optional default.
     fn field_str(&self, key: &str, default: &str) -> String;
+
+    /// Read a field as a string slice.
+    fn get_str_field(&self, key: &str) -> Option<&str>;
+
+    /// Read a required string field.
+    fn require_str_field(&self, key: &str) -> Result<&str, anyhow::Error>;
+
+    /// Read a field as an integer.
+    fn get_i64_field(&self, key: &str) -> Option<i64>;
+
+    /// Read a field as a boolean.
+    fn get_bool_field(&self, key: &str) -> Option<bool>;
 
     /// Get textual content from any envelope shape.
     fn content_text(&self) -> String;
@@ -34,6 +47,28 @@ impl ValueExt for Value {
             .and_then(|obj| obj.get(key))
             .map(value_to_string)
             .unwrap_or_else(|| default.to_owned())
+    }
+
+    fn get_str_field(&self, key: &str) -> Option<&str> {
+        self.get(key).and_then(Value::as_str)
+    }
+
+    fn require_str_field(&self, key: &str) -> Result<&str, anyhow::Error> {
+        self.get(key)
+            .ok_or_else(|| anyhow!("missing required argument '{key}'"))
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .ok_or_else(|| anyhow!("argument '{key}' must be a string, got {value}"))
+            })
+    }
+
+    fn get_i64_field(&self, key: &str) -> Option<i64> {
+        self.get(key).and_then(Value::as_i64)
+    }
+
+    fn get_bool_field(&self, key: &str) -> Option<bool> {
+        self.get(key).and_then(Value::as_bool)
     }
 
     fn content_text(&self) -> String {
@@ -75,6 +110,26 @@ fn field_of(message: &Envelope, key: &str, default: Option<&Value>) -> Option<Va
 #[cfg(test)]
 fn field_of_str(message: &Envelope, key: &str, default: &str) -> String {
     message.field_str(key, default)
+}
+
+#[cfg(test)]
+fn str_field_of(message: &Envelope, key: &str) -> Option<&str> {
+    message.get_str_field(key)
+}
+
+#[cfg(test)]
+fn required_str_field_of(message: &Envelope, key: &str) -> Result<&str, anyhow::Error> {
+    message.require_str_field(key)
+}
+
+#[cfg(test)]
+fn i64_field_of(message: &Envelope, key: &str) -> Option<i64> {
+    message.get_i64_field(key)
+}
+
+#[cfg(test)]
+fn bool_field_of(message: &Envelope, key: &str) -> Option<bool> {
+    message.get_bool_field(key)
 }
 
 #[cfg(test)]
@@ -215,6 +270,38 @@ mod tests {
     fn test_field_of_str_non_object_returns_default() {
         let msg = json!(42);
         assert_eq!(field_of_str(&msg, "anything", "fallback"), "fallback");
+    }
+
+    // -- get_*_field tests ---------------------------------------------------
+
+    #[test]
+    fn test_get_str_field() {
+        let msg = json!({"channel": "telegram", "count": 3});
+        assert_eq!(str_field_of(&msg, "channel"), Some("telegram"));
+        assert_eq!(str_field_of(&msg, "count"), None);
+    }
+
+    #[test]
+    fn test_require_str_field() {
+        let msg = json!({"channel": "telegram", "count": 3});
+        assert_eq!(required_str_field_of(&msg, "channel").unwrap(), "telegram");
+        assert_eq!(
+            required_str_field_of(&msg, "missing").unwrap_err().to_string(),
+            "missing required argument 'missing'"
+        );
+        assert_eq!(
+            required_str_field_of(&msg, "count").unwrap_err().to_string(),
+            "argument 'count' must be a string, got 3"
+        );
+    }
+
+    #[test]
+    fn test_get_i64_and_bool_field() {
+        let msg = json!({"count": 3, "background": true, "name": "eli"});
+        assert_eq!(i64_field_of(&msg, "count"), Some(3));
+        assert_eq!(i64_field_of(&msg, "name"), None);
+        assert_eq!(bool_field_of(&msg, "background"), Some(true));
+        assert_eq!(bool_field_of(&msg, "name"), None);
     }
 
     // -- content_of tests -----------------------------------------------------
