@@ -702,12 +702,16 @@ impl LLM {
             }
 
             // Build context from tape (includes history + current turn).
-            // Then restore the current turn's multimodal content which was
-            // stripped during tape persistence (image placeholders).
+            // On the first iteration only, restore the original multimodal
+            // user content (images) that was stripped during tape persistence.
+            // Subsequent iterations don't need images again — the model's own
+            // response already captured the image content in text form.
             let mut msgs = self
                 ._prepare_messages(tape, tape_context, &in_memory_msgs)
                 .await?;
-            if let Some(ref parts) = user_content {
+            if iteration == 1
+                && let Some(ref parts) = user_content
+            {
                 restore_last_user_content(&mut msgs, parts);
             }
 
