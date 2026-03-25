@@ -81,6 +81,7 @@ Non-trivial tasks follow phases. **Each phase runs in its own Agent context** to
 
 - **Self-correction**: On ANY user correction → codify a preventive feedback memory before resuming.
 - **Auto-continue**: Same decision ≥2 times in memory → proceed with inline note. Ask when ambiguous, irreversible, or no match.
+- **Opportunistic cleanup**: Reading code and spot something inelegant (dead code, unnecessary clone, unclear naming, redundant logic, etc.) → fix it in a separate commit, report the change inline, and log to `docs/experience/wins/YYYY-MM-DD-cleanup-slug.md`.
 - `cargo clippy` after non-trivial changes — CI treats warnings as errors.
 
 ---
