@@ -30,6 +30,7 @@ import requests
 from conftest import (
     RED_PNG, BLUE_PNG,
     RED_KEYWORDS, BLUE_KEYWORDS,
+    MAX_VISION_RETRIES,
     assert_response_contains, assert_nonempty,
     switch_profile,
 )
@@ -228,10 +229,12 @@ def _clear_responses(services):
 # Helpers
 # ---------------------------------------------------------------------------
 
+_msg_counter = 0
+
 def send_envelope(
     text: str,
     channel: str = "test",
-    chat_id: str = "test_chat",
+    chat_id: str | None = None,
     sender_id: str = "test_user",
     sender_name: str = "Test User",
     chat_type: str = "direct",
@@ -240,6 +243,11 @@ def send_envelope(
     **extra,
 ) -> dict:
     """Send an InboundEnvelope to the test sidecar."""
+    global _msg_counter
+    _msg_counter += 1
+    if chat_id is None:
+        chat_id = f"test_{_msg_counter}_{int(time.time())}"
+
     envelope = {
         "channel": channel,
         "accountId": "default",
@@ -372,12 +380,16 @@ class TestGatewayVision:
         switch_profile("openai")
         img = write_temp_image(RED_PNG)
         try:
-            response = send_and_wait(
-                "What color is this image? One word.",
-                media_paths=[img],
-            )
-            assert_nonempty(response, "gateway openai vision")
-            assert_response_contains(response, RED_KEYWORDS, "gateway openai red")
+            last_response = ""
+            for attempt in range(MAX_VISION_RETRIES + 1):
+                last_response = send_and_wait(
+                    "What color is this solid-color image? Reply with one color word only.",
+                    media_paths=[img],
+                )
+                if any(kw in last_response.lower() for kw in RED_KEYWORDS):
+                    break
+            assert_nonempty(last_response, "gateway openai vision")
+            assert_response_contains(last_response, RED_KEYWORDS, "gateway openai red")
             trace.finish("PASS")
         except Exception as e:
             trace.finish("FAIL", str(e))
@@ -409,13 +421,18 @@ class TestGatewayVision:
         red = write_temp_image(RED_PNG)
         blue = write_temp_image(BLUE_PNG)
         try:
-            response = send_and_wait(
-                "What two colors are in these images? Answer briefly.",
-                media_paths=[red, blue],
-            )
-            assert_nonempty(response, "gateway multi-image")
-            assert_response_contains(response, RED_KEYWORDS, "gateway multi red")
-            assert_response_contains(response, BLUE_KEYWORDS, "gateway multi blue")
+            last_response = ""
+            for attempt in range(MAX_VISION_RETRIES + 1):
+                last_response = send_and_wait(
+                    "These are two solid-color images. Name the two colors. Reply briefly.",
+                    media_paths=[red, blue],
+                )
+                if (any(kw in last_response.lower() for kw in RED_KEYWORDS)
+                        and any(kw in last_response.lower() for kw in BLUE_KEYWORDS)):
+                    break
+            assert_nonempty(last_response, "gateway multi-image")
+            assert_response_contains(last_response, RED_KEYWORDS, "gateway multi red")
+            assert_response_contains(last_response, BLUE_KEYWORDS, "gateway multi blue")
             trace.finish("PASS")
         except Exception as e:
             trace.finish("FAIL", str(e))

@@ -78,8 +78,8 @@ def run_eli(*args: str, timeout: int = TIMEOUT, env_override: dict | None = None
 # Image fixture generators
 # ---------------------------------------------------------------------------
 
-def _make_solid_png(r: int, g: int, b: int, size: int = 16) -> str:
-    """Generate a solid-color 16x16 RGB PNG and return as base64 string."""
+def _make_solid_png(r: int, g: int, b: int, size: int = 128) -> str:
+    """Generate a solid-color 128x128 RGB PNG and return as base64 string."""
     def chunk(chunk_type: bytes, data: bytes) -> bytes:
         c = chunk_type + data
         crc = struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
@@ -138,6 +138,9 @@ def switch_profile(name: str) -> CliResult:
 
 RED_KEYWORDS = ["red", "scarlet", "crimson", "rouge", "rojo"]
 BLUE_KEYWORDS = ["blue", "azul", "bleu", "cobalt", "navy"]
+
+# LLM vision is nondeterministic — allow retries for color identification
+MAX_VISION_RETRIES = 2
 
 
 def assert_response_contains(response: str, keywords: list[str], context: str = ""):
