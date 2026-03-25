@@ -37,7 +37,10 @@ pub fn spill_if_needed(
     let spill_path = spill_dir.join(format!("{call_id}.txt"));
     fs::write(&spill_path, content)?;
 
-    Ok(Some(build_truncated(content, &spill_path, config)))
+    // Canonicalize to absolute path so the model can read the file.
+    let absolute = spill_path.canonicalize().unwrap_or(spill_path);
+
+    Ok(Some(build_truncated(content, &absolute, config)))
 }
 
 /// Build the spill directory path for a given tape name.
@@ -426,5 +429,84 @@ mod tests {
         // Reversible
         let recovered = fs::read_to_string(dir.path().join("c2.txt")).unwrap();
         assert_eq!(recovered, content);
+    }
+
+    // -- Path is absolute and file is readable --
+
+    #[test]
+    fn spill_path_in_output_is_absolute() {
+        let dir = tempdir().unwrap();
+        let content = "x".repeat(600);
+        let truncated = spill_if_needed(&content, "abs_test", dir.path(), &DEFAULT_SPILL)
+            .unwrap()
+            .unwrap();
+
+        // Extract path from the omission notice
+        let path_str = truncated
+            .split("full output: ")
+            .nth(1)
+            .unwrap()
+            .split(']')
+            .next()
+            .unwrap();
+        let path = std::path::Path::new(path_str);
+
+        assert!(path.is_absolute(), "path should be absolute: {path_str}");
+        assert!(path.exists(), "file should exist at: {path_str}");
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            content,
+            "file should be readable with full content"
+        );
+    }
+
+    #[test]
+    fn spill_path_in_line_based_output_is_absolute() {
+        let dir = tempdir().unwrap();
+        let content: String = (0..100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let truncated = spill_if_needed(&content, "lines_abs", dir.path(), &DEFAULT_SPILL)
+            .unwrap()
+            .unwrap();
+
+        let path_str = truncated
+            .split("full output: ")
+            .nth(1)
+            .unwrap()
+            .split(']')
+            .next()
+            .unwrap();
+        let path = std::path::Path::new(path_str);
+
+        assert!(path.is_absolute(), "path should be absolute: {path_str}");
+        assert!(path.exists(), "file should exist at: {path_str}");
+        assert_eq!(fs::read_to_string(path).unwrap(), content);
+    }
+
+    #[test]
+    fn spill_path_readable_by_model_tool() {
+        // Simulate what the model would do: parse the path from the truncated
+        // output and read the file to get the full content.
+        let dir = tempdir().unwrap();
+        let original = "重要内容\n".repeat(200);
+        let truncated = spill_if_needed(&original, "model_read", dir.path(), &DEFAULT_SPILL)
+            .unwrap()
+            .unwrap();
+
+        // Model sees truncated output, extracts path
+        assert!(truncated.contains("full output:"));
+        let path_str = truncated
+            .split("full output: ")
+            .nth(1)
+            .unwrap()
+            .split(']')
+            .next()
+            .unwrap();
+
+        // Model calls fs.read with the path — should get exact original
+        let recovered = fs::read_to_string(path_str).unwrap();
+        assert_eq!(recovered, original);
     }
 }
