@@ -447,6 +447,7 @@ mod tests {
             wrap_tools: None,
             usage: Default::default(),
             save_events: Default::default(),
+            dispatch: None,
         }
     }
 

@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 
 use nexil::CancellationToken;
 
-use crate::control_plane::{BudgetLedger, TurnContext, turn_usage, with_turn_context};
+use crate::control_plane::{BudgetLedger, DispatchFn, TurnContext, turn_usage, with_turn_context};
 use crate::envelope::{ValueExt, unpack_batch_vec};
 use crate::hooks::{ChannelHook, EliHookSpec, HookRuntime, TapeStoreKind};
 use crate::types::{Envelope, MessageHandler, PromptValue, State, TurnResult, TurnUsageInfo};
@@ -115,11 +115,19 @@ impl EliFramework {
         }
 
         // Build turn context: cancellation token + tool wrapping from hooks.
+        let rt_clone = rt.clone();
+        let dispatch: DispatchFn = Arc::new(move |envelope| {
+            let rt = rt_clone.clone();
+            Box::pin(async move {
+                rt.call_dispatch_outbound(&envelope).await;
+            })
+        });
         let turn_ctx = TurnContext {
             cancellation: CancellationToken::new(),
             wrap_tools: Some(rt.wrap_tools_fn()),
             usage: Default::default(),
             save_events: Default::default(),
+            dispatch: Some(dispatch),
         };
 
         with_turn_context(turn_ctx, async {

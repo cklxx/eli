@@ -62,6 +62,7 @@ fn builtin_tools() -> Vec<Tool> {
         tool_decision_remove(),
         tool_web_fetch(),
         tool_subagent(),
+        tool_message_send(),
         tool_help(),
         tool_quit(),
     ];
@@ -1141,6 +1142,47 @@ fn tool_help() -> Tool {
 // ---------------------------------------------------------------------------
 // quit
 // ---------------------------------------------------------------------------
+
+fn tool_message_send() -> Tool {
+    Tool::with_context(
+        "message.send",
+        "Send a message to the user immediately, without waiting for the turn to finish.\n\nUse this to acknowledge the user's request before starting long-running work, or to provide progress updates mid-task. The message is dispatched to the same channel the user sent from.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "The message text to send to the user."}
+            },
+            "required": ["text"]
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move {
+                let text = args
+                    .require_str_field("text")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                if text.trim().is_empty() {
+                    return ok_val("skipped: empty message");
+                }
+
+                let ctx = ctx.ok_or_else(|| {
+                    ConduitError::new(ErrorKind::InvalidInput, "no tool context available")
+                })?;
+                let state = &ctx.state;
+
+                let envelope = serde_json::json!({
+                    "content": text,
+                    "session_id": state.get("session_id").and_then(|v| v.as_str()).unwrap_or(""),
+                    "channel": state.get("channel").and_then(|v| v.as_str()).unwrap_or(""),
+                    "chat_id": state.get("chat_id").and_then(|v| v.as_str()).unwrap_or(""),
+                    "output_channel": state.get("output_channel").and_then(|v| v.as_str()).unwrap_or(""),
+                });
+
+                crate::control_plane::dispatch_mid_turn(envelope).await;
+                ok_val("sent")
+            })
+        },
+    )
+}
 
 fn tool_quit() -> Tool {
     Tool::with_context(

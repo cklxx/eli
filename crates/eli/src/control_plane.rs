@@ -15,6 +15,10 @@ use serde_json::Value;
 /// Closure type for tool wrapping.
 pub type WrapToolsFn = Arc<dyn Fn(Vec<Tool>) -> Vec<Tool> + Send + Sync>;
 
+/// Closure type for mid-turn message dispatch.
+/// Accepts an envelope and sends it to the user immediately.
+pub type DispatchFn = Arc<dyn Fn(Value) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // Task-local turn context
 // ---------------------------------------------------------------------------
@@ -56,6 +60,8 @@ pub struct TurnContext {
     pub usage: TurnUsage,
     /// Accumulator for events that `save_state` hooks flush to tape after the turn.
     pub save_events: Arc<Mutex<Vec<(String, Value)>>>,
+    /// Optional callback to dispatch a message to the user mid-turn.
+    pub dispatch: Option<DispatchFn>,
 }
 
 /// Run `fut` with the given [`TurnContext`] bound to the current task.
@@ -100,6 +106,15 @@ pub fn drain_save_events() -> Vec<(String, Value)> {
             std::mem::take(&mut *ctx.save_events.lock().unwrap_or_else(|e| e.into_inner()))
         })
         .unwrap_or_default()
+}
+
+/// Dispatch a message to the user mid-turn (e.g. from a tool handler).
+/// Returns immediately if no dispatch function is set.
+pub async fn dispatch_mid_turn(envelope: Value) {
+    let dispatch = TURN_CTX.try_with(|ctx| ctx.dispatch.clone()).ok().flatten();
+    if let Some(f) = dispatch {
+        f(envelope).await;
+    }
 }
 
 /// Read the tool-wrapping function from the current turn, if any.
@@ -228,6 +243,7 @@ mod tests {
             wrap_tools: None,
             usage: Default::default(),
             save_events: Default::default(),
+            dispatch: None,
         };
         let result = with_turn_context(ctx, async {
             let t = turn_cancellation().unwrap();

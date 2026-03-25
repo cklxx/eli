@@ -295,6 +295,7 @@ const HOOK_NAMES: &[&str] = &[
 /// - **Non-upgraded hooks** (`build_user_prompt`, `save_state`, `render_outbound`,
 ///   `dispatch_outbound`, `on_error`, `register_cli_commands`):
 ///   A panic is caught and logged; execution continues to the next plugin.
+#[derive(Clone)]
 pub struct HookRuntime {
     plugins: Vec<Arc<dyn EliHookSpec>>,
 }
