@@ -6,11 +6,21 @@ use std::sync::Arc;
 use reqwest::Client;
 
 /// A key that uniquely identifies a cached HTTP client instance.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ClientCacheKey {
     pub provider: String,
     pub api_key: Option<String>,
     pub api_base: Option<String>,
+}
+
+impl std::fmt::Debug for ClientCacheKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientCacheKey")
+            .field("provider", &self.provider)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("api_base", &self.api_base)
+            .finish()
+    }
 }
 
 impl ClientCacheKey {

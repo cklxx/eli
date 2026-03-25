@@ -46,8 +46,8 @@ def _fetch_page(url: str, max_bytes: int = 200_000) -> dict:
 
     # Minimal HTML → text: strip tags
     import re
-    text = re.sub(r"<script[^>]*>.*?</script>", "", raw, flags=re.S | re.I)
-    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.S | re.I)
+    text = re.sub(r"<script[^>]*>.*?</script\s*>", "", raw, flags=re.S | re.I)
+    text = re.sub(r"<style[^>]*>.*?</style\s*>", "", text, flags=re.S | re.I)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
 

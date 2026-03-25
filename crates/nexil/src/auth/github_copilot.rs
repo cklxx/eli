@@ -57,7 +57,7 @@ pub enum GitHubCopilotOAuthLoginError {
 // ---------------------------------------------------------------------------
 
 /// Persisted OAuth tokens for GitHub Copilot sessions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GitHubCopilotOAuthTokens {
     pub github_token: String,
     #[serde(default = "default_bearer")]
@@ -74,6 +74,24 @@ pub struct GitHubCopilotOAuthTokens {
     pub email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enterprise_url: Option<String>,
+}
+
+impl std::fmt::Debug for GitHubCopilotOAuthTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubCopilotOAuthTokens")
+            .field("github_token", &"[REDACTED]")
+            .field("github_token_type", &self.github_token_type)
+            .field("github_scope", &self.github_scope)
+            .field("expires_at", &self.expires_at)
+            .field(
+                "account_id",
+                &self.account_id.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("login", &self.login)
+            .field("email", &self.email.as_ref().map(|_| "[REDACTED]"))
+            .field("enterprise_url", &self.enterprise_url)
+            .finish()
+    }
 }
 
 fn default_bearer() -> String {

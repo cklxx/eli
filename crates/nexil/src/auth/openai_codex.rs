@@ -53,13 +53,27 @@ pub enum CodexOAuthLoginError {
 // ---------------------------------------------------------------------------
 
 /// Persisted OAuth tokens for the OpenAI Codex flow.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OpenAICodexOAuthTokens {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+}
+
+impl std::fmt::Debug for OpenAICodexOAuthTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAICodexOAuthTokens")
+            .field("access_token", &"[REDACTED]")
+            .field("refresh_token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field(
+                "account_id",
+                &self.account_id.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
