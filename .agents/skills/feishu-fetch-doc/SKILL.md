@@ -1,69 +1,73 @@
 ---
 name: feishu-fetch-doc
-description: 获取飞书云文档内容。返回 Markdown，支持处理文档中的图片、文件和画板。
+description: Fetch Feishu cloud document content as Markdown, with support for images, files, and whiteboards.
 ---
+
+# feishu-fetch-doc
 
 > **Tool calling:** Use `sidecar(tool="<tool_name>", params={...})` to call tools in this skill.
 
-# feishu_fetch_doc
+Fetches Feishu cloud document content in Lark-flavored Markdown format. Media items (images, files, whiteboards) are returned as token references and must be downloaded separately.
 
-获取飞书云文档的 Markdown 内容（Lark-flavored 格式）。
+## Quick Reference
 
-## 重要：图片、文件、画板的处理
+| Intent | Tool | Key Params |
+|--------|------|------------|
+| Fetch document text | `feishu_mcp_fetch_doc` | doc_id |
+| Download image/file/whiteboard | `feishu_doc_media` | action=download, resource_token, resource_type=media, output_path |
+| Resolve wiki token type | `feishu_wiki_space_node` | action=get, node_token |
+| Read/write spreadsheet | `feishu_sheet` | spreadsheet_token |
+| Operate on bitable | `feishu_bitable_*` | app_token |
 
-**文档中的图片、文件、画板需要通过 `feishu_doc_media`（action: download）工具单独获取！**
+## Tools
 
-### 识别格式
+### feishu_mcp_fetch_doc
 
-返回的 Markdown 中，媒体文件以 HTML 标签形式出现：
+Fetches the Markdown content of a Feishu cloud document.
 
-- **图片**：`<image token="..." width="..." height="..." align="..."/>`
-- **文件**：`<view type="1"><file token="..." name="..."/></view>`
-- **画板**：`<whiteboard token="..."/>`
+**Parameters:**
 
-### 获取步骤
+- **`doc_id`** (required): Accepts a document URL or token directly.
+  - URL: `https://xxx.feishu.cn/docx/Z1FjxxxxxxxxxxxxxxxxxxxtnAc` (token extracted automatically)
+  - Token: `Z1FjxxxxxxxxxxxxxxxxxxxtnAc`
+  - Wiki URL/token also supported: `https://xxx.feishu.cn/wiki/Z1FjxxxxxxxxxxxxxxxxxxxtnAc`
 
-1. 从 HTML 标签中提取 `token` 属性值
-2. 调用 `feishu_doc_media`（action: download, resource_token: 提取的token, resource_type: media, output_path: 保存路径）
+### feishu_doc_media (action: download)
 
-## 参数
+Downloads media items referenced in the document. Images, files, and whiteboards appear in the returned Markdown as HTML tags:
 
-- **`doc_id`**（必填）：支持直接传文档 URL 或 token
-  - 直接传 URL：`https://xxx.feishu.cn/docx/Z1FjxxxxxxxxxxxxxxxxxxxtnAc`（系统自动提取 token）
-  - 直接传 token：`Z1FjxxxxxxxxxxxxxxxxxxxtnAc`
-  - 知识库 URL/token 也支持：`https://xxx.feishu.cn/wiki/Z1FjxxxxxxxxxxxxxxxxxxxtnAc` 或 `Z1FjxxxxxxxxxxxxxxxxxxxtnAc`
+- **Images**: `<image token="..." width="..." height="..." align="..."/>`
+- **Files**: `<view type="1"><file token="..." name="..."/></view>`
+- **Whiteboards**: `<whiteboard token="..."/>`
 
-## Wiki URL 处理策略
+**Steps to download:**
 
-知识库链接（`/wiki/TOKEN`）背后可能是云文档、电子表格、多维表格等不同类型的文档。**不能直接假设是云文档**，必须先查询实际类型。
+1. Extract the `token` attribute from the HTML tag
+2. Call `feishu_doc_media` with action=download, resource_token=extracted_token, resource_type=media, output_path=save_path
 
-### 处理流程
+## Wiki URL Handling
 
-1. **先调用 `feishu_wiki_space_node`（action: get）解析 wiki token**
-2. **从返回的 `node` 中获取 `obj_type` 和 `obj_token`**
-3. **根据 `obj_type` 调用对应工具**：
+Wiki links (`/wiki/TOKEN`) can point to different document types (cloud doc, spreadsheet, bitable, etc.). You must resolve the actual type before fetching.
 
-| obj_type | 工具 | 传参 |
-|----------|------|------|
+**Workflow:**
+
+1. Call `feishu_wiki_space_node` (action=get) to resolve the wiki token
+2. Read `obj_type` and `obj_token` from the returned `node`
+3. Call the appropriate tool based on `obj_type`:
+
+| obj_type | Tool | Parameter |
+|----------|------|-----------|
 | `docx` | `feishu_mcp_fetch_doc` | doc_id = obj_token |
 | `sheet` | `feishu_sheet` | spreadsheet_token = obj_token |
-| `bitable` | `feishu_bitable_*` 系列 | app_token = obj_token |
-| 其他 | 告知用户暂不支持该类型 | — |
+| `bitable` | `feishu_bitable_*` series | app_token = obj_token |
+| other | Inform user this type is not supported | -- |
 
-> 完整示例见 `$SKILL_DIR/references/examples.md`
+> See `$SKILL_DIR/references/examples.md` for full examples.
 
-## 工具组合
+## Pitfalls
 
-| 需求 | 工具 |
-|------|------|
-| 获取文档文本 | `feishu_mcp_fetch_doc` |
-| 下载图片/文件/画板 | `feishu_doc_media`（action: download） |
-| 解析 wiki token 类型 | `feishu_wiki_space_node`（action: get） |
-| 读写电子表格 | `feishu_sheet` |
-| 操作多维表格 | `feishu_bitable_*` 系列 |
-
-## 不要这样做
-
-- ❌ 拿到 wiki URL 直接当 docx fetch → ✅ 先用 feishu_wiki_space_node get 查 obj_type
-- ❌ 期望 fetch_doc 返回图片内容 → ✅ 图片以 token 标签返回，需用 feishu_doc_media download 单独获取
-- ❌ 忽略返回内容中的 `<image>`/`<file>`/`<whiteboard>` 标签 → ✅ 提取 token 并告知用户或按需下载
+| Wrong | Right |
+|-------|-------|
+| Treat a wiki URL directly as a docx and fetch it | Use `feishu_wiki_space_node` get to resolve `obj_type` first |
+| Expect `fetch_doc` to return image content inline | Images are returned as token tags; use `feishu_doc_media` download to retrieve them |
+| Ignore `<image>`/`<file>`/`<whiteboard>` tags in the output | Extract tokens and download as needed, or inform the user |

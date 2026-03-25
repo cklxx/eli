@@ -1,75 +1,81 @@
 ---
 name: feishu-update-doc
-description: 更新飞书云文档。支持追加、覆盖、定位替换、全文替换、前后插入、删除 7 种模式。
+description: Update a Feishu cloud document with 7 modes including append, overwrite, targeted replace, insert, and delete.
 ---
+
+# feishu-update-doc
 
 > **Tool calling:** Use `sidecar(tool="<tool_name>", params={...})` to call tools in this skill.
 
-# feishu_update_doc
+Updates Feishu cloud documents with 7 operation modes. Prefer targeted updates over overwrite, which clears the entire document and may destroy images, comments, and collaboration history.
 
-更新飞书云文档，支持 7 种模式。优先局部更新，慎用 overwrite（会清空文档，可能丢失图片、评论等）。
+## Quick Reference
 
-## 模式速查
+| Intent | Tool | Key Params |
+|--------|------|------------|
+| Append to end | `feishu_update_doc` | mode=append, markdown |
+| Full overwrite (destructive) | `feishu_update_doc` | mode=overwrite, markdown |
+| Replace matched range | `feishu_update_doc` | mode=replace_range, selection, markdown |
+| Find-and-replace all | `feishu_update_doc` | mode=replace_all, selection, markdown (empty string = delete) |
+| Insert before match | `feishu_update_doc` | mode=insert_before, selection, markdown |
+| Insert after match | `feishu_update_doc` | mode=insert_after, selection, markdown |
+| Delete matched range | `feishu_update_doc` | mode=delete_range, selection |
 
-| mode | 用途 | 需要定位 | 需要 markdown |
-|------|------|---------|--------------|
-| append | 追加到末尾 | 否 | 是 |
-| overwrite | 完全覆盖（危险） | 否 | 是 |
-| replace_range | 定位替换（唯一匹配） | 是 | 是 |
-| replace_all | 全文替换（多处匹配） | 是 | 是（可为空串=删除） |
-| insert_before | 在匹配前插入 | 是 | 是 |
-| insert_after | 在匹配后插入 | 是 | 是 |
-| delete_range | 删除匹配内容 | 是 | 否 |
+## Modes
 
-可选参数 `new_title`：纯文本，1-800 字符，可与任何 mode 配合。
+| Mode | Purpose | Requires Selection | Requires Markdown |
+|------|---------|-------------------|-------------------|
+| append | Append to end | No | Yes |
+| overwrite | Full overwrite (destructive) | No | Yes |
+| replace_range | Replace a unique match | Yes | Yes |
+| replace_all | Replace all occurrences | Yes | Yes (empty string = delete) |
+| insert_before | Insert before match | Yes | Yes |
+| insert_after | Insert after match | Yes | Yes |
+| delete_range | Delete matched content | Yes | No |
+
+Optional parameter `new_title`: plain text, 1-800 characters, combinable with any mode.
+
+## Selection Methods (choose one)
+
+### selection_with_ellipsis -- Content-based selection
+
+- **Range match**: `start_text...end_text` -- matches everything from start to end; use 10-20 characters for uniqueness
+- **Exact match**: `full_text` (no `...`) -- matches the complete text literally
+- **Escaping**: literal `...` must be written as `\.\.\.`
+
+### selection_by_title -- Heading-based selection
+
+Format: `## Section Title` (with or without `#` prefix). Automatically selects the entire section from the heading up to the next heading of the same or higher level.
+
+## Constraints
+
+### Use small, precise replacements
+The smaller the selection range, the safer the operation. For nested blocks (tables, columns), target only the specific text that needs changing.
+
+### Protect non-rebuildable content
+Images, whiteboards, spreadsheets, bitables, and tasks are stored as tokens and cannot be read out and written back intact. Avoid selecting these areas; target only plain text.
+
+### Insert mode boundaries
+- `insert_after` inserts after the **end** of the matched range
+- `insert_before` inserts before the **start** of the matched range
+
+When expanding a selection for uniqueness, verify the boundary is still the intended insertion point.
+
+### Prefer incremental over wholesale
+Use multiple small replacements for multiple changes. Overwrite destroys media, comments, and collaboration history.
+
+## Pitfalls
+
+| Wrong | Right |
+|-------|-------|
+| Large-range replace covering areas with images/whiteboards | Target only the plain text portion to avoid breaking token references |
+| Casually use overwrite mode | Overwrite destroys images and comments; prefer targeted updates |
+| Don't escape literal `...` in selection_with_ellipsis | Use `\.\.\.` for a literal three-dot sequence |
+| Expand selection for insert but ignore boundary shift | `insert_after` inserts after the match end; `insert_before` before the match start |
 
 ---
 
-## 定位方式（二选一）
-
-### selection_with_ellipsis — 内容定位
-
-- **范围匹配**：`开头内容...结尾内容` — 匹配从开头到结尾的所有内容，建议 10-20 字符确保唯一
-- **精确匹配**：`完整内容`（不含 `...`）— 匹配完整文本
-- **转义**：字面量 `...` 用 `\.\.\.` 表示
-
-### selection_by_title — 标题定位
-
-格式：`## 章节标题`（可带或不带 # 前缀）。自动定位整个章节（从该标题到下一个同级或更高级标题之前）。
-
----
-
-## 核心约束
-
-### 小粒度精确替换
-定位范围越小越安全。表格、分栏等嵌套块应精确定位到需要修改的文本，避免影响其他内容。
-
-### 保护不可重建的内容
-图片、画板、电子表格、多维表格、任务等以 token 形式存储，无法读出后原样写入。替换时避开这些区域，精确定位到纯文本部分。
-
-### insert 模式的边界
-- `insert_after` → 插入在匹配范围的**结尾**之后
-- `insert_before` → 插入在匹配范围的**开头**之前
-
-扩大定位范围确保唯一性时，注意边界仍是期望的插入点。
-
-### 分步优于整体
-多处修改时用多次小范围替换。overwrite 会丢失媒体、评论、协作历史。
-
----
-
-## 不要这样做
-
-| 错误做法 | 正确做法 |
-|---------|---------|
-| 大范围替换包含图片/画板的区域 | 精确定位到纯文本部分，避免破坏 token 引用 |
-| 随意使用 overwrite 模式 | overwrite 会丢失图片、评论，优先用局部更新 |
-| selection_with_ellipsis 中真正的 `...` 不转义 | 字面量三个点用 `\.\.\.` |
-| insert 时扩大定位范围但忽略边界变化 | insert_after 插入在匹配末尾之后，insert_before 在开头之前 |
-
----
-
-> 📚 详细参考：使用 `fs.read` 读取
-> - `$SKILL_DIR/references/examples.md` — 全部 7 种模式的使用示例
-> - `$SKILL_DIR/references/appendix.md` — 返回值格式、new_title 参数详情
-> - Markdown 语法参考见 feishu-create-doc 技能文档
+> Detailed references: use `fs.read` to view
+> - `$SKILL_DIR/references/examples.md` -- examples for all 7 modes
+> - `$SKILL_DIR/references/appendix.md` -- return value format, new_title parameter details
+> - Markdown syntax reference: see the feishu-create-doc skill documentation

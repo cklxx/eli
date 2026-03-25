@@ -1,22 +1,28 @@
 ---
 name: feishu-chat
-description: "获取飞书群组的成员列表。当用户需要查看某个群里有哪些人时使用。"
+description: "Retrieve the member list of a Feishu group chat. Use when the user wants to see who is in a specific group."
 ---
+
+# feishu-chat
 
 > **Tool calling:** Use `sidecar(tool="<tool_name>", params={...})` to call tools in this skill.
 
-## 快速索引
+Fetches the member list for a specified Feishu group chat.
 
-| 用户意图 | 工具 | 关键参数 |
-|---------|------|---------|
-| 查看群成员列表 | feishu_chat_members | chat_id |
+## Quick Reference
 
-## 工具说明
+| Intent | Tool | Key Params |
+|--------|------|------------|
+| View group member list | feishu_chat_members | chat_id |
+
+## Tools
 
 ### feishu_chat_members
-以用户的身份获取指定群组的成员列表。返回成员信息，包含成员 ID、姓名等。注意：不会返回群组内的机器人成员。
+Retrieves the member list for a specified group chat, running as the user. Returns member information including member ID, name, etc. Note: bot members in the group are not included in the results.
 
-## 不要这样做
+## Pitfalls
 
-- ❌ 搜索群聊用 feishu_chat_members → ✅ 搜索群用 feishu skill 的 feishu_chat search
-- ❌ 不知道 chat_id 就猜一个 → ✅ 先用 feishu skill 的 feishu_chat search 搜索群聊获取 chat_id
+| Wrong | Right |
+|-------|-------|
+| Using feishu_chat_members to search for group chats | Use feishu_chat search from the feishu skill to search chats |
+| Guessing a chat_id when you don't know it | First use feishu_chat search from the feishu skill to find the chat and obtain its chat_id |

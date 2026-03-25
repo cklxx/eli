@@ -1,6 +1,6 @@
 ---
 name: notebooklm-cli
-description: NotebookLM 独立 CLI skill：本地直接调 `nlm`，统一 `command/op`，返回结构化结果。
+description: Manage NotebookLM notebooks, sources, queries, reports, and audio studios via a local CLI wrapper.
 triggers:
   intent_patterns:
     - "notebooklm|notebook lm|nlm|音频概览|podcast|research notebook"
@@ -15,62 +15,70 @@ cooldown: 20
 
 # notebooklm-cli
 
-独立本地运行，不依赖任何 channel 注册。
-统一入口：
+Local CLI wrapper around `nlm` for managing NotebookLM resources. Unified `command/op` interface with structured JSON output.
+
+## Quick Reference
+
+| Intent | Command | Key Params |
+|--------|---------|------------|
+| Check auth | `auth check` | — |
+| Create notebook | `notebook create` | `--title` |
+| List notebooks | `notebook list` | — |
+| Add URL source | `source add_url` | `--notebook_id`, `--url` |
+| Query a notebook | `query` | `--notebook_id`, `--question` |
+| Generate report | `report` | `--notebook_id`, `--confirm true` |
+| Audio studio status | `studio status` | `--notebook_id` |
+| Get help | `help` | `--topic` |
+
+## Usage
 
 ```bash
 python3 $SKILL_DIR/run.py <command> [op] [--flag value ...]
 ```
 
-## 渐进式 help（给 LLM 先学契约）
+## Progressive Help
 
-- `overview`：入口、环境变量、命令总览
-- `schema`：全部命令契约（推荐机器读取）
-- `<command>`：单命令契约
-- `progressive`：overview + 各命令契约链路
+Retrieve contract documentation for LLM or human consumption:
 
 ```bash
-python3 $SKILL_DIR/run.py help --topic overview
-python3 $SKILL_DIR/run.py help --topic schema
-python3 $SKILL_DIR/run.py help --topic progressive
+python3 $SKILL_DIR/run.py help --topic overview      # entry point, env vars, command summary
+python3 $SKILL_DIR/run.py help --topic schema         # full command contracts (machine-readable)
+python3 $SKILL_DIR/run.py help --topic progressive    # overview + per-command contract chain
+python3 $SKILL_DIR/run.py help --topic source --include_cli true   # include raw CLI help
 ```
 
-如果需要底层原生命令帮助，可加：
-
-```bash
-python3 $SKILL_DIR/run.py help --topic source --include_cli true
-```
-
-## 输入契约（统一）
+## Input Contract
 
 - `command`: `help | auth | notebook | source | query | report | studio | raw`
-- `op`: 命令内操作；不填走默认 op（见 `help/schema`）
-- 兼容旧别名：`action`, `*_action`，新代码统一用 `command/op`
-- 统一返回字段：`success, command, exit_code, stdout, stderr, hints, error?`
+- `op`: sub-operation within a command; omit for default op (see `help/schema`).
+- Legacy aliases (`action`, `*_action`) still work; prefer `command/op` in new code.
+- Unified response fields: `success, command, exit_code, stdout, stderr, hints, error?`
 
-## 命令总览（精简）
+## Commands
 
-- `auth`: 登录与 profile 管理（`profile_delete` 强制 `confirm=true`）
-- `notebook`: list/create/get/describe/rename/query/delete（delete 强制确认）
-- `source`: list/add_*/get/describe/content/rename/delete（delete 强制确认）
-- `query`: notebook query 快捷入口
-- `report`: create（默认），强制确认，支持 format/prompt/language/source_ids
-- `studio`: status/rename/delete（delete 强制确认）
-- `raw`: 透传 argv；禁止 `nlm chat start`；delete 需 `confirm=true`
+| Command | Operations | Notes |
+|---------|-----------|-------|
+| `auth` | login, check, profile_delete | `profile_delete` requires `confirm=true` |
+| `notebook` | list, create, get, describe, rename, query, delete | `delete` requires confirmation |
+| `source` | list, add_*, get, describe, content, rename, delete | `delete` requires confirmation |
+| `query` | — | Shortcut for notebook query |
+| `report` | create (default) | Requires `--confirm true`; supports `format`, `prompt`, `language`, `source_ids` |
+| `studio` | status, rename, delete | `delete` requires confirmation |
+| `raw` | — | Pass-through to `nlm` argv; `nlm chat start` is forbidden |
 
-## 最小 E2E 示例
+## Minimal End-to-End Example
 
 ```bash
 python3 $SKILL_DIR/run.py auth check
 python3 $SKILL_DIR/run.py notebook create --title 'NLM E2E'
 python3 $SKILL_DIR/run.py source add_url --notebook_id '<nb-id>' --url https://example.com/article
-python3 $SKILL_DIR/run.py query --notebook_id '<nb-id>' --question '总结 3 个关键结论'
+python3 $SKILL_DIR/run.py query --notebook_id '<nb-id>' --question 'Summarize 3 key conclusions'
 python3 $SKILL_DIR/run.py report --notebook_id '<nb-id>' --confirm true
 python3 $SKILL_DIR/run.py studio status --notebook_id '<nb-id>'
 ```
 
-## 规则
+## Constraints
 
-- 删除前必须显式确认：`confirm=true`。
-- 禁止交互式 `nlm chat start`。
-- 鉴权失败先执行 `auth/login` 再重试业务命令。
+- Deletion requires explicit confirmation: `confirm=true`.
+- Interactive `nlm chat start` is forbidden.
+- On auth failure, run `auth login` first, then retry the business command.

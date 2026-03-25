@@ -1,12 +1,14 @@
 ---
 name: feishu-channel-rules
-description: 飞书频道输出规则。控制 Lark 会话中的消息格式和写作风格。
+description: Control message formatting and writing style for Lark/Feishu conversations.
 alwaysActive: true
 ---
 
+# feishu-channel-rules
+
 > **Tool calling:** Use `sidecar(tool="<tool_name>", params={...})` to call tools in this skill.
 
-# Lark Output Rules
+Defines output formatting and writing style rules for messages sent in Lark/Feishu conversations.
 
 ## Writing Style
 
@@ -14,12 +16,14 @@ alwaysActive: true
 - Prefer plain sentences over bullet lists when a brief answer suffices
 - Get to the point and stop — no need for a summary paragraph every time
 
-## Note
+## Constraints
 
 - Lark Markdown differs from standard Markdown in some ways; when unsure, refer to `$SKILL_DIR/references/markdown-syntax.md`
 
-## 不要这样做
+## Pitfalls
 
-- ❌ 在飞书消息中使用标准 Markdown 语法 → ✅ 使用 Lark Markdown，不确定时查阅 `$SKILL_DIR/references/markdown-syntax.md`
-- ❌ 每次回复都加总结段落 → ✅ 简短直接，像同事对话
-- ❌ 大量使用 bullet list → ✅ 简短回答用平铺句子即可
+| Wrong | Right |
+|-------|-------|
+| Use standard Markdown syntax in Feishu messages | Use Lark Markdown; consult `$SKILL_DIR/references/markdown-syntax.md` when unsure |
+| Add a summary paragraph to every reply | Keep it short and direct, like a coworker conversation |
+| Overuse bullet lists | Use plain sentences for brief answers |

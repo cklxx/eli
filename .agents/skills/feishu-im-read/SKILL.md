@@ -1,76 +1,74 @@
 ---
 name: feishu-im-read
-description: 飞书 IM 消息读取。支持会话消息获取、话题回复、跨会话搜索、资源下载。
+description: Read Feishu IM messages. Supports conversation history, thread replies, cross-conversation search, and resource downloads.
 ---
+
+# feishu-im-read
 
 > **Tool calling:** Use `sidecar(tool="<tool_name>", params={...})` to call tools in this skill.
 
-# 飞书 IM 消息读取
+Read and search Feishu IM messages using user identity. Supports conversation history retrieval, thread reply expansion, cross-conversation search, and image/file resource downloads.
 
-## 执行前必读
+## Prerequisites
 
-- 所有工具以用户身份调用，只能读取用户有权限的会话
-- `open_id` 和 `chat_id` **二选一**，优先 `chat_id`
-- `relative_time` 和 `start_time/end_time` **互斥**
-- 消息中出现 `thread_id` 时，主动用 `feishu_im_user_get_thread_messages` 展开话题回复
-- 资源下载用 `feishu_im_user_fetch_resource`，需要 `message_id` + `file_key` + `type`
+- All tools use user identity — only conversations the user has access to can be read
+- `open_id` and `chat_id` are mutually exclusive; prefer `chat_id`
+- `relative_time` and `start_time/end_time` are mutually exclusive
+- When a message contains `thread_id`, proactively use `feishu_im_user_get_thread_messages` to expand thread replies
+- For resource downloads, use `feishu_im_user_fetch_resource` with `message_id` + `file_key` + `type`
 
----
+## Quick Reference
 
-## 意图 → 工具
+| Intent | Tool | Required Params | Common Optional |
+|--------|------|-----------------|-----------------|
+| Get group/direct chat history | feishu_im_user_get_messages | chat_id or open_id (one of) | relative_time, start_time/end_time, page_size, sort_rule |
+| Get thread replies | feishu_im_user_get_thread_messages | thread_id (omt_xxx) | page_size, sort_rule |
+| Search messages across conversations | feishu_im_user_search_messages | at least one filter condition | query, sender_ids, chat_id, relative_time, start_time/end_time, page_size |
+| Download image from message | feishu_im_user_fetch_resource | message_id, file_key (img_xxx), type="image" | - |
+| Download file/audio/video from message | feishu_im_user_fetch_resource | message_id, file_key (file_xxx), type="file" | - |
 
-| 用户意图 | 工具 | 必填参数 | 常用可选 |
-|---------|------|---------|---------|
-| 获取群聊/单聊历史消息 | feishu_im_user_get_messages | chat_id 或 open_id（二选一） | relative_time, start_time/end_time, page_size, sort_rule |
-| 获取话题内回复消息 | feishu_im_user_get_thread_messages | thread_id（omt_xxx） | page_size, sort_rule |
-| 跨会话搜索消息 | feishu_im_user_search_messages | 至少一个过滤条件 | query, sender_ids, chat_id, relative_time, start_time/end_time, page_size |
-| 下载消息中的图片 | feishu_im_user_fetch_resource | message_id, file_key（img_xxx）, type="image" | - |
-| 下载消息中的文件/音频/视频 | feishu_im_user_fetch_resource | message_id, file_key（file_xxx）, type="file" | - |
+## Constraints
 
----
+### Time range
 
-## 核心约束
+When the user does not specify a time range, infer a suitable `relative_time` based on intent. When the user specifies an explicit time, use their value directly.
 
-### 时间范围
-用户没有明确指定时间时，根据意图推断合适的 `relative_time`。用户明确指定时间时直接用用户的值。
+### Pagination
 
-### 分页
-- `page_size` 范围 1-50，默认 50
-- `has_more=true` 时用 `page_token` 继续获取
-- 需要完整结果时翻页，浏览概览时第一页通常够用
+- `page_size` range: 1-50, default 50
+- When `has_more=true`, use `page_token` to continue fetching
+- Paginate when complete results are needed; the first page usually suffices for browsing
 
-### 话题回复
+### Thread replies
 
-| 场景 | 行为 |
-|------|------|
-| 需要理解上下文（默认） | 对 thread_id 获取最新 10 条回复（`page_size: 10, sort_rule: "create_time_desc"`） |
-| "完整对话"、"详细讨论" | 获取全部回复（`page_size: 50, sort_rule: "create_time_asc"`），需要时翻页 |
-| 浏览概览 / 不看回复 | 跳过话题展开 |
+| Scenario | Behavior |
+|----------|----------|
+| Need to understand context (default) | Get latest 10 replies (`page_size: 10, sort_rule: "create_time_desc"`) |
+| "Full conversation", "detailed discussion" | Get all replies (`page_size: 50, sort_rule: "create_time_asc"`), paginate as needed |
+| Browsing overview / skip replies | Skip thread expansion |
 
-话题消息不支持时间过滤（飞书 API 限制），只能通过分页获取。
+Thread messages do not support time filtering (Feishu API limitation) — only pagination is available.
 
-### open_id 与 chat_id
+### open_id vs chat_id
 
-| 参数 | 格式 | 适用场景 |
-|------|------|---------|
-| chat_id | `oc_xxx` | 已知会话 ID（群聊或单聊均可） |
-| open_id | `ou_xxx` | 已知用户 ID，获取与该用户的单聊消息 |
+| Param | Format | Use Case |
+|-------|--------|----------|
+| chat_id | `oc_xxx` | Known conversation ID (works for both group and direct chats) |
+| open_id | `ou_xxx` | Known user ID — fetch direct chat messages with that user |
 
----
+## Pitfalls
 
-## 不要这样做
-
-| 错误做法 | 正确做法 |
-|---------|---------|
-| open_id 和 chat_id 同时传 | 二选一，优先 chat_id |
-| relative_time 和 start_time/end_time 同时用 | 只能选一种时间过滤方式 |
-| 忽略 has_more=true 不翻页 | 需要完整结果时检查 has_more 并用 page_token 翻页 |
-| 忽略消息中的 thread_id | 主动展开话题获取上下文 |
-| 当前对话的图片用 user_fetch_resource | 用 feishu_im_bot_image（机器人身份） |
+| Wrong | Right |
+|-------|-------|
+| Pass both open_id and chat_id | Use one or the other; prefer chat_id |
+| Use both relative_time and start_time/end_time | Choose only one time filtering method |
+| Ignore has_more=true without paginating | Check has_more and use page_token to paginate when complete results are needed |
+| Ignore thread_id in messages | Proactively expand threads to get context |
+| Download current conversation images with user_fetch_resource | Use feishu_im_bot_image (bot identity) |
 
 ---
 
-> 📚 详细参考：使用 `fs.read` 读取
-> - `$SKILL_DIR/references/examples.md` — 完整使用示例
-> - `$SKILL_DIR/references/errors.md` — 常见错误与排查
-> - `$SKILL_DIR/references/appendix.md` — 搜索参数、资源标记、时间过滤详情
+> Detailed references: use `fs.read` to read
+> - `$SKILL_DIR/references/examples.md` — Full usage examples
+> - `$SKILL_DIR/references/errors.md` — Common errors and troubleshooting
+> - `$SKILL_DIR/references/appendix.md` — Search parameters, resource markers, time filtering details

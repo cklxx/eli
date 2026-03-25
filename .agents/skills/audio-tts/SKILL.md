@@ -1,6 +1,6 @@
 ---
 name: audio-tts
-description: 本地 TTS 语音生成（macOS say + afconvert），输出 m4a 文件。
+description: Generate speech audio using macOS native TTS (say + afconvert), outputting m4a files.
 triggers:
   intent_patterns:
     - "语音|读出来|朗读|TTS|配音|发个语音"
@@ -19,25 +19,32 @@ output:
 
 # audio-tts
 
-使用 macOS 自带 `say` 生成语音，并转成 m4a。
+Generate speech audio using macOS built-in `say` command and convert to m4a format.
 
-## Requirements
-- macOS（内置 `say`）
-- `afconvert`（macOS 自带）
+## Quick Reference
+
+| Intent | Command | Key Params |
+|--------|---------|------------|
+| Speak text | `python3 $SKILL_DIR/run.py speak --text '...'` | `--text` (required) |
+| Custom voice | `python3 $SKILL_DIR/run.py speak --text '...' --voice Samantha` | `--voice` |
 
 ## Usage
 
 ```bash
-python3 $SKILL_DIR/run.py speak --text '你好，这是语音测试'
+python3 $SKILL_DIR/run.py speak --text 'Hello, this is a speech test'
 ```
 
 ## Parameters
 
 ### speak
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| text | string | 是 | 朗读文本 |
-| voice | string | 否 | voice 名称（如 Ting-Ting / Samantha），默认空（系统默认） |
-| rate | int | 否 | 语速 WPM（say 的 -r 参数） |
-| output | string | 否 | 输出路径（默认 /tmp/tts_<ts>.m4a） |
-```
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| text | string | yes | Text to speak |
+| voice | string | no | Voice name (e.g. Ting-Ting / Samantha), defaults to system default |
+| rate | int | no | Speech rate in WPM (passed to `say -r`) |
+| output | string | no | Output path, default `/tmp/tts_<ts>.m4a` |
+
+## Constraints
+
+- Requires macOS (built-in `say` and `afconvert` commands).

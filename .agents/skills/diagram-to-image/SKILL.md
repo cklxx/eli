@@ -17,18 +17,15 @@ cooldown: 60
 
 # diagram-to-image
 
-Render Mermaid code into image files.
+Render Mermaid code into PNG or SVG image files.
 
-## Requirements
-- `mmdc` (Mermaid CLI) installed and in PATH.
-- Install command: `npm install -g @mermaid-js/mermaid-cli`
+## Quick Reference
 
-## Constraints
-- `action=render` only.
-- Input field is `code` (Mermaid source).
-- Supported output formats: `png` (default), `svg`.
-- Render timeout: 30s.
-- Default output path: `/tmp/diagram_<ts>.<format>`.
+| Intent | Command | Key Params |
+|--------|---------|------------|
+| Render PNG | `python3 $SKILL_DIR/run.py render --code '...'` | `--code` (required) |
+| Render SVG | `python3 $SKILL_DIR/run.py render --code '...' --format svg` | `--format` |
+| Custom output | `python3 $SKILL_DIR/run.py render --code '...' --output /path/to/file.png` | `--output` |
 
 ## Usage
 
@@ -37,3 +34,12 @@ python3 $SKILL_DIR/run.py render --code 'graph LR
 A[Client] --> B[API]
 B --> C[(DB)]' --format png --theme default --output /tmp/diagram_arch.png
 ```
+
+## Constraints
+
+- Action is always `render`.
+- Input field is `code` (Mermaid source).
+- Supported output formats: `png` (default), `svg`.
+- Render timeout: 30 seconds.
+- Default output path: `/tmp/diagram_<ts>.<format>`.
+- Requires `mmdc` (Mermaid CLI) in PATH. Install: `npm install -g @mermaid-js/mermaid-cli`.

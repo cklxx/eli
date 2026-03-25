@@ -1,23 +1,29 @@
 ---
 name: feishu-get
-description: "查询已知用户的详细信息。通过 user_id 查指定用户，或不传参查当前用户自己。"
+description: "Look up detailed info for a known Feishu user. Pass a user_id for a specific user, or omit it to query the current user."
 ---
+
+# feishu-get
 
 > **Tool calling:** Use `sidecar(tool="<tool_name>", params={...})` to call tools in this skill.
 
-## 快速索引
+Retrieve detailed user information by ID, or query the current user's own profile.
 
-| 用户意图 | 工具 | 关键参数 |
-|---------|------|---------|
-| 查看自己的信息 | feishu_get_user | （不传参） |
-| 查看指定用户信息 | feishu_get_user | user_id |
+## Quick Reference
 
-## 工具说明
+| Intent | Tool | Key Params |
+|--------|------|------------|
+| View own info | feishu_get_user | (no params) |
+| View a specific user's info | feishu_get_user | user_id |
+
+## Tools
 
 ### feishu_get_user
-获取用户信息。不传 user_id 时获取当前用户自己的信息；传 user_id 时获取指定用户的信息。返回用户姓名、头像、邮箱、手机号、部门等信息。
+Retrieves user information. Omit user_id to get the current user's own info; provide user_id to look up a specific user. Returns name, avatar, email, phone number, department, and more.
 
-## 不要这样做
+## Pitfalls
 
-- ❌ 搜索用户用 feishu_get_user → ✅ 搜索用 feishu-search 的 feishu_search_user，get_user 只能查已知 ID 或查自己
-- ❌ 不知道 user_id 就让用户提供 → ✅ 先用 feishu-search 的 feishu_search_user 按姓名搜索获取 open_id
+| Wrong | Right |
+|-------|-------|
+| Using feishu_get_user to search for users | Use feishu_search_user from the feishu-search skill; get_user only works with a known ID or for querying yourself |
+| Asking the user to provide a user_id when you don't have one | First use feishu_search_user from the feishu-search skill to search by name and obtain the open_id |

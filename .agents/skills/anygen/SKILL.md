@@ -1,6 +1,6 @@
 ---
 name: anygen
-description: 封装 AnyGenIO/anygen-skills 为统一 CLI（help/task），支持渐进式披露与任务执行（task-manager）。
+description: Generate documents, slides, websites, and diagrams via the AnyGen API with progressive discovery and task execution.
 triggers:
   intent_patterns:
     - "anygen|ppt|slides|生成文档|docx|storyboard|website|data analysis|smart_draw|diagram"
@@ -17,61 +17,67 @@ output:
   artifact_type: file
 ---
 
-# AnyGen (CLI + Progressive Skills)
+# anygen
 
-将上游仓库 `https://github.com/AnyGenIO/anygen-skills` 封装成 elephant.ai 可直接调用的统一入口：
+Wraps the upstream repository `https://github.com/AnyGenIO/anygen-skills` into a unified CLI entry point with two commands: `help` for progressive discovery and `task` for task execution via the task-manager module.
 
-- `help`：渐进式披露（overview → modules → module → action）
-- `task`：执行 `task-manager` 的动作（`create/status/poll/download/run`）
+## Quick Reference
 
-## 快速前置
+| Intent | Command | Key Params |
+|--------|---------|------------|
+| Top-level overview | `python3 $SKILL_DIR/run.py help` | none |
+| List modules | `python3 $SKILL_DIR/run.py help --topic modules` | `--topic` |
+| Module details | `python3 $SKILL_DIR/run.py help --topic module --module task-manager` | `--module` |
+| Action details | `python3 $SKILL_DIR/run.py help --topic action --module task-manager --action_name create` | `--action_name` |
+| One-shot generate | `python3 $SKILL_DIR/run.py task run --operation slide --prompt '...' --output ./out` | `--operation`, `--prompt` |
 
-- 需要环境变量：`ANYGEN_API_KEY=sk-xxx`
-- 入口命令：`python3 $SKILL_DIR/run.py <command> [subcommand] [--flag value ...]`
+## Prerequisites
 
-## 渐进式披露（推荐顺序）
+- Environment variable: `ANYGEN_API_KEY=sk-xxx`
+- Entry command: `python3 $SKILL_DIR/run.py <command> [subcommand] [--flag value ...]`
+
+## Usage
+
+### Progressive Discovery (recommended order)
 
 ```bash
-# 1) 顶层总览
+# 1) Top-level overview
 python3 $SKILL_DIR/run.py help
 
-# 2) 模块清单
+# 2) Module list
 python3 $SKILL_DIR/run.py help --topic modules
 
-# 3) 查看模块说明
+# 3) Module details
 python3 $SKILL_DIR/run.py help --topic module --module task-manager
 
-# 4) 查看具体动作参数与示例
+# 4) Action parameters and examples
 python3 $SKILL_DIR/run.py help --topic action --module task-manager --action_name create
 ```
 
-## task-manager 执行动作
+### Task Execution
 
-支持 operation：`chat|slide|doc|storybook|data_analysis|website|smart_draw`
+Supported operations: `chat|slide|doc|storybook|data_analysis|website|smart_draw`
 
 ```bash
-# 创建任务
+# Create a task
 python3 $SKILL_DIR/run.py task create --operation slide --prompt 'Q2 roadmap deck' --style business
 
-# 查询状态（单次）
+# Check status (one-shot)
 python3 $SKILL_DIR/run.py task status --task_id task_xxx
 
-# 轮询直到结束（可自动下载）
+# Poll until complete (with optional auto-download)
 python3 $SKILL_DIR/run.py task poll --task_id task_xxx --output ./output
 
-# 直接下载完成任务文件
+# Download completed task files
 python3 $SKILL_DIR/run.py task download --task_id task_xxx --output ./output
 
-# 一步式 create + poll (+可下载)
+# One-shot: create + poll + optional download
 python3 $SKILL_DIR/run.py task run --operation doc --prompt 'Technical design for notification service' --output ./output
 ```
 
-## 模块边界
+## Constraints
 
-- `task-manager`：本封装可执行。
-- `finance-report`：当前提供引导说明（help 可见），不在此 skill 内直接执行。
-
-## 兼容说明
-
-- 输入支持 `command` 或 `action` 作为顶层命令名。
-- 当 `action=create/status/poll/download/run` 时，会自动路由到 `task` 命令。
+- `task-manager`: fully executable within this skill.
+- `finance-report`: guidance available via `help`, but not directly executable in this skill.
+- Input accepts `command` or `action` as the top-level command name.
+- When `action=create/status/poll/download/run`, it auto-routes to the `task` command.

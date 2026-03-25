@@ -1,62 +1,65 @@
 ---
 name: feishu-create-doc
-description: 创建飞书云文档。从 Lark-flavored Markdown 创建新文档，支持指定文件夹或知识库。
+description: Create a Feishu cloud document from Lark-flavored Markdown, with optional folder or wiki placement.
 ---
+
+# feishu-create-doc
 
 > **Tool calling:** Use `sidecar(tool="<tool_name>", params={...})` to call tools in this skill.
 
-# feishu_create_doc
+Creates a new Feishu cloud document from Lark-flavored Markdown content. Returns `doc_id`, `doc_url`, and `message`.
 
-从 Lark-flavored Markdown 创建飞书云文档。返回 `doc_id`、`doc_url`、`message`。
+## Quick Reference
 
-## 参数
+| Intent | Tool | Key Params |
+|--------|------|------------|
+| Create a document | `feishu_create_doc` | markdown (required), title, folder_token, wiki_node, wiki_space |
 
-| 参数 | 必填 | 说明 |
-|------|------|------|
-| markdown | 是 | Lark-flavored Markdown 内容 |
-| title | 否 | 文档标题 |
-| folder_token | 否 | 父文件夹 token（`fldcnXXXX`），不提供则创建在个人空间根目录 |
-| wiki_node | 否 | 知识库节点 token 或 URL（`wikcnXXXX`），与 folder_token/wiki_space 互斥 |
-| wiki_space | 否 | 知识空间 ID，特殊值 `my_library` 表示个人知识库，与 wiki_node/folder_token 互斥 |
+## Parameters
 
-**参数优先级**：wiki_node > wiki_space > folder_token
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| markdown | Yes | Lark-flavored Markdown content |
+| title | No | Document title |
+| folder_token | No | Parent folder token (`fldcnXXXX`); omit to create in personal root |
+| wiki_node | No | Wiki node token or URL (`wikcnXXXX`); mutually exclusive with folder_token/wiki_space |
+| wiki_space | No | Wiki space ID; special value `my_library` for personal wiki; mutually exclusive with wiki_node/folder_token |
+
+**Priority:** wiki_node > wiki_space > folder_token
+
+## Content Guidelines
+
+The markdown content should be well-structured, visually rich, and readable:
+
+- **Clear structure**: Heading depth no more than 4 levels; use callouts to highlight key information
+- **Visual rhythm**: Break up long text with dividers, columns, and tables
+- **Visual diagrams**: Prefer Mermaid/PlantUML for flows and architecture diagrams
+- **Restraint**: Don't overuse callouts; bold only core terms
+
+When the user has explicit style/formatting preferences, follow those instead.
+
+### Common Extended Syntax
+
+- Callout: `<callout emoji="💡" background-color="light-blue">content</callout>`
+- Columns: `<grid cols="2"><column>left</column><column>right</column></grid>`
+- Enhanced table: `<lark-table header-row="true"><lark-tr><lark-td>content</lark-td></lark-tr></lark-table>`
+- Image: `<image url="https://..." width="800" align="center" caption="description"/>`
+- File: `<file url="https://..." name="document.pdf"/>`
+- Mermaid diagram: ` ```mermaid ` code block
+- Mention user: `<mention-user id="ou_xxx"/>`
+- Text color: `<text color="red">red text</text>`
+
+## Pitfalls
+
+| Wrong | Right |
+|-------|-------|
+| Start markdown with an H1 identical to the title | The title is already the document title; start markdown from body content |
+| Manually add a table of contents | Feishu auto-generates the TOC |
+| Use `doc_media` insert for URL-based images | Use `<image url="..."/>` syntax |
+| Create an extremely long document in one call | Use update-doc append mode to create in segments |
 
 ---
 
-## 内容规范
-
-markdown 内容应当结构清晰、样式丰富、可读性高：
-- **结构清晰**：标题层级 ≤ 4 层，用 Callout 突出关键信息
-- **视觉节奏**：用分割线、分栏、表格打破大段纯文字
-- **图文交融**：流程和架构优先用 Mermaid/PlantUML 可视化
-- **克制留白**：Callout 不过度、加粗只强调核心词
-
-用户有明确样式/风格需求时，以用户需求为准。
-
-### 常用扩展语法速查
-
-- 高亮块: `<callout emoji="💡" background-color="light-blue">内容</callout>`
-- 分栏: `<grid cols="2"><column>左</column><column>右</column></grid>`
-- 增强表格: `<lark-table header-row="true"><lark-tr><lark-td>内容</lark-td></lark-tr></lark-table>`
-- 图片: `<image url="https://..." width="800" align="center" caption="说明"/>`
-- 文件: `<file url="https://..." name="文档.pdf"/>`
-- Mermaid 画板: ` ```mermaid ` 代码块
-- 提及用户: `<mention-user id="ou_xxx"/>`
-- 文字颜色: `<text color="red">红色</text>`
-
----
-
-## 不要这样做
-
-| 错误做法 | 正确做法 |
-|---------|---------|
-| markdown 开头写与 title 相同的一级标题 | title 已是文档标题，markdown 直接从正文开始 |
-| 手动添加目录 | 飞书自动生成目录 |
-| URL 图片用 doc_media insert | 用 `<image url="..."/>` 语法 |
-| 一次性创建超长文档 | 配合 update-doc append 模式分段创建 |
-
----
-
-> 📚 详细参考：使用 `fs.read` 读取
-> - `$SKILL_DIR/references/examples.md` — 完整使用示例
-> - `$SKILL_DIR/LARK_MARKDOWN_REFERENCE.md` — Lark-flavored Markdown 完整语法参考
+> Detailed references: use `fs.read` to view
+> - `$SKILL_DIR/references/examples.md` -- full usage examples
+> - `$SKILL_DIR/LARK_MARKDOWN_REFERENCE.md` -- complete Lark-flavored Markdown syntax reference

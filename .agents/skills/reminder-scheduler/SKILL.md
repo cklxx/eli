@@ -1,6 +1,6 @@
 ---
 name: reminder-scheduler
-description: 统一提醒调度：单次提醒与周期提醒计划的创建、查询、取消和到期扫描。
+description: Schedule one-time and recurring reminders with create, list, cancel, and due-scan operations.
 triggers:
   intent_patterns:
     - "提醒|remind|timer|定时|倒计时|schedule|cron|周期任务|闹钟|alarm"
@@ -15,72 +15,89 @@ cooldown: 30
 
 # reminder-scheduler
 
-一个 skill 同时覆盖两类能力：
+Unified reminder scheduler covering two capabilities: one-time reminders (delayed trigger) and recurring plans (long-term periodic reminders like weekly retros).
 
-- 单次提醒：延迟触发（如 30 分钟后提醒）
-- 周期计划：维护长期提醒计划（如每周复盘）
+## Quick Reference
 
-## 调用
+| Intent | Command | Key Params |
+|--------|---------|------------|
+| Set one-time reminder | `python3 $SKILL_DIR/run.py set_once --delay 30m --task "..."` | `--delay`, `--task` |
+| List one-time reminders | `python3 $SKILL_DIR/run.py list_once` | none |
+| Cancel one-time reminder | `python3 $SKILL_DIR/run.py cancel_once --id timer-12345` | `--id` |
+| Create/update plan | `python3 $SKILL_DIR/run.py upsert_plan --name ... --schedule "..." --task "..."` | `--name`, `--schedule`, `--task` |
+| List plans | `python3 $SKILL_DIR/run.py list_plans` | none |
+| Scan due plans | `python3 $SKILL_DIR/run.py due_plans` | `--now` (optional) |
+| Delete plan | `python3 $SKILL_DIR/run.py delete_plan --name ...` | `--name` or `--id` |
+| Advance plan | `python3 $SKILL_DIR/run.py touch_plan --name ... --next-run-at ...` | `--name`/`--id`, `--next-run-at` |
+
+## Usage
 
 ```bash
-# 单次提醒：设置、查看、取消
-python3 $SKILL_DIR/run.py set_once --delay 30m --task "喝水提醒"
+# One-time reminders
+python3 $SKILL_DIR/run.py set_once --delay 30m --task "Drink water"
 python3 $SKILL_DIR/run.py list_once
 python3 $SKILL_DIR/run.py cancel_once --id timer-12345
 
-# 周期计划：创建/更新、查看、删除、到期扫描、执行后推进
-python3 $SKILL_DIR/run.py upsert_plan --name weekly-retro --schedule "0 18 * * 5" --task "发送复盘提醒" --next-run-at 2026-03-06T10:00:00Z
+# Recurring plans
+python3 $SKILL_DIR/run.py upsert_plan --name weekly-retro --schedule "0 18 * * 5" --task "Send retro reminder" --next-run-at 2026-03-06T10:00:00Z
 python3 $SKILL_DIR/run.py list_plans
 python3 $SKILL_DIR/run.py due_plans --now 2026-03-06T10:00:00Z
 python3 $SKILL_DIR/run.py delete_plan --name weekly-retro
 python3 $SKILL_DIR/run.py touch_plan --name weekly-retro --next-run-at 2026-03-13T10:00:00Z
 ```
 
-## 参数
+## Parameters
 
-### `set_once`
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| delay | string | 是 | 延迟时间（`30s` / `5m` / `2h`） |
-| task | string | 是 | 提醒内容 |
+### set_once
 
-### `cancel_once`
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| id | string | 是 | 单次提醒 ID |
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| delay | string | yes | Delay duration (`30s` / `5m` / `2h`) |
+| task | string | yes | Reminder content |
 
-### `upsert_plan`
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| name | string | 是 | 计划名（唯一键） |
-| schedule | string | 是 | 周期表达式（cron 字符串） |
-| task | string | 是 | 提醒内容 |
-| next_run_at | string | 否 | 下一次执行时间（ISO8601） |
-| channel | string | 否 | 渠道，默认 `lark` |
-| enabled | bool | 否 | 是否启用，默认 `true` |
-| metadata | object | 否 | 扩展元数据 |
+### cancel_once
 
-### `list_plans`
-无参数，返回当前所有周期计划。
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| id | string | yes | One-time reminder ID |
 
-### `delete_plan`
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| name | string | 否 | 计划名；与 `id` 至少提供一个 |
-| id | string | 否 | 计划 ID；与 `name` 至少提供一个 |
+### upsert_plan
 
-当同时提供 `name` 和 `id` 时，必须命中同一条记录才会删除。
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| name | string | yes | Plan name (unique key) |
+| schedule | string | yes | Cron expression |
+| task | string | yes | Reminder content |
+| next_run_at | string | no | Next execution time (ISO 8601) |
+| channel | string | no | Channel, default `lark` |
+| enabled | bool | no | Whether enabled, default `true` |
+| metadata | object | no | Extension metadata |
 
-### `due_plans`
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| now | string | 否 | 当前时间（ISO8601）；未提供时取系统 UTC 时间 |
+### list_plans
 
-### `touch_plan`
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| name | string | 否 | 计划名；与 `id` 至少提供一个 |
-| id | string | 否 | 计划 ID；与 `name` 至少提供一个 |
-| next_run_at | string | 否 | 更新下一次执行时间（ISO8601） |
+No parameters. Returns all recurring plans.
 
-当同时提供 `name` 和 `id` 时，必须命中同一条记录才会更新。
+### delete_plan
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| name | string | no | Plan name; provide at least one of `name` or `id` |
+| id | string | no | Plan ID; provide at least one of `name` or `id` |
+
+When both `name` and `id` are provided, they must match the same record for deletion to proceed.
+
+### due_plans
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| now | string | no | Current time (ISO 8601); defaults to system UTC time |
+
+### touch_plan
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| name | string | no | Plan name; provide at least one of `name` or `id` |
+| id | string | no | Plan ID; provide at least one of `name` or `id` |
+| next_run_at | string | no | Update next execution time (ISO 8601) |
+
+When both `name` and `id` are provided, they must match the same record for the update to proceed.

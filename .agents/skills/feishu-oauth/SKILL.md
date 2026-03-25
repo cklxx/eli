@@ -1,23 +1,30 @@
 ---
 name: feishu-oauth
-description: "飞书批量授权工具。仅在用户明确要求一次性授权所有权限时使用。"
+description: Batch-authorize all Feishu permissions at once. Use only when the user explicitly requests a one-time full authorization.
 ---
+
+# feishu-oauth
 
 > **Tool calling:** Use `sidecar(tool="<tool_name>", params={...})` to call tools in this skill.
 
-## 快速索引
+Perform a one-time batch authorization of all user permissions configured for the Feishu app. Only use when the user explicitly requests authorizing all permissions at once.
 
-| 用户意图 | 工具 | 关键参数 |
-|---------|------|---------|
-| 一次性授权所有权限 | feishu_oauth_batch_auth | （无需参数） |
+## Quick Reference
 
-## 工具说明
+| Intent | Tool | Key Params |
+|--------|------|------------|
+| Authorize all permissions at once | feishu_oauth_batch_auth | (none required) |
+
+## Tools
 
 ### feishu_oauth_batch_auth
-飞书批量授权工具，一次性授权应用已开通的所有用户权限。仅在用户明确要求"授权所有权限"、"一次性授权"时使用。
 
-## 不要这样做
+Batch-authorize all user permissions that the Feishu app has enabled. Use only when the user explicitly says "authorize all permissions" or "batch authorize".
 
-- ❌ 用户授权失败/过期时调用 batch_auth → ✅ 仅在用户明确要求"授权所有权限"时使用，授权失败/过期由系统自动处理
-- ❌ 用户说"授权一下"就调用 batch_auth → ✅ 普通的单项授权由系统自动弹出，batch_auth 仅用于"全部授权"场景
-- ❌ 把 batch_auth 和 feishu skill 的 feishu_oauth revoke 搞混 → ✅ batch_auth 是授权，revoke 是撤销，完全相反的操作
+## Pitfalls
+
+| Wrong | Right |
+|-------|-------|
+| Call batch_auth when authorization fails or expires | Only use when user explicitly requests "authorize all permissions"; auth failures/expiry are handled automatically by the system |
+| Call batch_auth when user says "authorize" generically | Normal single-permission authorization pops up automatically; batch_auth is only for "authorize all" scenarios |
+| Confuse batch_auth with feishu skill's feishu_oauth revoke | batch_auth grants permissions; revoke removes them — opposite operations |

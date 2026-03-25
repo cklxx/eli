@@ -1,48 +1,54 @@
 ---
 name: feishu
-description: "飞书基础能力：群聊管理、电子表格读写、用户授权撤销。适用于搜索/查看群信息、操作 Sheets 表格、撤销授权等场景。"
+description: "Manage Feishu group chats, read/write spreadsheets, and revoke user authorization. Use for searching/viewing chat info, operating on Sheets, or revoking OAuth."
 ---
+
+# feishu
 
 > **Tool calling:** Use `sidecar(tool="<tool_name>", params={...})` to call tools in this skill.
 
-## 快速索引
+Core Feishu capabilities: group chat management, spreadsheet read/write, and user authorization revocation.
 
-| 用户意图 | 工具 | 关键参数 |
-|---------|------|---------|
-| 搜索群聊 | feishu_chat | action=search, keyword |
-| 查看群信息 | feishu_chat | action=get, chat_id |
-| 读取电子表格 | feishu_sheet | action=read, url/spreadsheet_token |
-| 写入/追加表格数据 | feishu_sheet | action=write/append, url/spreadsheet_token, data |
-| 创建电子表格 | feishu_sheet | action=create |
-| 导出电子表格 | feishu_sheet | action=export, format |
-| 撤销飞书授权 | feishu_oauth | action=revoke |
+## Quick Reference
 
-## 工具说明
+| Intent | Tool | Key Params |
+|--------|------|------------|
+| Search group chats | feishu_chat | action=search, keyword |
+| View chat details | feishu_chat | action=get, chat_id |
+| Read spreadsheet | feishu_sheet | action=read, url/spreadsheet_token |
+| Write/append spreadsheet data | feishu_sheet | action=write/append, url/spreadsheet_token, data |
+| Create spreadsheet | feishu_sheet | action=create |
+| Export spreadsheet | feishu_sheet | action=export, format |
+| Revoke Feishu authorization | feishu_oauth | action=revoke |
+
+## Tools
 
 ### feishu_chat
-以用户身份调用飞书群聊管理工具。Actions: search（搜索群列表，支持关键词匹配群名称、群成员）, get（获取指定群的详细信息，包括群名称、描述、头像、群主、权限配置等）。
+Calls the Feishu group chat management API as the user. Actions: search (search chat list, supports keyword matching on chat name and members), get (retrieve detailed chat info including name, description, avatar, owner, permission settings).
 
 ### feishu_sheet
-【以用户身份】飞书电子表格工具。支持创建、读写、查找、导出电子表格。
+Feishu spreadsheet tool (runs as the user). Supports creating, reading, writing, searching, and exporting spreadsheets.
 
-电子表格（Sheets）类似 Excel/Google Sheets，与多维表格（Bitable/Airtable）是不同产品。
+Spreadsheets (Sheets) are similar to Excel/Google Sheets and are a different product from Bitable (multi-dimensional tables / Airtable-like).
 
-所有 action（除 create 外）均支持传入 url 或 spreadsheet_token，工具会自动解析。支持知识库 wiki URL，自动解析为电子表格 token。
+All actions (except create) accept either a url or spreadsheet_token — the tool parses automatically. Wiki URLs are also supported and automatically resolved to spreadsheet tokens.
 
 Actions:
-- info：获取表格信息 + 全部工作表列表（一次调用替代 get_info + list_sheets）
-- read：读取数据。不填 range 自动读取第一个工作表全部数据
-- write：覆盖写入,高危,请谨慎使用该操作。不填 range 自动写入第一个工作表（从 A1 开始）
-- append：在已有数据末尾追加行
-- find：在工作表中查找单元格
-- create：创建电子表格。支持带 headers + data 一步创建含数据的表格
-- export：导出为 xlsx 或 csv（csv 必须指定 sheet_id）
+- info: Get spreadsheet info + full list of worksheets (replaces separate get_info + list_sheets calls)
+- read: Read data. Omit range to read all data from the first worksheet
+- write: Overwrite data. **Destructive — use with caution.** Omit range to write to the first worksheet starting at A1
+- append: Append rows after existing data
+- find: Search for cells in a worksheet
+- create: Create a new spreadsheet. Supports creating with headers + data in one step
+- export: Export as xlsx or csv (csv requires specifying sheet_id)
 
 ### feishu_oauth
-飞书用户撤销授权工具。仅在用户明确说"撤销授权"、"取消授权"、"退出登录"、"清除授权"时调用 revoke。不需要传入 user_open_id，系统自动从消息上下文获取当前用户。
+Feishu user authorization revocation tool. Only invoke revoke when the user explicitly says "revoke authorization", "cancel authorization", "log out", or "clear authorization". No need to pass user_open_id — the system automatically obtains the current user from message context.
 
-## 不要这样做
+## Pitfalls
 
-- ❌ 用户说"重新授权"时调用 feishu_oauth revoke → ✅ 授权流程由系统自动处理，"重新授权"≠"撤销授权"
-- ❌ 用 feishu_sheet 操作多维表格 → ✅ 电子表格（Sheets） ≠ 多维表格（Bitable），多维表格用 feishu-bitable skill
-- ❌ 用 feishu_chat search 查群成员列表 → ✅ 查群成员用 feishu-chat skill 的 feishu_chat_members
+| Wrong | Right |
+|-------|-------|
+| Calling feishu_oauth revoke when user says "re-authorize" | Authorization flow is handled automatically by the system; "re-authorize" does not mean "revoke" |
+| Using feishu_sheet for Bitable (multi-dimensional tables) | Sheets and Bitable are different products — use the feishu-bitable skill for Bitable |
+| Using feishu_chat search to list group members | To list group members, use feishu_chat_members from the feishu-chat skill |

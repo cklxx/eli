@@ -1,72 +1,74 @@
 ---
 name: feishu-troubleshoot
-description: 飞书插件问题排查。包含常见问题 FAQ 和深度诊断命令。
+description: Troubleshoot Feishu plugin issues. Includes a FAQ for common problems and deep diagnostic commands.
 ---
+
+# feishu-troubleshoot
 
 > **Tool calling:** Use `sidecar(tool="<tool_name>", params={...})` to call tools in this skill.
 
-# 飞书插件问题排查
+Diagnose and resolve Feishu plugin issues. Covers common problems (FAQ) and deep permission diagnostics via the `/feishu doctor` command.
 
-## ❓ 常见问题（FAQ）
+## FAQ
 
-### 卡片按钮点击无反应
+### Card button clicks have no effect
 
-**现象**：点击卡片按钮后没有任何反应，然后提示报错.
+**Symptom**: Clicking a card button does nothing, then shows an error.
 
-**原因**：应用未开通「消息卡片回传交互」权限。
+**Cause**: The app has not enabled the "Message Card Callback Interaction" permission.
 
-**解决步骤**：
+**Resolution**:
 
-1. 登录飞书开放平台：https://open.feishu.cn/app
-2. 选择您的应用 → **事件与回调**
-3. 在回调配置中,修改订阅方式为"长链接"并添加回调 "卡片回传交互"(card.action.trigger)
-4. 创建应用版本 → 提交审核 → 发布
+1. Log in to the Feishu Open Platform: https://open.feishu.cn/app
+2. Select your app, then go to **Events & Callbacks**
+3. In the callback configuration, change the subscription method to "Long Connection" and add the callback "Card Callback Interaction" (card.action.trigger)
+4. Create an app version, submit for review, and publish
 
----
+## Diagnostic Commands
 
-## 🔍 诊断命令（深度工具）
+**Note**: Diagnostic commands are only for troubleshooting complex/difficult **permission-related issues**. Routine permission problems trigger the automatic authorization flow and do not require manual diagnosis.
 
-**注意**：诊断命令仅用于排查复杂/疑难的**权限相关问题**。常规权限问题会自动触发授权流程，无需手动诊断。
+**When to use diagnostics**:
+- Authorization still fails after multiple attempts
+- The automatic authorization flow cannot resolve the issue
+- You need to see the full permission configuration state
 
-**何时使用诊断**：
-- 多次授权后仍然报错
-- 自动授权流程无法解决的问题
-- 需要查看完整的权限配置状态
+**Usage**:
 
-**使用方法**：
+Enter the following as a user message in a Feishu chat session:
 
-在飞书聊天会话中直接输入（作为用户消息发送）：
+`/feishu doctor`
 
-/feishu doctor
+The diagnostic command checks:
 
-诊断命令会检查：
+- **Diagnostic Summary** (shown first):
+  - Overall status (OK / Warning / Failed)
+  - List of discovered issues with brief descriptions
 
-- **📋 诊断摘要**（首先展示）：
-  - 总体状态（✅ 正常 / ⚠️ 警告 / ❌ 失败）
-  - 发现的问题列表和简要描述
+- **Environment Info**:
+  - Plugin version
 
-- **环境信息**：
-  - 插件版本
+- **Account Info**:
+  - Credential completeness (appId, appSecret masked)
+  - Account enabled status
+  - API connectivity test
+  - Bot info (name and openId)
 
-- **账号信息**：
-  - 凭证完整性（appId, appSecret 掩码）
-  - 账户启用状态
-  - API 连通性测试
-  - Bot 信息（名称和 openId）
+- **App Identity Permissions**:
+  - Number of required permissions the app has enabled
+  - List of missing required permissions
+  - One-click application link (auto-populated with missing permissions)
 
-- **应用身份权限**：
-  - 应用已开通的必需权限数量
-  - 缺失的必需权限列表
-  - 一键申请链接（自动带上缺失权限参数）
+- **User Identity Permissions**:
+  - User authorization status summary (valid / needs refresh / expired)
+  - Token auto-refresh status (whether offline_access is included)
+  - Permission comparison table (app-enabled vs user-authorized, item by item)
+  - Application guide and link when app permissions are missing
+  - Re-authorization instructions when user authorization is insufficient
 
-- **用户身份权限**：
-  - 用户授权状态统计（✓ 有效 / ⟳ 需刷新 / ✗ 已过期）
-  - Token 自动刷新状态（是否包含 offline_access）
-  - 权限对照表（应用已开通 vs 用户已授权，逐项对比）
-  - 应用权限缺失时的申请指引和链接
-  - 用户授权不足时的重新授权操作方法
+## Pitfalls
 
-## 不要这样做
-
-- ❌ 常规权限问题直接跑诊断命令 → ✅ 常规权限问题由系统自动授权流程处理
-- ❌ 代替用户执行 `/feishu doctor` → ✅ 诊断命令需要用户自己在飞书会话中输入
+| Wrong | Right |
+|-------|-------|
+| Run diagnostic commands for routine permission issues | Routine permission issues are handled by the automatic authorization flow |
+| Execute `/feishu doctor` on behalf of the user | The diagnostic command must be entered by the user themselves in the Feishu chat |

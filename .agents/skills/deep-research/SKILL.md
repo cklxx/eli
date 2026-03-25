@@ -1,6 +1,6 @@
 ---
 name: deep-research
-description: 深度调研技能，多源检索 + 证据汇编 + 结构化报告。
+description: Conduct deep research with multi-source search, evidence compilation, and structured report generation.
 triggers:
   intent_patterns:
     - "research|调研|调查|分析|analysis|market"
@@ -23,26 +23,34 @@ output:
 
 # deep-research
 
-多源检索 + 证据汇编 + 结构化报告。
+Multi-source search, evidence compilation, and structured report generation for any research topic.
 
-## 调用
+## Quick Reference
+
+| Intent | Command | Key Params |
+|--------|---------|------------|
+| Basic research | `python3 $SKILL_DIR/run.py --topic '...'` | `--topic` (required) |
+| Custom queries | `python3 $SKILL_DIR/run.py --topic '...' --queries '[...]'` | `--queries` |
+| Advanced depth | `python3 $SKILL_DIR/run.py --topic '...' --depth advanced` | `--depth` |
+
+## Usage
 
 ```bash
-python3 $SKILL_DIR/run.py --topic '研究主题' --queries '["关键词1","关键词2"]' --max_results 5 --depth basic
+python3 $SKILL_DIR/run.py --topic 'Research topic' --queries '["keyword1","keyword2"]' --max_results 5 --depth basic
 ```
 
-## 参数
+## Parameters
 
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| topic | string | 是 | 研究主题 |
-| queries | string[] | 否 | 搜索关键词，默认自动生成 3 条 |
-| max_results | int | 否 | 每条 query 结果数，默认 5 |
-| depth | string | 否 | "basic" 或 "advanced" |
-| fetch_urls | string[] | 否 | 额外抓取全文的 URL |
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| topic | string | yes | Research topic |
+| queries | string[] | no | Search keywords; defaults to 3 auto-generated queries |
+| max_results | int | no | Results per query, default 5 |
+| depth | string | no | `basic` or `advanced` |
+| fetch_urls | string[] | no | Additional URLs to fetch full text from |
 
-## 输出
+## Output
 
-返回 JSON，包含 `searches`（搜索结果）、`fetched_pages`（抓取页面）、`summary_prompt`（综合提示）。
+Returns JSON containing `searches` (search results), `fetched_pages` (fetched pages), and `summary_prompt` (synthesis prompt).
 
-LLM 拿到结果后，按「问题→发现/证据→置信度→影响/建议」结构化整理。
+The LLM organizes results into a structured report: Problem, Findings/Evidence, Confidence Level, Impact/Recommendations.

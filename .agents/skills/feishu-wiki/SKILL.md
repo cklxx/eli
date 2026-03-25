@@ -1,31 +1,52 @@
 ---
 name: feishu-wiki
-description: "飞书知识库管理。支持查看/创建知识空间，以及知识库节点的增删改查和类型解析。"
+description: "Manage Feishu wiki spaces and nodes -- list, create, move, copy nodes, and resolve wiki tokens to actual document types."
 ---
+
+# feishu-wiki
 
 > **Tool calling:** Use `sidecar(tool="<tool_name>", params={...})` to call tools in this skill.
 
-## 快速索引
+Manages Feishu wiki spaces (knowledge bases) and their document nodes, including type resolution from wiki tokens to actual document tokens.
 
-| 用户意图 | 工具 | 关键参数 |
-|---------|------|---------|
-| 列出知识空间 | feishu_wiki_space | action=list |
-| 查看知识空间信息 | feishu_wiki_space | action=get, space_id |
-| 创建知识空间 | feishu_wiki_space | action=create |
-| 列出知识库节点 | feishu_wiki_space_node | action=list, space_id |
-| 查看节点信息（wiki→obj_token 转换） | feishu_wiki_space_node | action=get, node_token |
-| 创建/移动/复制节点 | feishu_wiki_space_node | action=create/move/copy |
+## Quick Reference
 
-## 工具说明
+| Intent | Tool | Key Params |
+|--------|------|------------|
+| List wiki spaces | `feishu_wiki_space` | action=list |
+| Get wiki space info | `feishu_wiki_space` | action=get, space_id |
+| Create wiki space | `feishu_wiki_space` | action=create |
+| List wiki nodes | `feishu_wiki_space_node` | action=list, space_id |
+| Get node info (wiki -> obj_token conversion) | `feishu_wiki_space_node` | action=get, node_token |
+| Create/move/copy node | `feishu_wiki_space_node` | action=create/move/copy |
+
+## Tools
 
 ### feishu_wiki_space
-飞书知识空间管理工具。当用户要求查看知识库列表、获取知识库信息、创建知识库时使用。Actions: list（列出知识空间）, get（获取知识空间信息）, create（创建知识空间）。【重要】space_id 可以从浏览器 URL 中获取，或通过 list 接口获取。【重要】知识空间（Space）是知识库的基本组成单位，包含多个具有层级关系的文档节点。
+
+Manages Feishu wiki spaces. Use when the user wants to list, inspect, or create knowledge bases.
+
+**Actions:** list (list spaces), get (get space info), create (create space).
+
+**Notes:**
+- `space_id` can be extracted from the browser URL or retrieved via the list action
+- A wiki space is a top-level knowledge base container holding hierarchically organized document nodes
 
 ### feishu_wiki_space_node
-飞书知识库节点管理工具。操作：list（列表）、get（获取）、create（创建）、move（移动）、copy（复制）。节点是知识库中的文档，包括 doc、bitable(多维表表格)、sheet(电子表格) 等类型。node_token 是节点的唯一标识符，obj_token 是实际文档的 token。可通过 get 操作将 wiki 类型的 node_token 转换为实际文档的 obj_token。
 
-## 不要这样做
+Manages nodes within a Feishu wiki space. Nodes represent documents of various types (doc, bitable, sheet, etc.).
 
-- ❌ 拿到 wiki URL 直接当 docx 读 → ✅ 先用 feishu_wiki_space_node get 查 obj_type，再按类型调对应工具（doc 用 read-doc，sheet 用 feishu_sheet 等）
-- ❌ 搜索知识库文档用 feishu_wiki_space_node list → ✅ 搜索文档用 feishu-search 的 feishu_search_doc_wiki，list 只列出层级结构
-- ❌ 混淆 node_token 和 obj_token → ✅ node_token 是知识库节点 ID，obj_token 是实际文档 ID，用 get 操作做转换
+**Actions:** list, get, create, move, copy.
+
+**Key concepts:**
+- `node_token` is the wiki node identifier
+- `obj_token` is the actual document token
+- Use the get action to convert a wiki `node_token` to its `obj_type` and `obj_token`, then call the appropriate tool for that document type
+
+## Pitfalls
+
+| Wrong | Right |
+|-------|-------|
+| Treat a wiki URL directly as a docx and read it | Use `feishu_wiki_space_node` get to resolve `obj_type`, then call the correct tool (doc -> read-doc, sheet -> feishu_sheet, etc.) |
+| Use `feishu_wiki_space_node` list to search wiki documents | Use `feishu_search_doc_wiki` from feishu-search for searching; list only shows the hierarchy |
+| Confuse `node_token` and `obj_token` | `node_token` is the wiki node ID; `obj_token` is the actual document ID; use the get action to convert |

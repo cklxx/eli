@@ -1,6 +1,6 @@
 ---
 name: soul-self-evolution
-description: SOUL 自演进技能 — 在不可变段保护下更新可演进人格/协作策略并支持回滚。
+description: Update evolvable sections of SOUL.md with immutable-segment protection and rollback support.
 triggers:
   intent_patterns:
     - "soul|人格更新|self evolve|自我优化|更新协作风格"
@@ -23,14 +23,40 @@ requires_approval: false
 
 # soul-self-evolution
 
-对 `SOUL.md` 或 `docs/reference/SOUL.md` 进行受控更新：
-- 只允许改动可演进段
-- 记录 checkpoint
-- 支持一键回滚
+Perform controlled updates to `SOUL.md` (or `docs/reference/SOUL.md`). Only evolvable sections can be modified. Every change creates a checkpoint that supports one-click rollback.
 
-## 调用
+## Quick Reference
+
+| Intent | Command | Key Params |
+|--------|---------|------------|
+| Apply changes | `apply` | `--path`, `--changes` |
+| List checkpoints | `list_checkpoints` | — |
+
+## Usage
 
 ```bash
+# Apply a change to an evolvable section
 python3 $SKILL_DIR/run.py apply --path docs/reference/SOUL.md --changes '[{"section":"## Collaboration Preferences","content":"- Keep updates concise."}]'
+
+# List available rollback checkpoints
 python3 $SKILL_DIR/run.py list_checkpoints
 ```
+
+## Parameters
+
+### apply
+
+| Name | Type | Required | Notes |
+|------|------|----------|-------|
+| path | string | yes | Path to the SOUL.md file |
+| changes | JSON array | yes | Each entry: `{"section": "## Header", "content": "new content"}` |
+
+### list_checkpoints
+
+No parameters.
+
+## Constraints
+
+- Only evolvable sections can be modified; immutable segments are protected.
+- Every `apply` creates a checkpoint automatically.
+- Rollback restores the previous checkpoint state.

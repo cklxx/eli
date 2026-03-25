@@ -1,6 +1,6 @@
 ---
 name: image-creation
-description: Generate or refine images with Seedream (text-to-image + image-to-image).
+description: Generate or refine images with Seedream (text-to-image and image-to-image).
 triggers:
   intent_patterns:
     - "生成图片|画|draw|image|图片|插图|illustration|设计图|海报"
@@ -20,19 +20,20 @@ output:
 
 # image-creation
 
-Generate images via Seedream.
+Generate images via Seedream text-to-image, or refine existing images with image-to-image.
+
+## Quick Reference
+
+| Intent | Command | Key Params |
+|--------|---------|------------|
+| Text to image | `generate` | `--prompt`, `--style`, `--size`, `--watermark` |
+| Image to image | `refine` | `--image_path`, `--prompt`, `--watermark` |
 
 ## Required Env
-- `ARK_API_KEY` (required)
-- `SEEDREAM_TEXT_ENDPOINT_ID` (optional; fallback: `SEEDREAM_TEXT_MODEL` -> built-in default model)
-- `SEEDREAM_I2I_ENDPOINT_ID` (required for `refine`)
 
-## Constraints
-- Backend minimum pixels: `1920*1920`. Smaller inputs (for example `1024x1024`) are auto-upscaled.
-- `success=true` only when the output file is actually written and non-empty.
-- Backend response must contain `b64_json` or `url`; otherwise the call fails.
-- Default output path is `/tmp` unless `output` is provided.
-- `watermark` defaults to `false` (no "AI generated" watermark). Set to `true` only when you explicitly need watermark.
+- `ARK_API_KEY` (required)
+- `SEEDREAM_TEXT_ENDPOINT_ID` (optional; fallback: `SEEDREAM_TEXT_MODEL` then built-in default)
+- `SEEDREAM_I2I_ENDPOINT_ID` (required for `refine`)
 
 ## Usage
 
@@ -47,18 +48,28 @@ python3 $SKILL_DIR/run.py refine --image_path /tmp/cat.png --prompt 'add starry 
 ## Parameters
 
 ### generate
-| name | type | required | notes |
-|------|------|------|------|
-| prompt | string | yes | image description |
-| style | string | no | style tag (default: `realistic`) |
+
+| Name | Type | Required | Notes |
+|------|------|----------|-------|
+| prompt | string | yes | Image description |
+| style | string | no | Style tag (default: `realistic`) |
 | size | string | no | `WIDTHxHEIGHT`, default `1920x1920` |
-| watermark | bool | no | default `false`; whether to enable API watermark |
-| output | string | no | output file path (default `/tmp/seedream_<ts>.png`) |
+| watermark | bool | no | Default `false`; enable API watermark |
+| output | string | no | Output file path (default `/tmp/seedream_<ts>.png`) |
 
 ### refine
-| name | type | required | notes |
-|------|------|------|------|
-| image_path | string | yes | input image path |
-| prompt | string | yes | refinement instruction |
-| watermark | bool | no | default `false`; whether to enable API watermark |
-| output | string | no | output path (default `/tmp/seedream_refined_<ts>.png`) |
+
+| Name | Type | Required | Notes |
+|------|------|----------|-------|
+| image_path | string | yes | Input image path |
+| prompt | string | yes | Refinement instruction |
+| watermark | bool | no | Default `false`; enable API watermark |
+| output | string | no | Output path (default `/tmp/seedream_refined_<ts>.png`) |
+
+## Constraints
+
+- Backend minimum pixels: `1920*1920`. Smaller inputs (e.g. `1024x1024`) are auto-upscaled.
+- `success=true` only when the output file is actually written and non-empty.
+- Backend response must contain `b64_json` or `url`; otherwise the call fails.
+- Default output path is `/tmp` unless `output` is provided.
+- `watermark` defaults to `false` (no "AI generated" watermark). Set to `true` only when you explicitly need it.
