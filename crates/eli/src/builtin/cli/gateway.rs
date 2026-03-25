@@ -304,9 +304,74 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
 
                 let inbound_context = msg.context.clone();
 
-                // Resolve image media into base64 content blocks before
-                // converting to the JSON envelope (which cannot carry DataFetcher).
-                let media_parts = resolve_image_media(&msg.media).await;
+                let context_media_paths: Vec<String> = msg
+                    .context
+                    .get("media_paths")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let context_media_types: Vec<String> = msg
+                    .context
+                    .get("media_types")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                tracing::debug!(
+                    session = %msg.session_id,
+                    paths = context_media_paths.len(),
+                    types = context_media_types.len(),
+                    "reconstructing media from context"
+                );
+                let media_from_context: Vec<MediaItem> = context_media_paths
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(i, path)| {
+                        let media_type_str = context_media_types
+                            .get(i)
+                            .map(|s| s.as_str())
+                            .unwrap_or("image");
+                        if media_type_str != "image" {
+                            return None;
+                        }
+                        let path_clone = path.clone();
+                        let fetcher: crate::channels::message::DataFetcher = Arc::new(move || {
+                            let p = path_clone.clone();
+                            Box::pin(async move { tokio::fs::read(&p).await.unwrap_or_default() })
+                        });
+                        let mime = if path.ends_with(".png") {
+                            "image/png"
+                        } else if path.ends_with(".gif") {
+                            "image/gif"
+                        } else if path.ends_with(".webp") {
+                            "image/webp"
+                        } else {
+                            "image/jpeg"
+                        };
+                        Some(MediaItem {
+                            media_type: MediaType::Image,
+                            mime_type: mime.to_owned(),
+                            filename: Some(path.clone()),
+                            data_fetcher: Some(fetcher),
+                        })
+                    })
+                    .collect();
+
+                let combined_media: Vec<MediaItem> =
+                    [msg.media.as_slice(), media_from_context.as_slice()].concat();
+                let media_parts = resolve_image_media(&combined_media).await;
+                tracing::debug!(
+                    session = %msg.session_id,
+                    parts = media_parts.len(),
+                    "resolved image media parts"
+                );
 
                 let mut inbound = serde_json::json!({
                     "session_id": msg.session_id,
