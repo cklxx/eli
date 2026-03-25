@@ -898,14 +898,15 @@ impl LLM {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned);
+            let spilled_calls: Vec<Value> = execution
+                .tool_calls
+                .iter()
+                .map(|call| self.maybe_spill_tool_call(call, tape_name))
+                .collect();
             self.async_tape
                 .append_entry(
                     tape_name,
-                    &TapeEntry::tool_call_with_content(
-                        execution.tool_calls.clone(),
-                        assistant_text,
-                        meta.clone(),
-                    ),
+                    &TapeEntry::tool_call_with_content(spilled_calls, assistant_text, meta.clone()),
                 )
                 .await?;
 
@@ -923,7 +924,19 @@ impl LLM {
                 .append_entry(tape_name, &TapeEntry::tool_result(paired, meta))
                 .await?;
         } else {
-            let assistant_msg = build_assistant_tool_call_message(response);
+            let mut assistant_msg = build_assistant_tool_call_message(response);
+            // Spill large arguments in the in-memory assistant message too
+            if let Some(calls) = assistant_msg
+                .get("tool_calls")
+                .and_then(|v| v.as_array())
+                .cloned()
+            {
+                let spilled: Vec<Value> = calls
+                    .iter()
+                    .map(|c| self.maybe_spill_tool_call_in_memory(c))
+                    .collect();
+                assistant_msg["tool_calls"] = Value::Array(spilled);
+            }
             in_memory_msgs.push(assistant_msg);
 
             for (i, result) in execution.tool_results.iter().enumerate() {
@@ -937,35 +950,73 @@ impl LLM {
                     Value::String(s) => s.clone(),
                     other => serde_json::to_string(other).unwrap_or_default(),
                 };
+                let spilled_content = self
+                    .maybe_spill(&content_str, "in_memory", call_id)
+                    .unwrap_or(content_str);
                 in_memory_msgs.push(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": content_str,
+                    "content": spilled_content,
                 }));
             }
         }
         Ok(())
     }
 
-    /// If spill is configured and `result` is a large string, write the full
-    /// content to a spill file and return the truncated version. Otherwise
-    /// return the result as-is.
+    /// If spill is configured and `text` is large, write the full content to
+    /// a spill file and return the truncated version. The `suffix` distinguishes
+    /// args vs results (e.g. `"call_123"` or `"call_123.args"`).
+    fn maybe_spill(&self, text: &str, tape_name: &str, file_stem: &str) -> Option<String> {
+        let base_dir = self.spill_dir.as_ref()?;
+        let dir = spill::spill_dir_for_tape(base_dir, tape_name);
+        match spill::spill_if_needed(text, file_stem, &dir, &DEFAULT_SPILL) {
+            Ok(spilled) => spilled,
+            Err(e) => {
+                tracing::warn!(error = %e, file_stem, "failed to spill to disk");
+                None
+            }
+        }
+    }
+
+    /// Spill a tool result value if it's a large string.
     fn maybe_spill_result(&self, result: &Value, tape_name: &str, call_id: &str) -> Value {
-        let Some(ref base_dir) = self.spill_dir else {
-            return result.clone();
-        };
         let Some(text) = result.as_str() else {
             return result.clone();
         };
+        match self.maybe_spill(text, tape_name, call_id) {
+            Some(truncated) => Value::String(truncated),
+            None => result.clone(),
+        }
+    }
 
-        let dir = spill::spill_dir_for_tape(base_dir, tape_name);
-        match spill::spill_if_needed(text, call_id, &dir, &DEFAULT_SPILL) {
-            Ok(Some(truncated)) => Value::String(truncated),
-            Ok(None) => result.clone(),
-            Err(e) => {
-                tracing::warn!(error = %e, call_id, "failed to spill tool result to disk");
-                result.clone()
+    /// Spill tool call arguments if the arguments string is large.
+    /// Returns a new tool call with truncated arguments, or the original.
+    fn maybe_spill_tool_call(&self, call: &Value, tape_name: &str) -> Value {
+        self.spill_call_args(call, tape_name)
+    }
+
+    /// Same as [`maybe_spill_tool_call`] but for in-memory (non-tape) sessions.
+    fn maybe_spill_tool_call_in_memory(&self, call: &Value) -> Value {
+        self.spill_call_args(call, "in_memory")
+    }
+
+    fn spill_call_args(&self, call: &Value, tape_name: &str) -> Value {
+        let call_id = call.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let Some(func) = call.get("function") else {
+            return call.clone();
+        };
+        let Some(args_str) = func.get("arguments").and_then(|v| v.as_str()) else {
+            return call.clone();
+        };
+
+        let file_stem = format!("{call_id}.args");
+        match self.maybe_spill(args_str, tape_name, &file_stem) {
+            Some(truncated) => {
+                let mut new_call = call.clone();
+                new_call["function"]["arguments"] = Value::String(truncated);
+                new_call
             }
+            None => call.clone(),
         }
     }
 
