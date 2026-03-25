@@ -23,3 +23,5 @@ reference/
 backup/
 .gstack/
 .openmax/
+.openmax-worktrees/
+test-results/
