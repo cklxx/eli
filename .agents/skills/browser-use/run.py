@@ -31,27 +31,55 @@ load_repo_dotenv(__file__)
 _CALL_TIMEOUT = int(os.environ.get("BROWSER_SKILL_TIMEOUT", "30"))
 _INTER_CALL_DELAY = float(os.environ.get("BROWSER_SKILL_DELAY", "4"))
 _MCP_EXTENSION_ID = "mmlmfjhmonkocbjadbfplnigmagldckm"
+_MCP_CLI_PATH = "/Users/bytedance/.npm/_npx/86170c4cd1c5da32/node_modules/@playwright/mcp/cli.js"
+
+_CLOSE_TABS_APPLESCRIPT = f'''
+tell application "Google Chrome"
+    repeat with w in windows
+        set n to count of tabs of w
+        repeat with i from n to 1 by -1
+            if URL of tab i of w contains "{_MCP_EXTENSION_ID}" then
+                close tab i of w
+            end if
+        end repeat
+        if (count of tabs of w) = 0 then close w
+    end repeat
+end tell
+'''
 
 
 def _close_extension_tabs():
     """Close all Playwright MCP extension tabs in Chrome via AppleScript."""
     if sys.platform != "darwin":
         return
-    script = f'''
-    tell application "Google Chrome"
-        repeat with w in windows
-            set n to count of tabs of w
-            repeat with i from n to 1 by -1
-                if URL of tab i of w contains "{_MCP_EXTENSION_ID}" then
-                    close tab i of w
-                end if
-            end repeat
-            if (count of tabs of w) = 0 then close w
-        end repeat
-    end tell
-    '''
     with contextlib.suppress(Exception):
-        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+        subprocess.run(["osascript", "-e", _CLOSE_TABS_APPLESCRIPT], capture_output=True, timeout=5)
+
+
+def _mcp_init_message():
+    """Build the JSON-RPC initialize message."""
+    return json.dumps({
+        "jsonrpc": "2.0", "id": 0, "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "browser-use-skill", "version": "1.0"},
+        },
+    })
+
+
+def _parse_mcp_response(raw: str, call_id: int) -> dict | None:
+    """Parse a JSON-RPC response line, returning a result dict or None if not matching."""
+    try:
+        msg = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if msg.get("id") != call_id:
+        return None
+    if "error" in msg:
+        return {"success": False, "error": msg["error"].get("message", str(msg["error"]))}
+    content = msg.get("result", {}).get("content", [])
+    texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+    return {"success": True, "output": "\n".join(texts)}
 
 
 class McpSession:
@@ -65,31 +93,18 @@ class McpSession:
         self._next_id = 1
 
     def start(self):
-        token = os.environ.get("ALEX_BROWSER_BRIDGE_TOKEN", "")
         env = {**os.environ}
+        token = env.get("ALEX_BROWSER_BRIDGE_TOKEN", "")
         if token:
             env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] = token
-
         self.proc = subprocess.Popen(
-            ["node", "/Users/bytedance/.npm/_npx/86170c4cd1c5da32/node_modules/@playwright/mcp/cli.js", "--extension"],
+            ["node", _MCP_CLI_PATH, "--extension"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             env=env, text=True,
         )
-
         self._reader_thread = threading.Thread(target=self._reader, daemon=True)
         self._reader_thread.start()
-
-        init_msg = json.dumps({
-            "jsonrpc": "2.0", "id": 0,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "browser-use-skill", "version": "1.0"},
-            },
-        })
-        self.proc.stdin.write(init_msg + "\n")
-        self.proc.stdin.flush()
+        self._send_raw(_mcp_init_message())
         time.sleep(2)
 
     def _reader(self):
@@ -98,34 +113,26 @@ class McpSession:
             if line:
                 self.lines.append(line)
 
+    def _send_raw(self, msg: str):
+        self.proc.stdin.write(msg + "\n")
+        self.proc.stdin.flush()
+
     def call(self, tool_name: str, arguments: dict) -> dict:
         """Send a single tool call and wait for its response."""
         call_id = self._next_id
         self._next_id += 1
-
-        call_msg = json.dumps({
+        self._send_raw(json.dumps({
             "jsonrpc": "2.0", "id": call_id,
             "method": "tools/call",
             "params": {"name": tool_name, "arguments": arguments},
-        })
-        self.proc.stdin.write(call_msg + "\n")
-        self.proc.stdin.flush()
-
+        }))
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
             for raw in self.lines:
-                try:
-                    msg = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                if msg.get("id") == call_id:
-                    if "error" in msg:
-                        return {"success": False, "error": msg["error"].get("message", str(msg["error"]))}
-                    content = msg.get("result", {}).get("content", [])
-                    texts = [c.get("text", "") for c in content if c.get("type") == "text"]
-                    return {"success": True, "output": "\n".join(texts)}
+                result = _parse_mcp_response(raw, call_id)
+                if result is not None:
+                    return result
             time.sleep(0.3)
-
         return {"success": False, "error": f"timeout waiting for response to call {call_id}"}
 
     def close(self):
@@ -137,15 +144,11 @@ class McpSession:
                 self.proc.wait(timeout=3)
             except Exception:
                 self.proc.kill()
-        # Clean up ALL extension tabs via AppleScript (works across contexts)
         _close_extension_tabs()
 
 
 def _call_mcp_tools(tool_calls: list[tuple[str, dict]], timeout: int = _CALL_TIMEOUT) -> list[dict]:
-    """Spawn one playwright-mcp process, send init + N tool calls, return results.
-
-    Kept for backward compatibility. Uses McpSession internally.
-    """
+    """Spawn one playwright-mcp process, send init + N tool calls, return results."""
     session = McpSession(timeout=timeout)
     session.start()
     results = []
@@ -162,7 +165,7 @@ def _call_single(tool_name: str, arguments: dict) -> dict:
     return results[0] if results else {"success": False, "error": "no response"}
 
 
-# ── Smart multi-step helper ──
+# -- Smart multi-step helpers --
 
 def _find_ref(snapshot_text: str, pattern: str) -> str | None:
     """Extract element ref from snapshot text matching a pattern."""
@@ -170,80 +173,63 @@ def _find_ref(snapshot_text: str, pattern: str) -> str | None:
     return m.group(1) if m else None
 
 
-def smart_post(session: McpSession, url: str, text_to_type: str, textbox_pattern: str, button_pattern: str) -> dict:
-    """Navigate to a page, wait for it to load, type text, and click a button.
-
-    All in one MCP session — no window stealing, no duplicate tabs.
-    """
-    # 1. Navigate in current tab (not a new one) via run_code
-    nav = session.call("browser_run_code", {
-        "code": f"async (page) => {{ await page.goto('{url}'); return page.url(); }}"
-    })
-    if not nav.get("success"):
-        # Fallback to browser_navigate
-        nav = session.call("browser_navigate", {"url": url})
-    if not nav.get("success"):
-        return nav
-
-    # 2. Wait for page to fully load (poll snapshot until textbox appears)
-    textbox_ref = None
-    for attempt in range(8):
+def _wait_for_element(session: McpSession, pattern: str, max_attempts: int = 8) -> str | None:
+    """Poll snapshot until element matching pattern appears, return ref or None."""
+    for _ in range(max_attempts):
         time.sleep(2)
         snap = session.call("browser_snapshot", {})
         if snap.get("success"):
-            textbox_ref = _find_ref(snap["output"], textbox_pattern)
-            if textbox_ref:
-                break
+            ref = _find_ref(snap["output"], pattern)
+            if ref:
+                return ref
+    return None
 
+
+def _find_enabled_post_button(output: str) -> str | None:
+    """Find the first enabled Post button ref from a snapshot."""
+    post_refs = re.findall(r'button\s+"Post"\s+\[ref=(e\d+)\]', output)
+    disabled = set(re.findall(r'button\s+"Post"\s+\[disabled\]\s+\[ref=(e\d+)\]', output))
+    enabled = [r for r in post_refs if r not in disabled]
+    if enabled:
+        return enabled[0]
+    # Fallback: button with nested Post text
+    nested = re.findall(r'button\s+\[ref=(e\d+)\](?:\s*\[cursor=pointer\])?\s*:\s*\n\s*-\s*generic.*?Post', output)
+    disabled2 = set(re.findall(r'button\s+\[disabled\]\s+\[ref=(e\d+)\]', output))
+    return next((r for r in nested if r not in disabled2), None)
+
+
+def _click_post_button(session: McpSession) -> dict:
+    """Snapshot, find enabled Post button, click it, return result."""
+    snap = session.call("browser_snapshot", {})
+    if not snap.get("success"):
+        return snap
+    button_ref = _find_enabled_post_button(snap["output"])
+    if not button_ref:
+        return {"success": False, "error": "enabled Post button not found", "snapshot": snap["output"][:3000]}
+    click_result = session.call("browser_click", {"ref": button_ref, "element": "Post button"})
+    time.sleep(3)
+    final = session.call("browser_snapshot", {})
+    return {"success": click_result.get("success", False), "click_result": click_result, "final_snapshot": final.get("output", "")[:1000]}
+
+
+def smart_post(session: McpSession, url: str, text_to_type: str, textbox_pattern: str, button_pattern: str) -> dict:
+    """Navigate, type text, click Post — all in one MCP session."""
+    nav = session.call("browser_run_code", {"code": f"async (page) => {{ await page.goto('{url}'); return page.url(); }}"})
+    if not nav.get("success"):
+        nav = session.call("browser_navigate", {"url": url})
+    if not nav.get("success"):
+        return nav
+    textbox_ref = _wait_for_element(session, textbox_pattern)
     if not textbox_ref:
         return {"success": False, "error": f"textbox matching '{textbox_pattern}' not found after retries"}
-
-    # 3. Type text
     type_result = session.call("browser_type", {"ref": textbox_ref, "text": text_to_type, "submit": False})
     if not type_result.get("success"):
         return type_result
-
     time.sleep(2)
-
-    # 4. Snapshot to find button
-    snap2 = session.call("browser_snapshot", {})
-    if not snap2.get("success"):
-        return snap2
-
-    # Find the enabled Post button (not the disabled one)
-    # Look for button with "Post" that is NOT disabled
-    output = snap2["output"]
-    # Find all Post button refs
-    post_refs = re.findall(r'button\s+"Post"\s+\[ref=(e\d+)\]', output)
-    disabled_refs = set(re.findall(r'button\s+"Post"\s+\[disabled\]\s+\[ref=(e\d+)\]', output))
-    enabled_post_refs = [r for r in post_refs if r not in disabled_refs]
-
-    if not enabled_post_refs:
-        # Maybe button text is inside a child element
-        # Look for button [ref=eXXX] followed by "Post" text
-        post_refs2 = re.findall(r'button\s+\[ref=(e\d+)\](?:\s*\[cursor=pointer\])?\s*:\s*\n\s*-\s*generic.*?Post', output)
-        disabled_refs2 = set(re.findall(r'button\s+\[disabled\]\s+\[ref=(e\d+)\]', output))
-        enabled_post_refs = [r for r in post_refs2 if r not in disabled_refs2]
-
-    if not enabled_post_refs:
-        return {"success": False, "error": "enabled Post button not found", "snapshot": output[:3000]}
-
-    button_ref = enabled_post_refs[0]
-
-    # 5. Click Post
-    click_result = session.call("browser_click", {"ref": button_ref, "element": "Post button"})
-    time.sleep(3)
-
-    # 6. Final snapshot to confirm
-    final = session.call("browser_snapshot", {})
-    return {
-        "success": click_result.get("success", False),
-        "click_result": click_result,
-        "final_snapshot": final.get("output", "")[:1000],
-    }
+    return _click_post_button(session)
 
 
-# ── Actions ──
+# -- Actions --
 
 def navigate(a: dict) -> dict:
     url = a.get("url", "")
@@ -316,13 +302,7 @@ def wait_for(a: dict) -> dict:
 
 
 def pipeline(a: dict) -> dict:
-    """Run multiple actions in one browser session.
-
-    Example: {"action": "pipeline", "steps": [
-        {"tool": "browser_navigate", "args": {"url": "https://x.com"}},
-        {"tool": "browser_snapshot", "args": {}}
-    ]}
-    """
+    """Run multiple actions in one browser session."""
     steps = a.get("steps", [])
     if not steps:
         return {"success": False, "error": "steps is required"}
@@ -332,14 +312,13 @@ def pipeline(a: dict) -> dict:
 
 
 def post(a: dict) -> dict:
-    """Smart post: navigate to URL, find textbox, type text, click Post — all in one session."""
+    """Smart post: navigate to URL, find textbox, type text, click Post."""
     url = a.get("url", "")
     text = a.get("text", "")
     textbox = a.get("textbox_pattern", 'textbox.*Post text')
     button = a.get("button_pattern", 'button.*Post')
     if not url or not text:
         return {"success": False, "error": "url and text are required"}
-
     session = McpSession(timeout=int(a.get("timeout", 45)))
     session.start()
     try:

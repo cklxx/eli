@@ -1,6 +1,5 @@
 //! Conduit-driven runtime engine to process prompts.
 
-mod agent_command;
 mod agent_request;
 mod agent_run;
 
@@ -45,25 +44,25 @@ impl Agent {
         }
     }
 
-    /// Lazily initialise and return the tape service.
-    pub fn tapes(&mut self) -> &TapeService {
+    /// Ensure the tape service is initialised.
+    fn ensure_tapes(&mut self) {
         if self.tapes.is_none() {
             let tapes_dir = self.settings.home.join("tapes");
             let file_store = FileTapeStore::new(tapes_dir.clone());
             let fork_store = ForkTapeStore::from_sync(file_store);
             self.tapes = Some(TapeService::new(tapes_dir, fork_store));
         }
+    }
+
+    /// Lazily initialise and return the tape service.
+    pub fn tapes(&mut self) -> &TapeService {
+        self.ensure_tapes();
         self.tapes.as_ref().unwrap()
     }
 
     /// Mutable access to the tape service.
     pub fn tapes_mut(&mut self) -> &mut TapeService {
-        if self.tapes.is_none() {
-            let tapes_dir = self.settings.home.join("tapes");
-            let file_store = FileTapeStore::new(tapes_dir.clone());
-            let fork_store = ForkTapeStore::from_sync(file_store);
-            self.tapes = Some(TapeService::new(tapes_dir, fork_store));
-        }
+        self.ensure_tapes();
         self.tapes.as_mut().unwrap()
     }
 
