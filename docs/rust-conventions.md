@@ -440,9 +440,163 @@ handle.abort();
 
 ---
 
-## 5. Code Quality
+## 5. Structural Design
 
-### 5.1 clone() Audit
+### 5.1 Small Functions + Single Responsibility
+
+Each function does one thing. The top-level flow reads like a script.
+
+```rust
+// ✅ Main flow reads like a recipe
+fn process(path: &str) -> Result<()> {
+    let raw = load(path)?;
+    let parsed = parse(raw)?;
+    let validated = validate(parsed)?;
+    save(validated)?;
+    Ok(())
+}
+
+// Each step is independently testable, composable, and replaceable.
+fn load(path: &str) -> Result<Vec<u8>> { /* one job: read bytes */ }
+fn parse(raw: Vec<u8>) -> Result<Config> { /* one job: deserialize */ }
+fn validate(cfg: Config) -> Result<Config> { /* one job: check invariants */ }
+fn save(cfg: Config) -> Result<()> { /* one job: persist */ }
+
+// ❌ God function — loads, parses, validates, transforms, saves, logs, all in one
+fn do_everything(path: &str) -> Result<()> {
+    let bytes = std::fs::read(path)?;
+    let cfg: Config = serde_json::from_slice(&bytes)?;
+    if cfg.port < 1024 { return Err(anyhow!("bad port")); }
+    let transformed = /* 50 lines of logic */;
+    std::fs::write("out.json", serde_json::to_vec(&transformed)?)?;
+    tracing::info!("done");
+    Ok(())
+}
+```
+
+**Rule**: If a function has more than one reason to change, split it.
+
+### 5.2 Parse, Don't Validate
+
+Validation returns a bool — the knowledge lives only in your head. Parsing transforms input into a stricter type — the compiler remembers for you.
+
+```rust
+// ❌ Validate: caller must remember to check every time
+fn send_email(addr: &str) -> Result<()> {
+    if !addr.contains('@') { return Err(anyhow!("invalid email")); }
+    // ... every function that takes an email repeats this check
+}
+
+// ✅ Parse: validity encoded in the type, checked once at the boundary
+struct Email(String);
+
+impl Email {
+    fn parse(input: &str) -> Result<Self> {
+        if input.contains('@') && input.len() > 3 {
+            Ok(Email(input.to_owned()))
+        } else {
+            Err(anyhow!("invalid email: {input}"))
+        }
+    }
+
+    fn as_str(&self) -> &str { &self.0 }
+}
+
+fn send_email(addr: &Email) -> Result<()> {
+    // addr is always valid — no runtime check needed
+}
+```
+
+**Rule**: Parse at the system boundary (user input, API response, file read). Inner functions accept parsed types, never raw strings.
+
+### 5.3 Make Illegal States Unrepresentable
+
+Use enums and type privacy so invalid states cannot be constructed.
+
+```rust
+// ❌ Optional fields → runtime checks everywhere
+struct Connection {
+    state: String,           // "connecting", "connected", "closed"
+    socket: Option<Socket>,  // only Some when connected — but compiler doesn't know
+    error: Option<String>,   // only Some when closed — but compiler doesn't know
+}
+
+// ✅ Enum makes invalid states impossible
+enum Connection {
+    Connecting { addr: SocketAddr },
+    Connected { socket: Socket },
+    Closed { reason: String },
+}
+
+// You can't have a socket in the Connecting state or an error in Connected.
+// Pattern matching forces you to handle every state.
+impl Connection {
+    fn send(&self, data: &[u8]) -> Result<()> {
+        match self {
+            Connection::Connected { socket } => socket.write(data),
+            Connection::Connecting { .. } => Err(anyhow!("not yet connected")),
+            Connection::Closed { reason } => Err(anyhow!("closed: {reason}")),
+        }
+    }
+}
+```
+
+**Rule**: If two fields are mutually exclusive, they belong in separate enum variants, not as `Option`s on the same struct.
+
+### 5.4 Module Privacy as API Boundary
+
+Keep constructors private. Expose only validated factory functions.
+
+```rust
+mod config {
+    pub struct Port(u16);  // field is private — can't construct from outside
+
+    impl Port {
+        pub fn new(value: u16) -> Result<Self, String> {
+            if value >= 1024 {
+                Ok(Port(value))
+            } else {
+                Err(format!("port {value} requires root"))
+            }
+        }
+
+        pub fn get(&self) -> u16 { self.0 }
+    }
+}
+
+// Outside the module:
+// Port(80)       → compile error, field is private
+// Port::new(80)  → Err at runtime, caught at boundary
+// Port::new(8080) → Ok, guaranteed valid from here on
+```
+
+### 5.5 Thin main, Fat lib
+
+`main.rs` is a thin shell — parse CLI args, set up tracing, call into `lib.rs`. Business logic lives in the library crate.
+
+```rust
+// main.rs — thin
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    tracing_subscriber::init();
+    myapp::run(args)
+}
+
+// lib.rs — fat
+pub fn run(args: Args) -> Result<()> {
+    let config = Config::load(&args.config_path)?;
+    let server = Server::build(config)?;
+    server.start()
+}
+```
+
+**Why**: Library code is testable, reusable, and can be called from multiple binary targets.
+
+---
+
+## 6. Code Quality
+
+### 6.1 clone() Audit
 
 Every `.clone()` must answer: **why can't a reference work?**
 
@@ -452,7 +606,7 @@ Every `.clone()` must answer: **why can't a reference work?**
 | Cross-`spawn` needs `'static` | `Vec<T>` cloned then read-only → use `&[T]` |
 | Small `serde_json::Value` | Large struct cloned for one field → extract field first |
 
-### 5.2 Naming
+### 6.2 Naming
 
 | Type | Rule | Example |
 |------|------|---------|
@@ -462,13 +616,13 @@ Every `.clone()` must answer: **why can't a reference work?**
 | Bool-returning method | `is_` / `has_` / `can_` | `.is_empty()`, `.has_tools()` |
 | Conversion method | `into_` / `as_` / `to_` | `.into_inner()`, `.as_str()`, `.to_string()` |
 
-### 5.3 Documentation
+### 6.3 Documentation
 
 - Public API: `///` required
 - `unsafe` / `expect`: `// SAFETY:` comment
 - Complex algorithms: link to design doc
 
-### 5.4 Build Verification
+### 6.4 Build Verification
 
 After each logical unit, verify immediately:
 
