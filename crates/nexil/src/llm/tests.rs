@@ -1213,3 +1213,376 @@ fn test_e2e_image_with_history_and_system() {
     let user_content = normalized[3]["content"].as_array().unwrap();
     assert_eq!(user_content[1]["type"], "image");
 }
+
+// ===== Image stripping for persistence =====
+
+#[test]
+fn test_strip_image_blocks_replaces_image_base64() {
+    let msg = json!({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "look at this"},
+            {"type": "image_base64", "mime_type": "image/jpeg", "data": "AAAA"},
+        ]
+    });
+    let stripped = strip_image_blocks_for_persistence(&msg);
+    let content = stripped["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "look at this");
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], "[image: image_0.jpeg]");
+}
+
+#[test]
+fn test_strip_image_blocks_replaces_image_type() {
+    let msg = json!({
+        "role": "user",
+        "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "BBB"}},
+        ]
+    });
+    let stripped = strip_image_blocks_for_persistence(&msg);
+    let content = stripped["content"].as_array().unwrap();
+    assert_eq!(content[0]["text"], "[image: image_0.png]");
+}
+
+#[test]
+fn test_strip_image_blocks_replaces_image_url() {
+    let msg = json!({
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/gif;base64,AAA"}},
+        ]
+    });
+    let stripped = strip_image_blocks_for_persistence(&msg);
+    let content = stripped["content"].as_array().unwrap();
+    // No mime_type field → falls back to image/png → .png extension
+    assert_eq!(content[0]["text"], "[image: image_0.png]");
+}
+
+#[test]
+fn test_strip_image_blocks_multiple_images_get_indexed() {
+    let msg = json!({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "two pics:"},
+            {"type": "image_base64", "mime_type": "image/jpeg", "data": "A"},
+            {"type": "text", "text": "and"},
+            {"type": "image_base64", "mime_type": "image/webp", "data": "B"},
+        ]
+    });
+    let stripped = strip_image_blocks_for_persistence(&msg);
+    let content = stripped["content"].as_array().unwrap();
+    assert_eq!(content.len(), 4);
+    assert_eq!(content[0]["text"], "two pics:");
+    assert_eq!(content[1]["text"], "[image: image_0.jpeg]");
+    assert_eq!(content[2]["text"], "and");
+    assert_eq!(content[3]["text"], "[image: image_1.webp]");
+}
+
+#[test]
+fn test_strip_image_blocks_ignores_assistant_messages() {
+    let msg = json!({
+        "role": "assistant",
+        "content": [
+            {"type": "image_base64", "mime_type": "image/png", "data": "X"},
+        ]
+    });
+    let stripped = strip_image_blocks_for_persistence(&msg);
+    // Should be identical — assistant messages pass through
+    assert_eq!(stripped, msg);
+}
+
+#[test]
+fn test_strip_image_blocks_passes_through_string_content() {
+    let msg = json!({"role": "user", "content": "just text, no images"});
+    let stripped = strip_image_blocks_for_persistence(&msg);
+    assert_eq!(stripped, msg);
+}
+
+#[test]
+fn test_strip_image_blocks_preserves_other_fields() {
+    let msg = json!({
+        "role": "user",
+        "name": "alice",
+        "content": [
+            {"type": "text", "text": "hi"},
+            {"type": "image_base64", "mime_type": "image/jpeg", "data": "X"},
+        ]
+    });
+    let stripped = strip_image_blocks_for_persistence(&msg);
+    assert_eq!(stripped["role"], "user");
+    assert_eq!(stripped["name"], "alice");
+}
+
+// ===== Spill reversibility =====
+
+#[test]
+fn test_spill_file_contains_exact_original_content() {
+    use crate::tape::spill::{self, DEFAULT_SPILL};
+    let dir = tempfile::tempdir().unwrap();
+    // Build content that's larger than threshold (500 chars)
+    let original: String = (0..100)
+        .map(|i| format!("line {i}: some data here"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(original.len() > DEFAULT_SPILL.threshold_chars);
+
+    let truncated = spill::spill_if_needed(&original, "call_42", dir.path(), &DEFAULT_SPILL)
+        .unwrap()
+        .expect("should spill");
+
+    // Truncated version is shorter
+    assert!(truncated.len() < original.len());
+
+    // File on disk contains the EXACT original — byte-for-byte reversible
+    let recovered = std::fs::read_to_string(dir.path().join("call_42.txt")).unwrap();
+    assert_eq!(recovered, original);
+}
+
+#[test]
+fn test_spill_reversibility_with_unicode() {
+    use crate::tape::spill::{self, SpillConfig};
+    let dir = tempfile::tempdir().unwrap();
+    let config = SpillConfig {
+        threshold_chars: 10,
+        head_lines: 2,
+        tail_lines: 1,
+    };
+    let original = "你好世界\n日本語テスト\nрусский\n한국어\n🎉🎊🎈";
+    let _ = spill::spill_if_needed(original, "unicode", dir.path(), &config)
+        .unwrap()
+        .expect("should spill");
+
+    let recovered = std::fs::read_to_string(dir.path().join("unicode.txt")).unwrap();
+    assert_eq!(recovered, original);
+}
+
+#[test]
+fn test_spill_at_exact_threshold_does_not_spill() {
+    use crate::tape::spill::{self, SpillConfig};
+    let dir = tempfile::tempdir().unwrap();
+    let config = SpillConfig {
+        threshold_chars: 10,
+        head_lines: 5,
+        tail_lines: 2,
+    };
+    let content = "0123456789"; // exactly 10 chars
+    let result = spill::spill_if_needed(content, "exact", dir.path(), &config).unwrap();
+    assert!(result.is_none(), "should not spill at exact threshold");
+}
+
+#[test]
+fn test_spill_one_over_threshold_does_spill() {
+    use crate::tape::spill::{self, SpillConfig};
+    let dir = tempfile::tempdir().unwrap();
+    let config = SpillConfig {
+        threshold_chars: 10,
+        head_lines: 5,
+        tail_lines: 2,
+    };
+    let content = "01234567890"; // 11 chars
+    let result = spill::spill_if_needed(content, "over", dir.path(), &config).unwrap();
+    assert!(result.is_some(), "should spill one over threshold");
+
+    let recovered = std::fs::read_to_string(dir.path().join("over.txt")).unwrap();
+    assert_eq!(recovered, content);
+}
+
+// ===== LLM spill integration =====
+
+fn make_spill_llm(spill_dir: std::path::PathBuf) -> LLM {
+    LLM::builder()
+        .model("openai:gpt-4o")
+        .api_key("test")
+        .spill_dir(spill_dir)
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn test_maybe_spill_result_small_passes_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = make_spill_llm(dir.path().to_path_buf());
+    let result = json!("small output");
+    let spilled = llm.maybe_spill_result(&result, "tape__session", "call_1");
+    assert_eq!(spilled, result);
+}
+
+#[test]
+fn test_maybe_spill_result_large_truncates_and_saves() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = make_spill_llm(dir.path().to_path_buf());
+    let large: String = (0..100)
+        .map(|i| format!("result line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let result = json!(large);
+    let spilled = llm.maybe_spill_result(&result, "tape__session", "call_big");
+
+    // Truncated
+    let spilled_str = spilled.as_str().unwrap();
+    assert!(spilled_str.len() < large.len());
+    assert!(spilled_str.contains("omitted"));
+    assert!(spilled_str.contains("call_big.txt"));
+
+    // Reversible: file on disk has exact original
+    let spill_file = dir.path().join("tape__session.d").join("call_big.txt");
+    assert!(spill_file.exists());
+    assert_eq!(std::fs::read_to_string(&spill_file).unwrap(), large);
+}
+
+#[test]
+fn test_maybe_spill_result_non_string_passes_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = make_spill_llm(dir.path().to_path_buf());
+    let result = json!({"key": "value", "num": 42});
+    let spilled = llm.maybe_spill_result(&result, "tape__sess", "call_obj");
+    assert_eq!(spilled, result);
+}
+
+#[test]
+fn test_maybe_spill_no_spill_dir_passes_through() {
+    let llm = LLM::builder()
+        .model("openai:gpt-4o")
+        .api_key("test")
+        .build()
+        .unwrap();
+    let large: String = (0..100)
+        .map(|i| format!("L{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let result = json!(large);
+    let spilled = llm.maybe_spill_result(&result, "tape", "call");
+    assert_eq!(spilled, result, "no spill_dir → pass through unchanged");
+}
+
+#[test]
+fn test_spill_tool_call_args_large() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = make_spill_llm(dir.path().to_path_buf());
+
+    let large_args: String = (0..100)
+        .map(|i| format!("arg line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let call = json!({
+        "id": "call_write",
+        "type": "function",
+        "function": {
+            "name": "fs.write",
+            "arguments": large_args,
+        }
+    });
+    let spilled = llm.maybe_spill_tool_call(&call, "tape__sess");
+
+    // Structure preserved
+    assert_eq!(spilled["id"], "call_write");
+    assert_eq!(spilled["function"]["name"], "fs.write");
+
+    // Arguments truncated
+    let spilled_args = spilled["function"]["arguments"].as_str().unwrap();
+    assert!(spilled_args.len() < large_args.len());
+    assert!(spilled_args.contains("omitted"));
+
+    // Reversible
+    let args_file = dir.path().join("tape__sess.d").join("call_write.args.txt");
+    assert!(args_file.exists());
+    assert_eq!(std::fs::read_to_string(&args_file).unwrap(), large_args);
+}
+
+#[test]
+fn test_spill_tool_call_args_small_passes_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = make_spill_llm(dir.path().to_path_buf());
+
+    let call = json!({
+        "id": "call_small",
+        "type": "function",
+        "function": {
+            "name": "tape.info",
+            "arguments": "{\"tape\": \"main\"}",
+        }
+    });
+    let spilled = llm.maybe_spill_tool_call(&call, "tape__sess");
+    assert_eq!(spilled, call, "small args should not be spilled");
+}
+
+#[test]
+fn test_spill_both_args_and_result_coexist() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = make_spill_llm(dir.path().to_path_buf());
+    let tape = "test__both";
+
+    let large_args: String = (0..80)
+        .map(|i| format!("arg {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let large_result: String = (0..80)
+        .map(|i| format!("result {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let call = json!({
+        "id": "call_x",
+        "type": "function",
+        "function": {"name": "test", "arguments": large_args}
+    });
+    let _ = llm.maybe_spill_tool_call(&call, tape);
+    let _ = llm.maybe_spill_result(&json!(large_result), tape, "call_x");
+
+    // Both files exist in the same .d directory
+    let spill_dir = dir.path().join("test__both.d");
+    let args_file = spill_dir.join("call_x.args.txt");
+    let result_file = spill_dir.join("call_x.txt");
+    assert!(args_file.exists());
+    assert!(result_file.exists());
+
+    // Both are fully reversible
+    assert_eq!(std::fs::read_to_string(&args_file).unwrap(), large_args);
+    assert_eq!(std::fs::read_to_string(&result_file).unwrap(), large_result);
+}
+
+#[test]
+fn test_spill_dir_named_after_tape() {
+    use crate::tape::spill::spill_dir_for_tape;
+    let base = std::path::Path::new("/home/user/.eli/tapes");
+    let dir = spill_dir_for_tape(base, "workspace___session");
+    assert_eq!(
+        dir,
+        std::path::PathBuf::from("/home/user/.eli/tapes/workspace___session.d")
+    );
+}
+
+#[test]
+fn test_spill_truncated_output_has_head_and_tail() {
+    use crate::tape::spill::{self, SpillConfig};
+    let dir = tempfile::tempdir().unwrap();
+    let config = SpillConfig {
+        threshold_chars: 10,
+        head_lines: 3,
+        tail_lines: 2,
+    };
+    let content = "H1\nH2\nH3\nM1\nM2\nM3\nT1\nT2";
+    let truncated = spill::spill_if_needed(content, "c", dir.path(), &config)
+        .unwrap()
+        .unwrap();
+
+    // Head lines present
+    assert!(truncated.contains("H1"));
+    assert!(truncated.contains("H2"));
+    assert!(truncated.contains("H3"));
+    // Middle omitted
+    assert!(!truncated.contains("M1"));
+    assert!(!truncated.contains("M2"));
+    assert!(!truncated.contains("M3"));
+    // Tail lines present
+    assert!(truncated.contains("T1"));
+    assert!(truncated.contains("T2"));
+    // Omission notice
+    assert!(truncated.contains("3 lines,"));
+    assert!(truncated.contains("chars omitted"));
+    // File path reference
+    assert!(truncated.contains("c.txt"));
+}
