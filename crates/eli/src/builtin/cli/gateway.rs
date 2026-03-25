@@ -235,7 +235,7 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     let mut channels: HashMap<String, Arc<dyn Channel>> = HashMap::new();
-    let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let mut tasks = tokio::task::JoinSet::new();
 
     // -- Telegram --
     let tg_settings = TelegramSettings::from_env();
@@ -244,11 +244,11 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         println!("Starting Telegram channel...");
         let ch = tg.clone();
         let c = cancel.clone();
-        tasks.push(tokio::spawn(async move {
+        tasks.spawn(async move {
             if let Err(e) = Channel::start(&*ch, c).await {
                 eprintln!("Telegram channel error: {e}");
             }
-        }));
+        });
         channels.insert("telegram".to_owned(), tg);
     }
 
@@ -262,11 +262,11 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         println!("Starting Webhook channel...");
         let ch = wh.clone();
         let c = cancel.clone();
-        tasks.push(tokio::spawn(async move {
+        tasks.spawn(async move {
             if let Err(e) = Channel::start(&*ch, c).await {
                 eprintln!("Webhook channel error: {e}");
             }
-        }));
+        });
         channels.insert("webhook".to_owned(), wh);
     }
 
@@ -287,14 +287,22 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
 
     // Handle Ctrl-C. First signal → graceful shutdown. Second → force exit.
     let cancel_for_signal = cancel.clone();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        println!("\nShutting down...");
-        cancel_for_signal.cancel();
-        // Second Ctrl-C → force exit immediately.
-        let _ = tokio::signal::ctrl_c().await;
-        eprintln!("\nForce exit.");
-        std::process::exit(1);
+    let signal_shutdown = cancel.clone();
+    tasks.spawn(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nShutting down...");
+                cancel_for_signal.cancel();
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        eprintln!("\nForce exit.");
+                        std::process::exit(1);
+                    }
+                    _ = signal_shutdown.cancelled() => {}
+                }
+            }
+            _ = signal_shutdown.cancelled() => {}
+        }
     });
 
     let framework = super::builtin_framework().await;
@@ -507,8 +515,12 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
             eprintln!("Error stopping {name}: {e}");
         }
     }
-    for task in tasks {
-        let _ = task.await;
+    while let Some(result) = tasks.join_next().await {
+        if let Err(err) = result
+            && !err.is_cancelled()
+        {
+            eprintln!("Gateway task failed: {err}");
+        }
     }
     println!("Gateway stopped.");
     Ok(())

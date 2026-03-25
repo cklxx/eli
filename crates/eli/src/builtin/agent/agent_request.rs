@@ -112,8 +112,7 @@ fn resolve_stored_api_key(
     }
 
     if provider.is_empty() || provider == "github-copilot" {
-        let resolver =
-            nexil::auth::github_copilot::github_copilot_oauth_resolver(None, None, None);
+        let resolver = nexil::auth::github_copilot::github_copilot_oauth_resolver(None, None, None);
         if let Some(token) = resolver("github-copilot") {
             key_map.insert("github-copilot".to_string(), token);
         }

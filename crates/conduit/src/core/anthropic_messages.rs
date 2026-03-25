@@ -19,7 +19,12 @@ pub fn split_system_and_conversation(messages_payload: &[Value]) -> (Vec<String>
     let mut index = 0;
 
     while index < messages_payload.len() {
-        index = split_message(messages_payload, index, &mut system_parts, &mut conversation);
+        index = split_message(
+            messages_payload,
+            index,
+            &mut system_parts,
+            &mut conversation,
+        );
     }
 
     (system_parts, normalize_messages(conversation))
@@ -72,7 +77,11 @@ fn process_tool_assistant(
         return index + 1;
     }
     push_assistant_entry(msg, conversation, &resolution.resolved_ids);
-    push_tool_result_entry(resolution.tool_result_blocks, resolution.trailing_user_blocks, conversation);
+    push_tool_result_entry(
+        resolution.tool_result_blocks,
+        resolution.trailing_user_blocks,
+        conversation,
+    );
     resolution.next_index
 }
 

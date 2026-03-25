@@ -286,112 +286,91 @@ async fn download_file(bot: &Bot, file_id: &str) -> Vec<u8> {
     }
 }
 
+fn format_captioned_content(base: String, caption: &str) -> String {
+    if caption.is_empty() {
+        base
+    } else {
+        format!("{base} Caption: {caption}")
+    }
+}
+
+fn format_audio_content(msg: &Message) -> String {
+    let Some(MediaKind::Audio(audio)) = common_media_kind(msg) else {
+        return "[Audio]".to_owned();
+    };
+    let title = audio.audio.title.as_deref().unwrap_or("Unknown");
+    let performer = audio.audio.performer.as_deref().unwrap_or("");
+    let duration = audio.audio.duration.seconds();
+    if performer.is_empty() {
+        format!("[Audio: {title} ({duration}s)]")
+    } else {
+        format!("[Audio: {performer} - {title} ({duration}s)]")
+    }
+}
+
+fn format_sticker_content(msg: &Message) -> String {
+    let Some(MediaKind::Sticker(sticker)) = common_media_kind(msg) else {
+        return "[Sticker]".to_owned();
+    };
+    let emoji = sticker.sticker.emoji.as_deref().unwrap_or("");
+    let set_name = sticker.sticker.set_name.as_deref().unwrap_or("");
+    if emoji.is_empty() {
+        format!("[Sticker from {set_name}]")
+    } else {
+        format!("[Sticker: {emoji} from {set_name}]")
+    }
+}
+
+fn format_document_content(msg: &Message, caption: &str) -> String {
+    let Some(MediaKind::Document(document)) = common_media_kind(msg) else {
+        return "[Document: unknown (application/octet-stream)]".to_owned();
+    };
+    let file_name = document.document.file_name.as_deref().unwrap_or("unknown");
+    let mime_type = mime_or_default(
+        document.document.mime_type.as_ref(),
+        "application/octet-stream",
+    );
+    let base = format!("[Document: {file_name} ({mime_type})]");
+    format_captioned_content(base, caption)
+}
+
+fn video_duration_seconds(msg: &Message) -> u32 {
+    match common_media_kind(msg) {
+        Some(MediaKind::Video(video)) => video.video.duration.seconds(),
+        _ => 0,
+    }
+}
+
+fn voice_duration_seconds(msg: &Message) -> u32 {
+    match common_media_kind(msg) {
+        Some(MediaKind::Voice(voice)) => voice.voice.duration.seconds(),
+        _ => 0,
+    }
+}
+
+fn video_note_duration_seconds(msg: &Message) -> u32 {
+    match common_media_kind(msg) {
+        Some(MediaKind::VideoNote(video_note)) => video_note.video_note.duration.seconds(),
+        _ => 0,
+    }
+}
+
 /// Build a human-readable content string from the message.
 fn format_message_content(msg: &Message) -> String {
-    let msg_type = detect_message_type(msg);
     let caption = extract_caption(msg).unwrap_or("");
 
-    match msg_type {
+    match detect_message_type(msg) {
         "text" => msg.text().unwrap_or("").to_owned(),
-        "photo" => {
-            if caption.is_empty() {
-                "[Photo message]".to_owned()
-            } else {
-                format!("[Photo message] Caption: {caption}")
-            }
-        }
-        "audio" => {
-            if let TgMessageKind::Common(common) = &msg.kind
-                && let MediaKind::Audio(audio) = &common.media_kind
-            {
-                let title = audio.audio.title.as_deref().unwrap_or("Unknown");
-                let performer = audio.audio.performer.as_deref().unwrap_or("");
-                let duration = audio.audio.duration.seconds();
-                if performer.is_empty() {
-                    return format!("[Audio: {title} ({duration}s)]");
-                }
-                return format!("[Audio: {performer} - {title} ({duration}s)]");
-            }
-            "[Audio]".to_owned()
-        }
-        "sticker" => {
-            if let TgMessageKind::Common(common) = &msg.kind
-                && let MediaKind::Sticker(sticker) = &common.media_kind
-            {
-                let emoji = sticker.sticker.emoji.as_deref().unwrap_or("");
-                let set_name = sticker.sticker.set_name.as_deref().unwrap_or("");
-                if !emoji.is_empty() {
-                    return format!("[Sticker: {emoji} from {set_name}]");
-                }
-                return format!("[Sticker from {set_name}]");
-            }
-            "[Sticker]".to_owned()
-        }
-        "video" => {
-            let duration = if let TgMessageKind::Common(common) = &msg.kind {
-                if let MediaKind::Video(v) = &common.media_kind {
-                    v.video.duration.seconds()
-                } else {
-                    0
-                }
-            } else {
-                0
-            };
-            let base = format!("[Video: {duration}s]");
-            if caption.is_empty() {
-                base
-            } else {
-                format!("{base} Caption: {caption}")
-            }
-        }
-        "voice" => {
-            let duration = if let TgMessageKind::Common(common) = &msg.kind {
-                if let MediaKind::Voice(v) = &common.media_kind {
-                    v.voice.duration.seconds()
-                } else {
-                    0
-                }
-            } else {
-                0
-            };
-            format!("[Voice message: {duration}s]")
-        }
-        "document" => {
-            let (file_name, mime_type) = if let TgMessageKind::Common(common) = &msg.kind {
-                if let MediaKind::Document(d) = &common.media_kind {
-                    (
-                        d.document.file_name.as_deref().unwrap_or("unknown"),
-                        d.document
-                            .mime_type
-                            .as_ref()
-                            .map(|m| m.to_string())
-                            .unwrap_or_else(|| "application/octet-stream".to_owned()),
-                    )
-                } else {
-                    ("unknown", "application/octet-stream".to_owned())
-                }
-            } else {
-                ("unknown", "application/octet-stream".to_owned())
-            };
-            let base = format!("[Document: {file_name} ({mime_type})]");
-            if caption.is_empty() {
-                base
-            } else {
-                format!("{base} Caption: {caption}")
-            }
-        }
-        "video_note" => {
-            let duration = if let TgMessageKind::Common(common) = &msg.kind {
-                if let MediaKind::VideoNote(vn) = &common.media_kind {
-                    vn.video_note.duration.seconds()
-                } else {
-                    0
-                }
-            } else {
-                0
-            };
-            format!("[Video note: {duration}s]")
-        }
+        "photo" => format_captioned_content("[Photo message]".to_owned(), caption),
+        "audio" => format_audio_content(msg),
+        "sticker" => format_sticker_content(msg),
+        "video" => format_captioned_content(
+            format!("[Video: {}s]", video_duration_seconds(msg)),
+            caption,
+        ),
+        "voice" => format!("[Voice message: {}s]", voice_duration_seconds(msg)),
+        "document" => format_document_content(msg, caption),
+        "video_note" => format!("[Video note: {}s]", video_note_duration_seconds(msg)),
         _ => format!("[Unsupported message type: {msg_type}]"),
     }
 }

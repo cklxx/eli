@@ -286,11 +286,15 @@ mod tests {
         let msg = json!({"channel": "telegram", "count": 3});
         assert_eq!(required_str_field_of(&msg, "channel").unwrap(), "telegram");
         assert_eq!(
-            required_str_field_of(&msg, "missing").unwrap_err().to_string(),
+            required_str_field_of(&msg, "missing")
+                .unwrap_err()
+                .to_string(),
             "missing required argument 'missing'"
         );
         assert_eq!(
-            required_str_field_of(&msg, "count").unwrap_err().to_string(),
+            required_str_field_of(&msg, "count")
+                .unwrap_err()
+                .to_string(),
             "argument 'count' must be a string, got 3"
         );
     }

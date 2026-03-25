@@ -81,8 +81,7 @@ fn resolve_api_key_for_provider(provider: &str) -> anyhow::Result<String> {
                         .unwrap_or_else(|| std::path::PathBuf::from("."))
                         .join(".codex")
                 });
-            let resolver =
-                nexil::auth::openai_codex::codex_cli_api_key_resolver(Some(codex_home));
+            let resolver = nexil::auth::openai_codex::codex_cli_api_key_resolver(Some(codex_home));
             if let Some(key) = resolver("openai") {
                 return Ok(key);
             }

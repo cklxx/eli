@@ -4,14 +4,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use futures::future::BoxFuture;
 use nexil::tools::schema::ToolResult;
 use nexil::{ConduitError, ErrorKind};
 use nexil::{TapeEntry, TapeQuery, Tool, ToolContext};
-use futures::future::BoxFuture;
 use serde_json::Value;
 
 use crate::builtin::shell_manager::shell_manager;
 use crate::builtin::tape::TapeService;
+use crate::envelope::ValueExt;
 use crate::skills::discover_skills;
 use crate::tools::{REGISTRY, shorten_text};
 
@@ -103,36 +104,12 @@ fn resolve_path(state: &HashMap<String, Value>, raw_path: &str) -> Result<PathBu
     Ok(PathBuf::from(workspace).join(&path))
 }
 
-fn get_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    args.get(key).and_then(|v| v.as_str())
-}
-
-/// Extract a required string argument, returning a [`ConduitError`] if missing or wrong type.
-fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ConduitError> {
-    match args.get(key) {
-        Some(v) => v.as_str().ok_or_else(|| {
-            ConduitError::new(
-                ErrorKind::InvalidInput,
-                format!("argument '{}' must be a string, got {}", key, v),
-            )
-        }),
-        None => Err(ConduitError::new(
-            ErrorKind::InvalidInput,
-            format!("missing required argument '{}'", key),
-        )),
-    }
-}
-
-fn get_i64(args: &Value, key: &str) -> Option<i64> {
-    args.get(key).and_then(|v| v.as_i64())
-}
-
-fn get_bool(args: &Value, key: &str) -> Option<bool> {
-    args.get(key).and_then(|v| v.as_bool())
+fn invalid_input(error: anyhow::Error) -> ConduitError {
+    ConduitError::new(ErrorKind::InvalidInput, error.to_string())
 }
 
 fn get_notice_description(args: &Value) -> Option<&str> {
-    get_str(args, "description")
+    args.get_str_field("description")
         .map(str::trim)
         .filter(|s| !s.is_empty())
 }
@@ -294,15 +271,19 @@ fn tool_bash() -> Tool {
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                let cmd = require_str(&args, "cmd")?.to_owned();
+                let cmd = args
+                    .require_str_field("cmd")
+                    .map_err(invalid_input)?
+                    .to_owned();
                 let cwd_arg = args
                     .get("cwd")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_owned());
-                let timeout_secs = get_i64(&args, "timeout_seconds")
+                let timeout_secs = args
+                    .get_i64_field("timeout_seconds")
                     .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECONDS as i64)
                     as u64;
-                let background = get_bool(&args, "background").unwrap_or(false);
+                let background = args.get_bool_field("background").unwrap_or(false);
 
                 let workspace = ctx
                     .as_ref()
@@ -377,9 +358,12 @@ fn tool_bash_output() -> Tool {
         }),
         |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let shell_id = require_str(&args, "shell_id")?.to_owned();
-                let offset = get_i64(&args, "offset").unwrap_or(0).max(0) as usize;
-                let limit = get_i64(&args, "limit").map(|v| v.max(0) as usize);
+                let shell_id = args
+                    .require_str_field("shell_id")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                let offset = args.get_i64_field("offset").unwrap_or(0).max(0) as usize;
+                let limit = args.get_i64_field("limit").map(|v| v.max(0) as usize);
 
                 let mgr = shell_manager();
                 let (output, returncode, status) = mgr
@@ -432,7 +416,10 @@ fn tool_bash_kill() -> Tool {
         }),
         |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let shell_id = require_str(&args, "shell_id")?.to_owned();
+                let shell_id = args
+                    .require_str_field("shell_id")
+                    .map_err(invalid_input)?
+                    .to_owned();
                 let mgr = shell_manager();
                 let (_output, returncode, status) = mgr
                     .terminate(&shell_id)
@@ -470,9 +457,12 @@ fn tool_fs_read() -> Tool {
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                let raw_path = require_str(&args, "path")?.to_owned();
-                let offset = get_i64(&args, "offset").unwrap_or(0).max(0) as usize;
-                let limit = get_i64(&args, "limit").map(|v| v.max(0) as usize);
+                let raw_path = args
+                    .require_str_field("path")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                let offset = args.get_i64_field("offset").unwrap_or(0).max(0) as usize;
+                let limit = args.get_i64_field("limit").map(|v| v.max(0) as usize);
 
                 let state = ctx.map(|c| c.state).unwrap_or_default();
                 let resolved = resolve_path(&state, &raw_path)?;
@@ -525,8 +515,14 @@ fn tool_fs_write() -> Tool {
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                let raw_path = require_str(&args, "path")?.to_owned();
-                let content = require_str(&args, "content")?.to_owned();
+                let raw_path = args
+                    .require_str_field("path")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                let content = args
+                    .require_str_field("content")
+                    .map_err(invalid_input)?
+                    .to_owned();
 
                 let state = ctx.map(|c| c.state).unwrap_or_default();
                 let resolved = resolve_path(&state, &raw_path)?;
@@ -565,10 +561,19 @@ fn tool_fs_edit() -> Tool {
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                let raw_path = require_str(&args, "path")?.to_owned();
-                let old = require_str(&args, "old")?.to_owned();
-                let new = require_str(&args, "new")?.to_owned();
-                let start = get_i64(&args, "start").unwrap_or(0).max(0) as usize;
+                let raw_path = args
+                    .require_str_field("path")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                let old = args
+                    .require_str_field("old")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                let new = args
+                    .require_str_field("new")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                let start = args.get_i64_field("start").unwrap_or(0).max(0) as usize;
 
                 let state = ctx.map(|c| c.state).unwrap_or_default();
                 let resolved = resolve_path(&state, &raw_path)?;
@@ -624,7 +629,10 @@ fn tool_skill() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let name = require_str(&args, "name")?.to_owned();
+                let name = args
+                    .require_str_field("name")
+                    .map_err(invalid_input)?
+                    .to_owned();
                 let state = ctx.map(|c| c.state).unwrap_or_default();
 
                 // Check allowed skills.
@@ -724,14 +732,17 @@ fn tool_tape_search() -> Tool {
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                let query_text = require_str(&args, "query")?.to_owned();
+                let query_text = args
+                    .require_str_field("query")
+                    .map_err(invalid_input)?
+                    .to_owned();
                 if query_text.trim().is_empty() {
                     return Err(ConduitError::new(
                         ErrorKind::InvalidInput,
                         "query must not be empty",
                     ));
                 }
-                let limit = get_i64(&args, "limit").unwrap_or(20) as usize;
+                let limit = args.get_i64_field("limit").unwrap_or(20) as usize;
                 let tape_name = tape_name_from_context(ctx.as_ref())?;
                 let service = current_tape_service()?;
 
@@ -748,7 +759,9 @@ fn tool_tape_search() -> Tool {
                     .unwrap_or_else(|| vec!["message".to_owned(), "tool_result".to_owned()]);
 
                 let mut query = TapeQuery::new(&tape_name).kinds(kinds);
-                if let (Some(start), Some(end)) = (get_str(&args, "start"), get_str(&args, "end")) {
+                if let (Some(start), Some(end)) =
+                    (args.get_str_field("start"), args.get_str_field("end"))
+                {
                     query = query.between_dates(start.to_owned(), end.to_owned());
                 }
 
@@ -789,7 +802,7 @@ fn tool_tape_reset() -> Tool {
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                let archive = get_bool(&args, "archive").unwrap_or(false);
+                let archive = args.get_bool_field("archive").unwrap_or(false);
                 let tape_name = tape_name_from_context(ctx.as_ref())?;
                 let service = current_tape_service()?;
                 let result = service.reset(&tape_name, archive).await?;
@@ -818,8 +831,8 @@ fn tool_tape_handoff() -> Tool {
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                let name = get_str(&args, "name").unwrap_or("handoff").to_owned();
-                let summary = get_str(&args, "summary").unwrap_or("").to_owned();
+                let name = args.get_str_field("name").unwrap_or("handoff").to_owned();
+                let summary = args.get_str_field("summary").unwrap_or("").to_owned();
                 let tape_name = tape_name_from_context(ctx.as_ref())?;
                 let service = current_tape_service()?;
                 let state = if summary.is_empty() {
@@ -852,7 +865,7 @@ fn tool_tape_anchors() -> Tool {
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                let limit = get_i64(&args, "limit").unwrap_or(20) as usize;
+                let limit = args.get_i64_field("limit").unwrap_or(20) as usize;
                 let tape_name = tape_name_from_context(ctx.as_ref())?;
                 let service = current_tape_service()?;
                 let anchors = service.anchors(&tape_name, limit).await?;
@@ -882,7 +895,10 @@ fn tool_decision_set() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let text = require_str(&args, "text")?.to_owned();
+                let text = args
+                    .require_str_field("text")
+                    .map_err(invalid_input)?
+                    .to_owned();
                 if text.trim().is_empty() {
                     return Err(ConduitError::new(
                         ErrorKind::InvalidInput,
@@ -948,7 +964,7 @@ fn tool_decision_remove() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let index = get_i64(&args, "index").ok_or_else(|| {
+                let index = args.get_i64_field("index").ok_or_else(|| {
                     ConduitError::new(ErrorKind::InvalidInput, "missing required argument 'index'")
                 })? as usize;
                 if index == 0 {
@@ -1003,8 +1019,12 @@ fn tool_web_fetch() -> Tool {
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                let url = require_str(&args, "url")?.to_owned();
-                let timeout_secs = get_i64(&args, "timeout")
+                let url = args
+                    .require_str_field("url")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                let timeout_secs = args
+                    .get_i64_field("timeout")
                     .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECONDS as i64)
                     as u64;
 
@@ -1189,8 +1209,12 @@ fn tool_sidecar() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let tool_name = require_str(&args, "tool")?.to_owned();
-                let description = get_str(&args, "description")
+                let tool_name = args
+                    .require_str_field("tool")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                let description = args
+                    .get_str_field("description")
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(ToOwned::to_owned);

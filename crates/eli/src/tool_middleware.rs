@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use futures::future::BoxFuture;
 use nexil::Tool;
 use nexil::core::errors::{ConduitError, ErrorKind};
 use nexil::tools::context::ToolContext;
 use nexil::tools::schema::{ToolHandlerFn, ToolResult};
-use futures::future::BoxFuture;
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
