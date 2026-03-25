@@ -663,6 +663,7 @@ impl Channel for TelegramChannel {
             anyhow::bail!("invalid chat_id: {}", message.chat_id);
         }
 
+        // Send text if present.
         let text = serde_json::from_str::<serde_json::Value>(&message.content)
             .ok()
             .and_then(|val| {
@@ -673,17 +674,59 @@ impl Channel for TelegramChannel {
             })
             .unwrap_or_else(|| message.content.clone());
 
-        if text.trim().is_empty() {
-            return Ok(());
+        if !text.trim().is_empty() {
+            let md_result = bot
+                .send_message(ChatId(chat_id), &text)
+                .parse_mode(ParseMode::MarkdownV2)
+                .await;
+            if md_result.is_err() {
+                bot.send_message(ChatId(chat_id), &text).await?;
+            }
         }
 
-        let md_result = bot
-            .send_message(ChatId(chat_id), &text)
-            .parse_mode(ParseMode::MarkdownV2)
-            .await;
-        if md_result.is_err() {
-            bot.send_message(ChatId(chat_id), &text).await?;
+        // Send media if present.
+        if let Some(media) = message
+            .context
+            .get("outbound_media")
+            .and_then(|v| v.as_array())
+        {
+            for item in media {
+                let Some(path) = item.get("path").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !std::path::Path::new(path).exists() {
+                    warn!(path, "outbound_media: file not found, skipping");
+                    continue;
+                }
+                let media_type = item
+                    .get("media_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("document");
+                let input_file = teloxide::types::InputFile::file(path);
+                let result = match media_type {
+                    "image" => bot
+                        .send_photo(ChatId(chat_id), input_file)
+                        .await
+                        .map(|_| ()),
+                    "video" => bot
+                        .send_video(ChatId(chat_id), input_file)
+                        .await
+                        .map(|_| ()),
+                    "audio" => bot
+                        .send_audio(ChatId(chat_id), input_file)
+                        .await
+                        .map(|_| ()),
+                    _ => bot
+                        .send_document(ChatId(chat_id), input_file)
+                        .await
+                        .map(|_| ()),
+                };
+                if let Err(e) = result {
+                    error!(path, error = %e, "outbound_media: telegram send failed");
+                }
+            }
         }
+
         Ok(())
     }
 }

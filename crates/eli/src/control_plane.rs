@@ -53,6 +53,16 @@ impl TurnUsage {
     }
 }
 
+/// A media item to be sent outbound alongside the text reply.
+#[derive(Debug, Clone)]
+pub struct OutboundMedia {
+    pub path: String,
+    /// High-level type: "image", "audio", "video", "document".
+    pub media_type: String,
+    /// MIME type, e.g. "image/png".
+    pub mime_type: String,
+}
+
 /// Per-turn context set by the framework, read by agent internals.
 pub struct TurnContext {
     pub cancellation: CancellationToken,
@@ -62,6 +72,8 @@ pub struct TurnContext {
     pub save_events: Arc<Mutex<Vec<(String, Value)>>>,
     /// Optional callback to dispatch a message to the user mid-turn.
     pub dispatch: Option<DispatchFn>,
+    /// Media items accumulated during the turn for outbound delivery.
+    pub outbound_media: Arc<Mutex<Vec<OutboundMedia>>>,
 }
 
 /// Run `fut` with the given [`TurnContext`] bound to the current task.
@@ -114,6 +126,54 @@ pub async fn dispatch_mid_turn(envelope: Value) {
     let dispatch = TURN_CTX.try_with(|ctx| ctx.dispatch.clone()).ok().flatten();
     if let Some(f) = dispatch {
         f(envelope).await;
+    }
+}
+
+/// Push a media item for outbound delivery in the current turn.
+pub fn push_outbound_media(media: OutboundMedia) {
+    let _ = TURN_CTX.try_with(|ctx| {
+        ctx.outbound_media
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(media);
+    });
+}
+
+/// Drain all accumulated outbound media from the current turn context.
+pub fn drain_outbound_media() -> Vec<OutboundMedia> {
+    TURN_CTX
+        .try_with(|ctx| {
+            std::mem::take(&mut *ctx.outbound_media.lock().unwrap_or_else(|e| e.into_inner()))
+        })
+        .unwrap_or_default()
+}
+
+/// Infer MIME type from a file extension.
+pub fn mime_from_extension(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("mp4") => "video/mp4",
+        Some("mp3") => "audio/mpeg",
+        Some("ogg") => "audio/ogg",
+        Some("pdf") => "application/pdf",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Derive high-level media type from a MIME string.
+pub fn media_type_from_mime(mime: &str) -> &'static str {
+    if mime.starts_with("image/") {
+        "image"
+    } else if mime.starts_with("video/") {
+        "video"
+    } else if mime.starts_with("audio/") {
+        "audio"
+    } else {
+        "document"
     }
 }
 
@@ -244,6 +304,7 @@ mod tests {
             usage: Default::default(),
             save_events: Default::default(),
             dispatch: None,
+            outbound_media: Default::default(),
         };
         let result = with_turn_context(ctx, async {
             let t = turn_cancellation().unwrap();

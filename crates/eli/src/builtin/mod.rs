@@ -174,7 +174,24 @@ impl BuiltinImpl {
     ) -> Vec<ChannelMessage> {
         let output_channel = effective_output_channel(message);
         let clean = crate::builtin::cli::strip_fake_tool_calls(model_output);
-        let (content, context) = render_content_and_context(&clean, message, session_id);
+        let (content, mut context) = render_content_and_context(&clean, message, session_id);
+
+        // Drain any media accumulated during the turn and attach to context.
+        let media = crate::control_plane::drain_outbound_media();
+        if !media.is_empty() {
+            let media_json: Vec<Value> = media
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "path": m.path,
+                        "media_type": m.media_type,
+                        "mime_type": m.mime_type,
+                    })
+                })
+                .collect();
+            context.insert("outbound_media".to_owned(), Value::Array(media_json));
+        }
+
         let outbound = ChannelMessage::new(session_id, &message.channel, content)
             .with_chat_id(&message.chat_id)
             .with_output_channel(output_channel)
@@ -421,11 +438,28 @@ impl EliHookSpec for BuiltinImpl {
             if !content.trim().is_empty() {
                 println!("{content}");
             }
+            // Show media paths in CLI.
+            if let Some(media) = message
+                .get("context")
+                .and_then(|v| v.get("outbound_media"))
+                .and_then(|v| v.as_array())
+            {
+                for item in media {
+                    if let Some(path) = item.get("path").and_then(|v| v.as_str()) {
+                        println!("[media] {path}");
+                    }
+                }
+            }
             return Some(true);
         };
 
         // Gateway mode: route to channel.
-        if content.trim().is_empty() && !cleanup_only {
+        let has_media = message
+            .get("context")
+            .and_then(|v| v.get("outbound_media"))
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty());
+        if content.trim().is_empty() && !cleanup_only && !has_media {
             return Some(false);
         }
 

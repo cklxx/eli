@@ -128,6 +128,7 @@ impl EliFramework {
             usage: Default::default(),
             save_events: Default::default(),
             dispatch: Some(dispatch),
+            outbound_media: Default::default(),
         };
 
         with_turn_context(turn_ctx, async {

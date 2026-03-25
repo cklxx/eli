@@ -145,6 +145,49 @@ fn record_command_event(
 }
 
 // ---------------------------------------------------------------------------
+// Outbound media extraction
+// ---------------------------------------------------------------------------
+
+/// Scan tool results for media file paths and push them to the turn context.
+fn extract_outbound_media(tool_results: &[Value]) {
+    use crate::control_plane::{
+        OutboundMedia, media_type_from_mime, mime_from_extension, push_outbound_media,
+    };
+
+    for result in tool_results {
+        let obj = match result {
+            Value::Object(_) => Some(result.clone()),
+            Value::String(s) => serde_json::from_str::<Value>(s).ok(),
+            _ => None,
+        };
+        let Some(obj) = obj else { continue };
+        let Some(map) = obj.as_object() else { continue };
+
+        // Only extract from successful results.
+        if map.get("success").and_then(|v| v.as_bool()) != Some(true) {
+            continue;
+        }
+
+        // Check known path keys: image_path, path.
+        for key in &["image_path", "path"] {
+            if let Some(path_str) = map.get(*key).and_then(|v| v.as_str()) {
+                let path = Path::new(path_str);
+                if path.exists() {
+                    let mime = mime_from_extension(path);
+                    let media_type = media_type_from_mime(mime);
+                    tracing::info!(path = %path_str, media_type, "outbound_media: extracted from tool result");
+                    push_outbound_media(OutboundMedia {
+                        path: path_str.to_owned(),
+                        media_type: media_type.to_owned(),
+                        mime_type: mime.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Agent loop helpers
 // ---------------------------------------------------------------------------
 
@@ -400,6 +443,7 @@ async fn process_agent_result(
         }
         Ok(ref output) if output.kind == ToolAutoResultKind::Text => {
             let text = output.text.clone().unwrap_or_default();
+            extract_outbound_media(&output.tool_results);
             record_run_event(elapsed_ms, "ok", None, &output.usage);
             maybe_auto_handoff(tapes, tape_name, output, &text, settings).await;
             Ok(text)
@@ -448,6 +492,7 @@ mod tests {
             usage: Default::default(),
             save_events: Default::default(),
             dispatch: None,
+            outbound_media: Default::default(),
         }
     }
 
