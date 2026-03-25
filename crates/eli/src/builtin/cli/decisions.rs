@@ -1,6 +1,6 @@
 //! CLI commands for managing decisions.
 
-use conduit::{TapeQuery, collect_active_decisions};
+use nexil::{TapeQuery, collect_active_decisions};
 
 use crate::builtin::store::{FileTapeStore, ForkTapeStore};
 use crate::builtin::tape::TapeService;
@@ -59,7 +59,7 @@ pub(crate) async fn remove_command(index: usize) -> anyhow::Result<()> {
 
     let text = &decisions[index - 1];
     let meta = serde_json::json!({});
-    let tombstone = conduit::TapeEntry::decision_revoked(text, meta);
+    let tombstone = nexil::TapeEntry::decision_revoked(text, meta);
     service.store().append(&tape_name, &tombstone).await?;
     println!("Removed decision: {text}");
     Ok(())

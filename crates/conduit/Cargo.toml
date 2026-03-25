@@ -1,5 +1,5 @@
 [package]
-name = "conduit"
+name = "nexil"
 version = "0.6.2"
 edition = "2024"
 description = "Provider-agnostic LLM toolkit — streaming, tool calls, tape storage, OAuth"

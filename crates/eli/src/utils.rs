@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use conduit::tape::TapeEntry;
+use nexil::tape::TapeEntry;
 use serde_json::Value;
 
 use crate::types::State;

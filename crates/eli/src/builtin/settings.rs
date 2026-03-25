@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 
-pub use conduit::core::execution::{ApiBaseConfig, ApiKeyConfig};
-pub use conduit::llm::ApiFormat;
+pub use nexil::core::execution::{ApiBaseConfig, ApiKeyConfig};
+pub use nexil::llm::ApiFormat;
 
 /// Default model identifier.
 pub const DEFAULT_MODEL: &str = "openrouter:qwen/qwen3-coder-next";

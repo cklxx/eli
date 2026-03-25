@@ -15,9 +15,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [0.3.2] — 2026-03-25
 
-eli 0.3.2 · conduit 0.6.2
+eli 0.3.2 · nexil 0.6.2 (formerly conduit)
 
-WeChat channel support, agent module refactor, and a full integration test suite hitting real LLM APIs.
+WeChat channel support, agent module refactor, crate rename, and a full integration test suite hitting real LLM APIs.
 
 ### Added
 - **WeChat channel** — `openclaw-weixin` plugin via sidecar, supports text messaging through WeChat Work (企业微信)
@@ -29,7 +29,10 @@ WeChat channel support, agent module refactor, and a full integration test suite
 - **Integration test rules** in CLAUDE.md — new features require CLI integration tests
 
 ### Changed
+- **Crate renamed: `conduit` → `nexil`** — the LLM toolkit crate was renamed to avoid crates.io name collision. nexil = nexus + silicon (硅基连接体)
 - **Agent module split** — monolithic `agent.rs` (1400+ lines) refactored into `agent_request`, `agent_run`, `agent_command` modules
+- **5 `unwrap()` calls eliminated** across nexil core (anthropic_messages, error_classify, message_norm, response_parser)
+- **`ValueExt` trait** — envelope helper functions refactored from free functions to trait methods
 
 ---
 

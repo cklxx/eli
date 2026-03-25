@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use conduit::ConduitError;
+use nexil::ConduitError;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -359,11 +359,11 @@ impl EliHookSpec for BuiltinImpl {
         Some(Agent::new().system_prompt(prompt_text, state, None))
     }
 
-    fn wrap_tool(&self, tool: &conduit::Tool) -> conduit::ToolAction {
+    fn wrap_tool(&self, tool: &nexil::Tool) -> nexil::ToolAction {
         let wrapped = self.middleware_chain.wrap_tools(std::slice::from_ref(tool));
         match wrapped.into_iter().next() {
-            Some(t) => conduit::ToolAction::Replace(t),
-            None => conduit::ToolAction::Remove,
+            Some(t) => nexil::ToolAction::Replace(t),
+            None => nexil::ToolAction::Remove,
         }
     }
 

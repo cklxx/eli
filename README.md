@@ -14,9 +14,9 @@ turn pipeline (resolve_session → load_state → build_prompt → run_model →
 save_state → render_outbound → dispatch_outbound) where every stage is a
 hook point that plugins can override. It ships with 21 builtin tools, a
 tape-based conversation history, and works across CLI, Telegram, and any
-channel via an OpenClaw sidecar. The LLM layer (conduit) is provider-
+channel via an OpenClaw sidecar. The LLM layer (nexil) is provider-
 agnostic — switch between OpenAI, Claude, Copilot, or Ollama with one
-env var.
+env var. The LLM layer is called nexil.
 
 eli> /quit
 ```
@@ -93,7 +93,7 @@ The sidecar launches a Node.js bridge that loads any OpenClaw channel plugin. Fi
   CLI / Telegram ──>│             eli (Rust)                │
                     │                                      │
                     │  resolve_session -> load_state ->    │
-  Feishu / Slack ──>│  build_prompt -> run_model ->        │<── conduit (LLM)
+  Feishu / Slack ──>│  build_prompt -> run_model ->        │<── nexil (LLM)
   (via sidecar)     │  save_state -> render_outbound ->    │
                     │  dispatch_outbound                   │
                     └──────────────────────────────────────┘
@@ -101,7 +101,7 @@ The sidecar launches a Node.js bridge that loads any OpenClaw channel plugin. Fi
 
 | Crate | Version | Role |
 |-------|---------|------|
-| **conduit** | 0.6.2 | Provider-agnostic LLM toolkit — streaming, tool calls, tape storage, embeddings, OAuth |
+| **nexil** | 0.6.2 | Provider-agnostic LLM toolkit — streaming, tool calls, tape storage, embeddings, OAuth |
 | **eli** | 0.3.2 | Hook-first agent framework — pipeline, channels, tools, skills, decisions |
 | **eli-sidecar** | 0.2.0 | Node.js bridge — loads OpenClaw plugins, exposes channels + tools over HTTP or MCP |
 

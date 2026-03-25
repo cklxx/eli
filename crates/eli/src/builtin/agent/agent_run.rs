@@ -5,8 +5,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use chrono::Utc;
-use conduit::core::results::ToolAutoResultKind;
-use conduit::{AnchorSelector, ConduitError, ErrorKind, TapeContext, TapeEntry, ToolAutoResult};
+use nexil::core::results::ToolAutoResultKind;
+use nexil::{AnchorSelector, ConduitError, ErrorKind, TapeContext, TapeEntry, ToolAutoResult};
 use serde_json::Value;
 
 use crate::builtin::settings::AgentSettings;
@@ -143,10 +143,10 @@ pub(super) async fn run_command(
 async fn log_active_decisions(tapes: &TapeService, tape_name: &str) {
     if let Ok(all_entries) = tapes
         .store()
-        .fetch_all(&conduit::TapeQuery::new(tape_name))
+        .fetch_all(&nexil::TapeQuery::new(tape_name))
         .await
     {
-        let decisions = conduit::collect_active_decisions(&all_entries);
+        let decisions = nexil::collect_active_decisions(&all_entries);
         if !decisions.is_empty() {
             tracing::info!("Resuming session. Active decisions:");
             for (i, d) in decisions.iter().enumerate() {

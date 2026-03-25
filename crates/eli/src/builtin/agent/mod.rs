@@ -6,7 +6,7 @@ mod agent_run;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use conduit::{ConduitError, ErrorKind};
+use nexil::{ConduitError, ErrorKind};
 use serde_json::Value;
 
 use crate::builtin::settings::AgentSettings;
@@ -148,7 +148,7 @@ mod tests {
     use crate::builtin::settings::{ApiBaseConfig, ApiKeyConfig};
     use crate::builtin::store::{FileTapeStore, ForkTapeStore};
     use crate::builtin::tools::register_builtin_tools;
-    use conduit::llm::ApiFormat;
+    use nexil::llm::ApiFormat;
     use serde_json::json;
 
     fn test_tape_service() -> (

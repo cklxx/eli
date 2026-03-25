@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use conduit::{ConduitError, ErrorKind, TapeEntry, TapeQuery};
+use nexil::{ConduitError, ErrorKind, TapeEntry, TapeQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

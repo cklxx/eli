@@ -8,9 +8,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use conduit::tape::store::fetch_all_in_memory;
-use conduit::tape::{AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore, TapeStore};
-use conduit::{ConduitError, ErrorKind, TapeEntry, TapeQuery};
+use nexil::tape::store::fetch_all_in_memory;
+use nexil::tape::{AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore, TapeStore};
+use nexil::{ConduitError, ErrorKind, TapeEntry, TapeQuery};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -486,7 +486,7 @@ fn entry_from_payload(payload: &Value) -> Option<TapeEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use conduit::tape::{InMemoryTapeStore, TapeStore};
+    use nexil::tape::{InMemoryTapeStore, TapeStore};
     use serde_json::json;
 
     // -- FileTapeStore JSONL round-trip tests ----------------------------------

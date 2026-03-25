@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::FutureExt;
 
-use conduit::tape::{AsyncTapeStore, TapeStore};
+use nexil::tape::{AsyncTapeStore, TapeStore};
 
 use crate::smart_router::RouteDecision;
 use crate::types::{Envelope, MessageHandler, PromptValue, State};
@@ -248,8 +248,8 @@ pub trait EliHookSpec: Send + Sync {
     /// Wrap a tool before execution. Returns a `ToolAction` to keep, remove, or replace
     /// the tool. Plugins are called in forward order (first-registered first) so that
     /// safety plugins registered early can remove tools before later plugins see them.
-    fn wrap_tool(&self, tool: &conduit::Tool) -> conduit::ToolAction {
-        conduit::ToolAction::Keep
+    fn wrap_tool(&self, tool: &nexil::Tool) -> nexil::ToolAction {
+        nexil::ToolAction::Keep
     }
 
     /// Provide a tape store instance for conversation recording.
@@ -343,7 +343,7 @@ impl HookRuntime {
     // -- wrap tool (sync, all plugins) ----------------------------------------
 
     /// Wrap tools through all plugins. Each plugin can modify/wrap a tool.
-    pub fn call_wrap_tools(&self, tools: Vec<conduit::Tool>) -> Vec<conduit::Tool> {
+    pub fn call_wrap_tools(&self, tools: Vec<nexil::Tool>) -> Vec<nexil::Tool> {
         let mut result = tools;
         for plugin in self.plugins.iter() {
             let name = plugin.plugin_name().to_owned();
@@ -353,8 +353,8 @@ impl HookRuntime {
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         plugin.wrap_tool(&tool)
                     })) {
-                        Ok(conduit::ToolAction::Keep) => Some(tool),
-                        Ok(conduit::ToolAction::Remove) => {
+                        Ok(nexil::ToolAction::Keep) => Some(tool),
+                        Ok(nexil::ToolAction::Remove) => {
                             tracing::info!(
                                 plugin = %name,
                                 tool = %tool.name,
@@ -362,7 +362,7 @@ impl HookRuntime {
                             );
                             None
                         }
-                        Ok(conduit::ToolAction::Replace(wrapped)) => Some(wrapped),
+                        Ok(nexil::ToolAction::Replace(wrapped)) => Some(wrapped),
                         Err(_) => {
                             tracing::error!(plugin = %name, "hook.wrap_tool panicked");
                             Some(tool)

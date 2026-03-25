@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use conduit::TapeEntry;
+use nexil::TapeEntry;
 use serde_json::Value;
 
 /// Build the default list of LLM messages from a sequence of tape entries.

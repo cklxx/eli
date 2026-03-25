@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use conduit::Tool;
+use nexil::Tool;
 
 /// Central tool registry. Tools are registered here by the builtin module on startup.
 pub static REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, Tool>>> =
@@ -71,7 +71,7 @@ pub fn shorten_text(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use conduit::Tool;
+    use nexil::Tool;
     use serde_json::json;
 
     fn make_tool(name: &str, description: &str) -> Tool {

@@ -81,7 +81,7 @@ async fn login_openai(
     _manual: bool,
     timeout: f64,
 ) -> anyhow::Result<()> {
-    use conduit::auth::openai_codex::{
+    use nexil::auth::openai_codex::{
         self, DEFAULT_CODEX_OAUTH_AUTHORIZE_URL, DEFAULT_CODEX_OAUTH_CLIENT_ID,
         DEFAULT_CODEX_OAUTH_ORIGINATOR, DEFAULT_CODEX_OAUTH_SCOPE, DEFAULT_CODEX_OAUTH_TOKEN_URL,
     };
@@ -223,7 +223,7 @@ async fn login_claude_api_key() -> anyhow::Result<()> {
 
 /// GitHub Copilot device-flow login.
 async fn login_github_copilot(open_browser: bool, timeout: f64) -> anyhow::Result<()> {
-    use conduit::auth::github_copilot::{
+    use nexil::auth::github_copilot::{
         self, DEFAULT_GITHUB_COPILOT_ACCESS_TOKEN_URL, DEFAULT_GITHUB_COPILOT_DEVICE_CODE_URL,
         DEFAULT_GITHUB_COPILOT_OAUTH_CLIENT_ID, DEFAULT_GITHUB_COPILOT_SCOPE,
     };

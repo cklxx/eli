@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use conduit::tools::schema::ToolResult;
-use conduit::{ConduitError, ErrorKind};
-use conduit::{TapeEntry, TapeQuery, Tool, ToolContext};
+use nexil::tools::schema::ToolResult;
+use nexil::{ConduitError, ErrorKind};
+use nexil::{TapeEntry, TapeQuery, Tool, ToolContext};
 use futures::future::BoxFuture;
 use serde_json::Value;
 
@@ -921,7 +921,7 @@ fn tool_decision_list() -> Tool {
                 let service = current_tape_service()?;
                 let query = TapeQuery::new(&tape_name);
                 let entries = service.store().fetch_all(&query).await?;
-                let decisions = conduit::collect_active_decisions(&entries);
+                let decisions = nexil::collect_active_decisions(&entries);
                 if decisions.is_empty() {
                     return ok_val("No active decisions.");
                 }
@@ -961,7 +961,7 @@ fn tool_decision_remove() -> Tool {
                 let service = current_tape_service()?;
                 let query = TapeQuery::new(&tape_name);
                 let entries = service.store().fetch_all(&query).await?;
-                let decisions = conduit::collect_active_decisions(&entries);
+                let decisions = nexil::collect_active_decisions(&entries);
                 if index > decisions.len() {
                     return Err(ConduitError::new(
                         ErrorKind::InvalidInput,

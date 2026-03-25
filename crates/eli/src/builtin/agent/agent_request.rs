@@ -3,8 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use conduit::llm::{ChatRequest, LLM};
-use conduit::{ConduitError, TapeContext, Tool, ToolAutoResult, ToolContext, ToolSet};
+use nexil::llm::{ChatRequest, LLM};
+use nexil::{ConduitError, TapeContext, Tool, ToolAutoResult, ToolContext, ToolSet};
 use serde_json::Value;
 
 use crate::builtin::settings::{AgentSettings, ApiBaseConfig, ApiKeyConfig};
@@ -99,7 +99,7 @@ fn resolve_stored_api_key(
     let mut key_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     if provider.is_empty() || provider == "openai" {
-        let resolver = conduit::auth::openai_codex::codex_cli_api_key_resolver(None);
+        let resolver = nexil::auth::openai_codex::codex_cli_api_key_resolver(None);
         if let Some(token) = resolver("openai") {
             key_map.insert("openai".to_string(), token);
         }
@@ -113,7 +113,7 @@ fn resolve_stored_api_key(
 
     if provider.is_empty() || provider == "github-copilot" {
         let resolver =
-            conduit::auth::github_copilot::github_copilot_oauth_resolver(None, None, None);
+            nexil::auth::github_copilot::github_copilot_oauth_resolver(None, None, None);
         if let Some(token) = resolver("github-copilot") {
             key_map.insert("github-copilot".to_string(), token);
         }
@@ -129,7 +129,7 @@ fn resolve_stored_api_key(
     }
 }
 
-/// Create a `conduit::LLM` instance from agent settings.
+/// Create a `nexil::LLM` instance from agent settings.
 pub(super) fn create_llm(
     settings: &AgentSettings,
     model_override: Option<&str>,

@@ -82,7 +82,7 @@ fn resolve_api_key_for_provider(provider: &str) -> anyhow::Result<String> {
                         .join(".codex")
                 });
             let resolver =
-                conduit::auth::openai_codex::codex_cli_api_key_resolver(Some(codex_home));
+                nexil::auth::openai_codex::codex_cli_api_key_resolver(Some(codex_home));
             if let Some(key) = resolver("openai") {
                 return Ok(key);
             }
@@ -94,7 +94,7 @@ fn resolve_api_key_for_provider(provider: &str) -> anyhow::Result<String> {
         "github-copilot" => {
             // Use the github copilot resolver which checks stored tokens, env vars, gh CLI.
             let resolver =
-                conduit::auth::github_copilot::github_copilot_oauth_resolver(None, None, None);
+                nexil::auth::github_copilot::github_copilot_oauth_resolver(None, None, None);
             if let Some(key) = resolver("github-copilot") {
                 return Ok(key);
             }
