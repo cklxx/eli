@@ -13,6 +13,35 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [0.3.1] — 2026-03-25
+
+eli 0.3.1 · conduit 0.6.1
+
+Full P0-P2 architecture hardening across both crates. 20 fixes, 8 new tests, 603 total passing.
+
+### Fixed
+- **Production panic removed** — `panic!()` in OpenAI adapter replaced with `Result<Value, ConduitError>`
+- **Unsafe code eliminated** — `unsafe` pointer cast in CircuitBreaker middleware replaced with `Arc<Mutex>` clone
+- **OOM protection** — 10MB response limit on `web.fetch`, 50MB file limit on `fs.read`
+- **Tape memory cap** — `InMemoryTapeStore` capped at 10K entries per tape with oldest-first eviction
+- **Orphan tool-call pruning** — strips individual orphaned calls instead of dropping entire assistant messages with valid content
+- **ChannelManager CPU waste** — busy-poll loop (50ms `is_finished()`) replaced with direct `JoinHandle` await
+- **Shell memory leak** — finished shells auto-cleaned from `ShellManager` HashMap on output read
+- **Telegram shutdown hang** — 5-second poll timeout for responsive cancellation
+- **`from_batch()` panic** — returns `Option<ChannelMessage>` instead of panicking on empty input
+- **Anthropic release-mode guard** — `debug_assert_eq!` replaced with real transport validation returning `Result`
+- **Media download silence** — failed Telegram media downloads now surface error messages in conversation
+- **API key leakage** — `mask_sensitive()` sanitizer strips Bearer tokens and key prefixes from error logs
+- **Sidecar startup speed** — exponential backoff (200ms→3s) replaces fixed 1-second health check delays
+
+### Changed
+- Removed 4 unused dependencies: `fuzzy-matcher`, `glob`, `which` (eli); `schemars` (conduit)
+- Removed dead sync `TapeManager` field from `LLM` struct — only `AsyncTapeManager` is active
+- Documented hook panic safety policy (chain-aborting vs best-effort)
+- Subagent tool marked as `[EXPERIMENTAL]`
+
+---
+
 ## [0.3.0] — 2026-03-20
 
 eli 0.3.0 · conduit 0.6.0 · eli-sidecar 0.2.0
