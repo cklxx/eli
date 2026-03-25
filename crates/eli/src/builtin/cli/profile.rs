@@ -8,7 +8,7 @@ pub(crate) fn use_command(profile: String) -> anyhow::Result<()> {
 
     if !config.set_active(&profile) {
         // Try normalized name.
-        let normalized = normalize_provider(&profile).to_string();
+        let normalized = normalize_provider(&profile);
         if !config.set_active(&normalized) {
             let available: Vec<&str> = config.profiles.keys().map(|k| k.as_str()).collect();
             if available.is_empty() {

@@ -93,6 +93,63 @@ fn resolve_path(state: &HashMap<String, Value>, raw_path: &str) -> Result<PathBu
     Ok(PathBuf::from(workspace).join(&path))
 }
 
+fn read_text_file(path: &std::path::Path) -> Result<String, ConduitError> {
+    let meta = std::fs::metadata(path)
+        .map_err(|e| ConduitError::new(ErrorKind::Tool, format!("read failed: {e}")))?;
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(ConduitError::new(
+            ErrorKind::Tool,
+            format!(
+                "file too large ({} bytes, limit {})",
+                meta.len(),
+                MAX_FILE_BYTES
+            ),
+        ));
+    }
+    std::fs::read_to_string(path)
+        .map_err(|e| ConduitError::new(ErrorKind::Tool, format!("read failed: {e}")))
+}
+
+fn line_start_offset(text: &str, line: usize) -> usize {
+    if line == 0 {
+        return 0;
+    }
+    let mut seen = 0;
+    for (idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            seen += 1;
+            if seen == line {
+                return idx + 1;
+            }
+        }
+    }
+    text.len()
+}
+
+fn replace_text_from_line(
+    text: &str,
+    old: &str,
+    new: &str,
+    start: usize,
+    path: &std::path::Path,
+) -> Result<String, ConduitError> {
+    let split = line_start_offset(text, start);
+    let prefix = &text[..split];
+    let suffix = &text[split..];
+    if !suffix.contains(old) {
+        return Err(ConduitError::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "'{}' not found in {} from line {start}",
+                old,
+                path.display()
+            ),
+        ));
+    }
+    let replaced = suffix.replacen(old, new, 1);
+    Ok(format!("{prefix}{replaced}"))
+}
+
 fn invalid_input(error: anyhow::Error) -> ConduitError {
     ConduitError::new(ErrorKind::InvalidInput, error.to_string())
 }
@@ -446,23 +503,7 @@ fn tool_fs_read() -> Tool {
 
                 let state = ctx.map(|c| c.state).unwrap_or_default();
                 let resolved = resolve_path(&state, &raw_path)?;
-
-                let meta = std::fs::metadata(&resolved)
-                    .map_err(|e| ConduitError::new(ErrorKind::Tool, format!("read failed: {e}")))?;
-                if meta.len() > MAX_FILE_BYTES {
-                    return Err(ConduitError::new(
-                        ErrorKind::Tool,
-                        format!(
-                            "file too large ({} bytes, limit {})",
-                            meta.len(),
-                            MAX_FILE_BYTES
-                        ),
-                    ));
-                }
-
-                let text = std::fs::read_to_string(&resolved)
-                    .map_err(|e| ConduitError::new(ErrorKind::Tool, format!("read failed: {e}")))?;
-
+                let text = read_text_file(&resolved)?;
                 let lines: Vec<&str> = text.lines().collect();
                 let start = offset.min(lines.len());
                 let end = match limit {
@@ -558,32 +599,9 @@ fn tool_fs_edit() -> Tool {
                 let state = ctx.map(|c| c.state).unwrap_or_default();
                 let resolved = resolve_path(&state, &raw_path)?;
 
-                let text = std::fs::read_to_string(&resolved)
-                    .map_err(|e| ConduitError::new(ErrorKind::Tool, format!("read failed: {e}")))?;
-
-                let lines: Vec<&str> = text.lines().collect();
-                let prefix = lines[..start.min(lines.len())].join("\n");
-                let to_replace = lines[start.min(lines.len())..].join("\n");
-
-                if !to_replace.contains(&old) {
-                    return Err(ConduitError::new(
-                        ErrorKind::InvalidInput,
-                        format!(
-                            "'{}' not found in {} from line {start}",
-                            old,
-                            resolved.display()
-                        ),
-                    ));
-                }
-
-                let replaced = to_replace.replacen(&old, &new, 1);
-                let final_text = if prefix.is_empty() {
-                    replaced
-                } else {
-                    format!("{prefix}\n{replaced}")
-                };
-
-                std::fs::write(&resolved, &final_text).map_err(|e| {
+                let text = read_text_file(&resolved)?;
+                let final_text = replace_text_from_line(&text, &old, &new, start, &resolved)?;
+                std::fs::write(&resolved, final_text).map_err(|e| {
                     ConduitError::new(ErrorKind::Tool, format!("write failed: {e}"))
                 })?;
                 ok_val(format!("edited: {}", resolved.display()))
@@ -1393,6 +1411,40 @@ mod tests {
             payload["params"],
             json!({"action": "create", "description": "domain field"})
         );
+    }
+
+    #[tokio::test]
+    async fn test_fs_edit_preserves_crlf_and_trailing_newline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("note.txt");
+        std::fs::write(&path, "first\r\nsecond\r\nthird\r\n").unwrap();
+        tool_fs_edit()
+            .run(
+                json!({"path": path.to_string_lossy(), "old": "second", "new": "2nd"}),
+                Some(ToolContext::new("test-run")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first\r\n2nd\r\nthird\r\n");
+    }
+
+    #[tokio::test]
+    async fn test_fs_edit_rejects_large_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("huge.txt");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        let err = tool_fs_edit()
+            .run(
+                json!({"path": path.to_string_lossy(), "old": "a", "new": "b"}),
+                Some(ToolContext::new("test-run")),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Tool);
+        assert!(err.message.contains("file too large"));
     }
 
     #[test]

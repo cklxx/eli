@@ -401,22 +401,12 @@ fn redact_key(key: &str) -> String {
 
 /// Default model for a given provider.
 pub fn default_model_for_provider(provider: &str) -> &str {
-    match provider {
-        "openai" => "openai:gpt-5.4-mini",
-        "anthropic" | "claude" => "anthropic:claude-sonnet-4-6",
-        "github-copilot" | "copilot" => "github-copilot:gpt-5.4-mini",
-        _ => "openrouter:openai/gpt-5.4-mini",
-    }
+    nexil::core::provider_policies::default_model_for_provider(provider)
 }
 
 /// Canonical provider name normalization.
-pub fn normalize_provider(provider: &str) -> &str {
-    match provider {
-        "claude" | "anthropic" => "anthropic",
-        "copilot" | "github-copilot" => "github-copilot",
-        "openai" => "openai",
-        other => other,
-    }
+pub fn normalize_provider(provider: &str) -> String {
+    nexil::core::provider_policies::normalized_provider_name(provider)
 }
 
 #[cfg(test)]

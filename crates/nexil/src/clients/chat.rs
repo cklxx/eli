@@ -8,6 +8,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::clients::parsing::common::field_str;
+use crate::clients::parsing::sse::SseDecoder;
 use crate::clients::parsing::{
     BaseTransportParser, ToolCallDelta, TransportKind, parser_for_transport,
 };
@@ -306,6 +307,75 @@ pub struct ChatClient {
 }
 
 impl ChatClient {
+    fn sse_stream_error(
+        provider_name: &str,
+        model_id: &str,
+        error: impl std::fmt::Display,
+    ) -> ErrorPayload {
+        ErrorPayload::new(
+            ErrorKind::Provider,
+            format!("{}:{}: stream error: {}", provider_name, model_id, error),
+        )
+    }
+
+    async fn forward_sse_chunk(
+        decoder: &mut SseDecoder,
+        tx: &tokio::sync::mpsc::Sender<Result<Value, ErrorPayload>>,
+        bytes: &[u8],
+    ) {
+        for event in decoder.push(bytes) {
+            if tx.send(Ok(event)).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    async fn forward_sse_events(
+        response: reqwest::Response,
+        tx: tokio::sync::mpsc::Sender<Result<Value, ErrorPayload>>,
+        provider_name: String,
+        model_id: String,
+    ) {
+        let mut decoder = SseDecoder::new();
+        let mut byte_stream = response.bytes_stream();
+        while let Some(chunk_result) = byte_stream.next().await {
+            let bytes = match chunk_result {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let _ = tx
+                        .send(Err(Self::sse_stream_error(
+                            &provider_name,
+                            &model_id,
+                            error,
+                        )))
+                        .await;
+                    return;
+                }
+            };
+            Self::forward_sse_chunk(&mut decoder, &tx, &bytes).await;
+        }
+        for event in decoder.finish() {
+            if tx.send(Ok(event)).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    fn spawn_sse_event_stream(
+        response: reqwest::Response,
+        provider_name: String,
+        model_id: String,
+    ) -> ReceiverStream<Result<Value, ErrorPayload>> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Value, ErrorPayload>>(64);
+        tokio::spawn(Self::forward_sse_events(
+            response,
+            tx,
+            provider_name,
+            model_id,
+        ));
+        ReceiverStream::new(rx)
+    }
+
     /// Create a new `ChatClient` wrapping the given `LLMCore`.
     pub fn new(core: LLMCore) -> Self {
         Self { core }
@@ -678,33 +748,16 @@ impl ChatClient {
         let state = StreamState::new();
 
         let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
-
+        let mut events = Self::spawn_sse_event_stream(response, _provider_name, _model_id);
         tokio::spawn(async move {
-            let mut byte_stream = response.bytes_stream();
-            let mut buffer = String::new();
-
-            while let Some(chunk_result) = byte_stream.next().await {
-                let bytes = match chunk_result {
-                    Ok(b) => b,
+            while let Some(event) = events.next().await {
+                let chunk_val = match event {
+                    Ok(chunk_val) => chunk_val,
                     Err(_) => break,
                 };
-                buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-                while let Some(line_end) = buffer.find('\n') {
-                    let line = buffer[..line_end].trim_end_matches('\r').to_owned();
-                    buffer = buffer[line_end + 1..].to_owned();
-
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if data == "[DONE]" {
-                            break;
-                        }
-                        if let Ok(chunk_val) = serde_json::from_str::<Value>(data) {
-                            let text = Self::extract_chunk_text(&chunk_val, Some(transport));
-                            if !text.is_empty() && tx.send(text).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
+                let text = Self::extract_chunk_text(&chunk_val, Some(transport));
+                if !text.is_empty() && tx.send(text).await.is_err() {
+                    return;
                 }
             }
         });
@@ -758,10 +811,8 @@ impl ChatClient {
         let state = StreamState::new();
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
-
-        let prov = provider_name.clone();
-        let mdl = model_id.clone();
-
+        let mut events =
+            Self::spawn_sse_event_stream(response, provider_name.clone(), model_id.clone());
         tokio::spawn(async move {
             // Helper: apply filter and send, returning whether the send succeeded.
             async fn emit(
@@ -779,8 +830,6 @@ impl ChatClient {
                 tx.send(event).await.is_ok()
             }
 
-            let mut byte_stream = response.bytes_stream();
-            let mut buffer = String::new();
             let mut parts: Vec<String> = Vec::new();
             let mut assembler = ToolCallAssembler::new();
             let mut usage: Option<Value> = None;
@@ -788,14 +837,10 @@ impl ChatClient {
             let mut output_item_types: Vec<String> = Vec::new();
             let mut had_error = false;
 
-            while let Some(chunk_result) = byte_stream.next().await {
-                let bytes = match chunk_result {
-                    Ok(b) => b,
-                    Err(e) => {
-                        let error = ErrorPayload::new(
-                            ErrorKind::Provider,
-                            format!("{}:{}: stream error: {}", prov, mdl, e),
-                        );
+            while let Some(event) = events.next().await {
+                let chunk_val = match event {
+                    Ok(chunk_val) => chunk_val,
+                    Err(error) => {
                         let _ = emit(
                             &tx,
                             StreamEvent::new(
@@ -809,55 +854,36 @@ impl ChatClient {
                         break;
                     }
                 };
-                buffer.push_str(&String::from_utf8_lossy(&bytes));
 
-                while let Some(line_end) = buffer.find('\n') {
-                    let line = buffer[..line_end].trim_end_matches('\r').to_owned();
-                    buffer = buffer[line_end + 1..].to_owned();
+                if chunk_val.get("type").and_then(|v| v.as_str()) == Some("response.completed") {
+                    response_completed = true;
+                }
 
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if data == "[DONE]" {
-                            break;
-                        }
-                        if let Ok(chunk_val) = serde_json::from_str::<Value>(data) {
-                            if chunk_val.get("type").and_then(|v| v.as_str())
-                                == Some("response.completed")
-                            {
-                                response_completed = true;
-                            }
+                if let Some(item_type) =
+                    Self::responses_output_item_type(&chunk_val, Some(transport))
+                {
+                    output_item_types.push(item_type);
+                }
 
-                            if let Some(item_type) =
-                                Self::responses_output_item_type(&chunk_val, Some(transport))
-                            {
-                                output_item_types.push(item_type);
-                            }
+                let chunk_parser = Self::parser_for_payload(&chunk_val, Some(transport));
+                if let Some(u) = chunk_parser.extract_usage(&chunk_val) {
+                    usage = Some(u);
+                }
 
-                            let chunk_parser =
-                                Self::parser_for_payload(&chunk_val, Some(transport));
-                            if let Some(u) = chunk_parser.extract_usage(&chunk_val) {
-                                usage = Some(u);
-                            }
+                let deltas = chunk_parser.extract_chunk_tool_call_deltas(&chunk_val);
+                if !deltas.is_empty() {
+                    assembler.add_deltas(&deltas);
+                }
 
-                            let deltas = chunk_parser.extract_chunk_tool_call_deltas(&chunk_val);
-                            if !deltas.is_empty() {
-                                assembler.add_deltas(&deltas);
-                            }
-
-                            let text = chunk_parser.extract_chunk_text(&chunk_val);
-                            if !text.is_empty() {
-                                parts.push(text.clone());
-                                let _ = emit(
-                                    &tx,
-                                    StreamEvent::new(
-                                        StreamEventKind::Text,
-                                        serde_json::json!({"delta": text}),
-                                    ),
-                                    &stream_filter,
-                                )
-                                .await;
-                            }
-                        }
-                    }
+                let text = chunk_parser.extract_chunk_text(&chunk_val);
+                if !text.is_empty() {
+                    parts.push(text.clone());
+                    let _ = emit(
+                        &tx,
+                        StreamEvent::new(StreamEventKind::Text, serde_json::json!({"delta": text})),
+                        &stream_filter,
+                    )
+                    .await;
                 }
             }
 
@@ -889,7 +915,7 @@ impl ChatClient {
                 ) {
                 let e = ErrorPayload::new(
                     ErrorKind::Temporary,
-                    format!("{}:{}: empty response", prov, mdl),
+                    format!("{}:{}: empty response", provider_name, model_id),
                 );
                 let _ = emit(
                     &tx,

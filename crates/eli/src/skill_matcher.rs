@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use regex::Regex;
 
-use crate::skills::SkillMetadata;
+use crate::skills::{SkillMetadata, SkillTriggers};
 
 // ---------------------------------------------------------------------------
 // Signal weights
@@ -22,41 +22,7 @@ use crate::skills::SkillMetadata;
 const WEIGHT_INTENT: f64 = 0.6;
 const WEIGHT_TOOL: f64 = 0.25;
 const WEIGHT_KEYWORD: f64 = 0.15;
-
-const DEFAULT_CONFIDENCE_THRESHOLD: f64 = 0.3;
-const DEFAULT_PRIORITY: u32 = 100;
 const DEFAULT_TOKEN_BUDGET: usize = 16_000;
-
-// ---------------------------------------------------------------------------
-// Trigger configuration (parsed from SKILL.md YAML frontmatter)
-// ---------------------------------------------------------------------------
-
-/// Extended skill trigger configuration.
-#[derive(Debug, Clone, Default)]
-pub struct SkillTriggers {
-    /// Regex patterns matched against user input.
-    pub intent_patterns: Vec<String>,
-    /// Tool names that signal relevance of this skill.
-    pub tool_signals: Vec<String>,
-    /// Keywords whose presence in the prompt boosts the score.
-    pub context_keywords: Vec<String>,
-    /// Minimum composite score to activate (default 0.3).
-    pub confidence_threshold: f64,
-    /// Tiebreaker within exclusive groups (higher wins, default 100).
-    pub priority: u32,
-    /// If set, only the highest-scoring skill in the same group activates.
-    pub exclusive_group: Option<String>,
-    /// Per-session cooldown in seconds before re-activation.
-    pub cooldown_secs: Option<u64>,
-}
-
-impl SkillTriggers {
-    fn has_any_signal(&self) -> bool {
-        !self.intent_patterns.is_empty()
-            || !self.tool_signals.is_empty()
-            || !self.context_keywords.is_empty()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Match context & result
@@ -165,59 +131,10 @@ impl SkillMatcher {
 
     /// Parse extended triggers from a skill's frontmatter metadata map.
     ///
-    /// The existing `parse_yaml_to_string_map` serializes non-string YAML values
-    /// back to YAML strings. This function deserializes the `"triggers"` key
-    /// (if present) into structured `SkillTriggers`.
+    /// Legacy compatibility path for stringly frontmatter maps. Typed
+    /// frontmatter parsing now feeds `SkillMetadata.triggers` directly.
     pub fn parse_triggers(metadata: &HashMap<String, String>) -> SkillTriggers {
-        let mut triggers = SkillTriggers {
-            confidence_threshold: DEFAULT_CONFIDENCE_THRESHOLD,
-            priority: DEFAULT_PRIORITY,
-            ..Default::default()
-        };
-
-        // Parse top-level simple fields.
-        if let Some(v) = metadata.get("confidence_threshold") {
-            triggers.confidence_threshold = v.parse().unwrap_or(DEFAULT_CONFIDENCE_THRESHOLD);
-        }
-        if let Some(v) = metadata.get("priority") {
-            triggers.priority = v.parse().unwrap_or(DEFAULT_PRIORITY);
-        }
-        if let Some(v) = metadata.get("exclusive_group") {
-            triggers.exclusive_group = Some(v.clone());
-        }
-        if let Some(v) = metadata.get("cooldown") {
-            triggers.cooldown_secs = v.parse().ok();
-        }
-
-        // Parse the nested `triggers` key (serialized as YAML string).
-        let Some(triggers_yaml) = metadata.get("triggers") else {
-            return triggers;
-        };
-
-        let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(triggers_yaml) else {
-            return triggers;
-        };
-
-        if let Some(mapping) = value.as_mapping() {
-            // intent_patterns
-            if let Some(patterns) = mapping.get(serde_yaml::Value::String("intent_patterns".into()))
-            {
-                triggers.intent_patterns = yaml_string_list(patterns);
-            }
-            // tool_signals
-            if let Some(tools) = mapping.get(serde_yaml::Value::String("tool_signals".into())) {
-                triggers.tool_signals = yaml_string_list(tools);
-            }
-            // context_signals.keywords
-            if let Some(ctx) = mapping.get(serde_yaml::Value::String("context_signals".into()))
-                && let Some(ctx_map) = ctx.as_mapping()
-                && let Some(kw) = ctx_map.get(serde_yaml::Value::String("keywords".into()))
-            {
-                triggers.context_keywords = yaml_string_list(kw);
-            }
-        }
-
-        triggers
+        SkillTriggers::from_legacy_metadata(metadata)
     }
 
     /// Score and select skills to auto-activate.
@@ -249,12 +166,12 @@ impl SkillMatcher {
         skills
             .iter()
             .filter_map(|skill| {
-                let triggers = Self::parse_triggers(&skill.metadata);
+                let triggers = &skill.triggers;
                 if !triggers.has_any_signal() {
                     return None;
                 }
 
-                let signals = score_signals(&triggers, input_lower, recent_set);
+                let signals = score_signals(triggers, input_lower, recent_set);
                 let score = composite_score(&signals);
 
                 if score < triggers.confidence_threshold {
@@ -273,7 +190,7 @@ impl SkillMatcher {
                     score,
                     signals,
                     priority: triggers.priority,
-                    exclusive_group: triggers.exclusive_group,
+                    exclusive_group: triggers.exclusive_group.clone(),
                 })
             })
             .collect()
@@ -403,18 +320,6 @@ fn match_ratio_any(items: &[String], predicate: impl Fn(&String) -> bool) -> f64
     }
 }
 
-/// Extract a list of strings from a YAML value (handles both sequences and single strings).
-fn yaml_string_list(value: &serde_yaml::Value) -> Vec<String> {
-    match value {
-        serde_yaml::Value::Sequence(seq) => seq
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_owned()))
-            .collect(),
-        serde_yaml::Value::String(s) => vec![s.clone()],
-        _ => vec![],
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -422,14 +327,29 @@ fn yaml_string_list(value: &serde_yaml::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::{DEFAULT_CONFIDENCE_THRESHOLD, DEFAULT_PRIORITY};
 
     fn make_skill(name: &str, metadata: HashMap<String, String>) -> SkillMetadata {
+        let triggers = SkillTriggers::from_legacy_metadata(&metadata);
         SkillMetadata {
             name: name.to_owned(),
             description: format!("Test skill {name}"),
             location: std::path::PathBuf::from(format!("/tmp/skills/{name}/SKILL.md")),
             source: "test".to_owned(),
             metadata,
+            triggers,
+            content: Some("skill body content".to_owned()),
+        }
+    }
+
+    fn typed_skill(name: &str, triggers: SkillTriggers) -> SkillMetadata {
+        SkillMetadata {
+            name: name.to_owned(),
+            description: format!("Test skill {name}"),
+            location: std::path::PathBuf::from(format!("/tmp/skills/{name}/SKILL.md")),
+            source: "test".to_owned(),
+            metadata: HashMap::new(),
+            triggers,
             content: Some("skill body content".to_owned()),
         }
     }
@@ -466,6 +386,24 @@ mod tests {
 
     #[test]
     fn test_match_skills_intent_hit() {
+        let triggers = SkillTriggers {
+            intent_patterns: vec!["hello|hi".to_owned()],
+            confidence_threshold: 0.1,
+            ..Default::default()
+        };
+        let skills = vec![typed_skill("greeting", triggers)];
+        let matcher = SkillMatcher::new();
+        let ctx = MatchContext {
+            task_input: "hello there",
+            recent_tools: &[],
+            session_id: "test-session",
+        };
+        let result = matcher.match_skills(&skills, &ctx);
+        assert!(result.contains("greeting"));
+    }
+
+    #[test]
+    fn test_match_skills_legacy_metadata_path_still_works() {
         let mut meta = HashMap::new();
         meta.insert(
             "triggers".to_owned(),

@@ -43,8 +43,8 @@ pub(crate) async fn login_command(
 /// Save a profile after login and print a summary.
 fn post_login_save_profile(provider_raw: &str) -> anyhow::Result<()> {
     let provider = normalize_provider(provider_raw);
-    let model = default_model_for_provider(provider);
-    let profile_name = provider.to_string();
+    let model = default_model_for_provider(&provider);
+    let profile_name = provider.clone();
 
     let mut config = EliConfig::load();
     let had_active = config.active_profile.is_some();
@@ -52,7 +52,7 @@ fn post_login_save_profile(provider_raw: &str) -> anyhow::Result<()> {
     config.add_profile(
         &profile_name,
         Profile {
-            provider: provider.to_string(),
+            provider: provider.clone(),
             model: model.to_string(),
         },
     );

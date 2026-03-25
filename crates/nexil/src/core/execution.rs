@@ -60,6 +60,33 @@ fn split_model_id<'a>(
     Ok((provider, model_id))
 }
 
+struct ModelCandidate {
+    provider_name: String,
+    model_id: String,
+    client: Arc<Client>,
+    api_key: Option<String>,
+    api_base: Option<String>,
+}
+
+impl ModelCandidate {
+    fn runtime(&self, api_format: ApiFormat) -> ProviderRuntime<'_> {
+        ProviderRuntime::new(
+            &self.provider_name,
+            &self.model_id,
+            self.api_key.as_deref(),
+            self.api_base.as_deref(),
+            api_format,
+        )
+    }
+}
+
+struct PreparedAttempt {
+    transport: TransportKind,
+    url: String,
+    body: Value,
+    body_forced_stream: bool,
+}
+
 impl LLMCore {
     /// Create a new `LLMCore` instance.
     #[allow(clippy::too_many_arguments)]
@@ -331,6 +358,88 @@ impl LLMCore {
             .get_or_create(provider, api_key.as_deref(), api_base.as_deref())
     }
 
+    fn build_candidate(&mut self, provider_name: &str, model_id: &str) -> ModelCandidate {
+        let api_key = self.resolve_api_key(provider_name);
+        let api_base = self.resolve_api_base(provider_name);
+        let client = self.client_registry.get_or_create(
+            provider_name,
+            api_key.as_deref(),
+            api_base.as_deref(),
+        );
+        ModelCandidate {
+            provider_name: provider_name.to_owned(),
+            model_id: model_id.to_owned(),
+            client,
+            api_key,
+            api_base,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_attempt(
+        &self,
+        candidate: &ModelCandidate,
+        messages_payload: &[Value],
+        tools_payload: &Option<Vec<Value>>,
+        max_tokens: Option<u32>,
+        stream: bool,
+        reasoning_effort: &Option<Value>,
+        kwargs: &serde_json::Map<String, Value>,
+    ) -> Result<PreparedAttempt, ConduitError> {
+        let runtime = candidate.runtime(self.api_format);
+        let transport = runtime.selected_transport(tools_payload.as_deref(), false, None)?;
+        let resolved_api_base = runtime.resolved_api_base();
+        let request = Self::build_transport_request(
+            &candidate.client,
+            &candidate.provider_name,
+            &candidate.model_id,
+            &resolved_api_base,
+            normalize_messages_for_api(messages_payload.to_vec(), transport),
+            tools_payload,
+            max_tokens,
+            stream,
+            reasoning_effort,
+            kwargs,
+            &runtime,
+        );
+        let url = Self::build_request_url(&resolved_api_base, transport);
+        let body = Self::build_body_for_transport(transport, &request, &candidate.provider_name)?;
+        let body_forced_stream = !stream
+            && body
+                .get("stream")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        Ok(PreparedAttempt {
+            transport,
+            url,
+            body,
+            body_forced_stream,
+        })
+    }
+
+    fn log_request(candidate: &ModelCandidate, prepared: &PreparedAttempt) {
+        info!(
+            target: "eli_trace",
+            provider = %candidate.provider_name,
+            model = %candidate.model_id,
+            transport = ?prepared.transport,
+            stream = prepared.body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
+            request_body = %prepared.body,
+            "llm.request"
+        );
+    }
+
+    fn log_response(candidate: &ModelCandidate, transport: TransportKind, payload: &Value) {
+        info!(
+            target: "eli_trace",
+            provider = %candidate.provider_name,
+            model = %candidate.model_id,
+            transport = ?transport,
+            response_payload = %payload,
+            "llm.response"
+        );
+    }
+
     /// Execute a synchronous (non-streaming) chat call with retry logic.
     ///
     /// Iterates over model candidates, retrying on transient errors.
@@ -356,97 +465,41 @@ impl LLMCore {
         let mut last_error: Option<ConduitError> = None;
 
         for (provider_name, model_id) in &candidates {
-            let client = self.get_client(provider_name);
-            let api_base = self.resolve_api_base(provider_name);
-            let api_key = self.resolve_api_key(provider_name);
-            let runtime = ProviderRuntime::new(
-                provider_name,
-                model_id,
-                api_key.as_deref(),
-                api_base.as_deref(),
-                self.api_format,
-            );
+            let candidate = self.build_candidate(provider_name, model_id);
 
             for attempt in self.retry_attempts() {
-                let transport =
-                    match runtime.selected_transport(tools_payload.as_deref(), false, None) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            last_error = Some(e);
-                            break;
-                        }
-                    };
-
-                let resolved_api_base = runtime.resolved_api_base();
-                let normalized_messages =
-                    normalize_messages_for_api(messages_payload.clone(), transport);
-                let request = Self::build_transport_request(
-                    &client,
-                    provider_name,
-                    model_id,
-                    &resolved_api_base,
-                    normalized_messages,
+                let prepared = match self.prepare_attempt(
+                    &candidate,
+                    &messages_payload,
                     &tools_payload,
                     max_tokens,
                     stream,
                     &reasoning_effort,
                     &kwargs,
-                    &runtime,
-                );
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(e) => {
+                        last_error = Some(e);
+                        break;
+                    }
+                };
+                Self::log_request(&candidate, &prepared);
 
-                let url = Self::build_request_url(&resolved_api_base, transport);
-                let body = Self::build_body_for_transport(transport, &request, provider_name)?;
-
-                info!(
-                    target: "eli_trace",
-                    provider = %provider_name,
-                    model = %model_id,
-                    transport = ?transport,
-                    stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
-                    request_body = %body,
-                    "llm.request"
-                );
-
-                let resp =
-                    match Self::send_http_request(&client, &url, &body, provider_name, model_id)
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(e) => {
-                            if self.handle_send_error(
-                                e,
-                                provider_name,
-                                model_id,
-                                attempt,
-                                &mut last_error,
-                            ) {
-                                continue;
-                            }
-                            break;
-                        }
-                    };
-
-                let body_forced_stream = !stream
-                    && body
-                        .get("stream")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-
-                let payload: Value = match Self::read_response_payload(
-                    resp,
-                    body_forced_stream,
-                    transport,
-                    provider_name,
-                    model_id,
+                let resp = match Self::send_http_request(
+                    &candidate.client,
+                    &prepared.url,
+                    &prepared.body,
+                    &candidate.provider_name,
+                    &candidate.model_id,
                 )
                 .await
                 {
-                    Ok(v) => v,
+                    Ok(r) => r,
                     Err(e) => {
                         if self.handle_send_error(
                             e,
-                            provider_name,
-                            model_id,
+                            &candidate.provider_name,
+                            &candidate.model_id,
                             attempt,
                             &mut last_error,
                         ) {
@@ -456,19 +509,39 @@ impl LLMCore {
                     }
                 };
 
-                info!(
-                    target: "eli_trace",
-                    provider = %provider_name,
-                    model = %model_id,
-                    transport = ?transport,
-                    response_payload = %payload,
-                    "llm.response"
-                );
+                let payload: Value = match Self::read_response_payload(
+                    resp,
+                    prepared.body_forced_stream,
+                    prepared.transport,
+                    &candidate.provider_name,
+                    &candidate.model_id,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if self.handle_send_error(
+                            e,
+                            &candidate.provider_name,
+                            &candidate.model_id,
+                            attempt,
+                            &mut last_error,
+                        ) {
+                            continue;
+                        }
+                        break;
+                    }
+                };
+
+                Self::log_response(&candidate, prepared.transport, &payload);
 
                 match on_response(
-                    TransportResponse { transport, payload },
-                    provider_name,
-                    model_id,
+                    TransportResponse {
+                        transport: prepared.transport,
+                        payload,
+                    },
+                    &candidate.provider_name,
+                    &candidate.model_id,
                     attempt,
                 ) {
                     Ok(result) => return Ok(result),
@@ -504,67 +577,56 @@ impl LLMCore {
         let mut last_error: Option<ConduitError> = None;
 
         for (provider_name, model_id) in &candidates {
-            let client = self.get_client(provider_name);
-            let api_base = self.resolve_api_base(provider_name);
-            let api_key = self.resolve_api_key(provider_name);
-            let runtime = ProviderRuntime::new(
-                provider_name,
-                model_id,
-                api_key.as_deref(),
-                api_base.as_deref(),
-                self.api_format,
-            );
+            let candidate = self.build_candidate(provider_name, model_id);
 
             for attempt in self.retry_attempts() {
-                let transport =
-                    match runtime.selected_transport(tools_payload.as_deref(), false, None) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            last_error = Some(e);
-                            break;
-                        }
-                    };
-
-                let resolved_api_base = runtime.resolved_api_base();
-                let normalized_messages =
-                    normalize_messages_for_api(messages_payload.clone(), transport);
-                let request = Self::build_transport_request(
-                    &client,
-                    provider_name,
-                    model_id,
-                    &resolved_api_base,
-                    normalized_messages,
+                let prepared = match self.prepare_attempt(
+                    &candidate,
+                    &messages_payload,
                     &tools_payload,
                     max_tokens,
                     true,
                     &reasoning_effort,
                     &kwargs,
-                    &runtime,
-                );
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(e) => {
+                        last_error = Some(e);
+                        break;
+                    }
+                };
+                Self::log_request(&candidate, &prepared);
 
-                let url = Self::build_request_url(&resolved_api_base, transport);
-                let body = Self::build_body_for_transport(transport, &request, provider_name)?;
-
-                let resp =
-                    match Self::send_http_request(&client, &url, &body, provider_name, model_id)
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(e) => {
-                            if self.handle_send_error(
-                                e,
-                                provider_name,
-                                model_id,
-                                attempt,
-                                &mut last_error,
-                            ) {
-                                continue;
-                            }
-                            break;
+                let resp = match Self::send_http_request(
+                    &candidate.client,
+                    &prepared.url,
+                    &prepared.body,
+                    &candidate.provider_name,
+                    &candidate.model_id,
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        if self.handle_send_error(
+                            e,
+                            &candidate.provider_name,
+                            &candidate.model_id,
+                            attempt,
+                            &mut last_error,
+                        ) {
+                            continue;
                         }
-                    };
+                        break;
+                    }
+                };
 
-                return Ok((resp, transport, provider_name.clone(), model_id.clone()));
+                return Ok((
+                    resp,
+                    prepared.transport,
+                    candidate.provider_name.clone(),
+                    candidate.model_id.clone(),
+                ));
             }
         }
 

@@ -2,6 +2,7 @@
 
 use crate::builtin::config::EliConfig;
 use crate::builtin::settings::EnvConfig;
+use nexil::core::provider_policies::{default_api_base, normalized_provider_name};
 
 /// Manage model selection: show, list, or switch.
 pub(crate) async fn model_command(name: Option<String>) -> anyhow::Result<()> {
@@ -40,20 +41,20 @@ fn model_show() -> anyhow::Result<()> {
 
 /// Resolve an API key for the given provider for model listing purposes.
 fn resolve_api_key_for_provider(provider: &str) -> anyhow::Result<String> {
-    let config = EliConfig::load();
     if let Some(key) = resolve_from_env(provider) {
         return Ok(key);
     }
-    if let Some(key) = resolve_from_config(provider, &config) {
+    if let Some(key) = resolve_from_config(provider) {
         return Ok(key);
     }
     resolve_via_oauth(provider)
 }
 
 fn resolve_from_env(provider: &str) -> Option<String> {
+    let provider = normalized_provider_name(provider);
     EnvConfig::api_key(None)
         .filter(|key| !key.is_empty())
-        .or_else(|| match provider {
+        .or_else(|| match provider.as_str() {
             "anthropic" => std::env::var("ANTHROPIC_API_KEY").ok(),
             "openai" => std::env::var("OPENAI_API_KEY").ok(),
             "openrouter" => std::env::var("OPENROUTER_API_KEY").ok(),
@@ -63,15 +64,15 @@ fn resolve_from_env(provider: &str) -> Option<String> {
         .filter(|key| !key.is_empty())
 }
 
-fn resolve_from_config(provider: &str, _config: &EliConfig) -> Option<String> {
-    match provider {
+fn resolve_from_config(provider: &str) -> Option<String> {
+    match normalized_provider_name(provider).as_str() {
         "anthropic" => crate::builtin::config::load_anthropic_api_key(),
         _ => None,
     }
 }
 
 fn resolve_via_oauth(provider: &str) -> anyhow::Result<String> {
-    match provider {
+    match normalized_provider_name(provider).as_str() {
         "openai" => resolve_openai_oauth().ok_or_else(|| {
             anyhow::anyhow!("No API key found for OpenAI.\nRun `eli login openai` or set OPENAI_API_KEY.")
         }),
@@ -108,26 +109,18 @@ fn resolve_github_copilot_oauth() -> Option<String> {
     resolver("github-copilot")
 }
 
-/// Default API base URL for a provider.
-fn default_api_base(provider: &str) -> &str {
-    match provider {
-        "openai" => "https://api.openai.com/v1",
-        "anthropic" => "https://api.anthropic.com/v1",
-        "openrouter" => "https://openrouter.ai/api/v1",
-        "github-copilot" => "https://api.githubcopilot.com",
-        _ => "https://api.openai.com/v1",
-    }
-}
-
 /// Fetch available models from a provider's API.
 async fn fetch_models(provider: &str, api_key: &str) -> anyhow::Result<Vec<String>> {
     let client = reqwest::Client::new();
-    match provider {
+    match normalized_provider_name(provider).as_str() {
         "openai" => fetch_models_openai_codex(&client, api_key).await,
         // Anthropic's model list is curated — no dynamic API needed.
         "anthropic" => Ok(known_models("anthropic")),
         "github-copilot" => fetch_models_github_copilot(&client, api_key).await,
-        _ => fetch_models_openai_compatible(&client, api_key, default_api_base(provider)).await,
+        _ => {
+            let api_base = default_api_base(provider);
+            fetch_models_openai_compatible(&client, api_key, &api_base).await
+        }
     }
 }
 
@@ -371,15 +364,15 @@ async fn model_list() -> anyhow::Result<()> {
         anyhow::anyhow!("No active profile configured.\nRun `eli login <provider>` to get started.")
     })?;
 
-    let provider = profile.provider.as_str();
+    let provider = normalized_provider_name(profile.provider.as_str());
     println!("Fetching models from {provider}...");
     println!();
 
-    let mut models = fetch_or_fallback_models(provider).await;
+    let mut models = fetch_or_fallback_models(&provider).await;
     models.sort();
     models.dedup();
 
-    print_model_list(provider, &models, &config);
+    print_model_list(&provider, &models, &config);
     Ok(())
 }
 
@@ -434,10 +427,11 @@ fn model_switch(model_name: &str) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Active profile '{profile_name}' not found in config"))?;
 
     let old_model = profile.model.clone();
+    let provider = normalized_provider_name(&profile.provider);
     let new_model = if model_name.contains(':') {
         model_name.to_string()
     } else {
-        format!("{}:{}", profile.provider, model_name)
+        format!("{provider}:{model_name}")
     };
     profile.model = new_model.clone();
     config.save()?;

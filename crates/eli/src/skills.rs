@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
+use serde::Deserialize;
 
 static FRONTMATTER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)^---\s*\n.*?\n---\s*\n").unwrap());
@@ -22,10 +23,125 @@ const SKILL_FILE_NAME: &str = "SKILL.md";
 const SKILL_NAME_PATTERN: &str = r"^[a-z0-9]+(?:-[a-z0-9]+)*$";
 /// Ordered sources: project overrides global.
 const SKILL_SOURCES: [&str; 2] = ["project", "global"];
+pub const DEFAULT_CONFIDENCE_THRESHOLD: f64 = 0.3;
+pub const DEFAULT_PRIORITY: u32 = 100;
 
 // ---------------------------------------------------------------------------
 // SkillMetadata
 // ---------------------------------------------------------------------------
+
+/// Trigger configuration parsed from skill frontmatter.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SkillTriggers {
+    #[serde(default)]
+    pub intent_patterns: Vec<String>,
+    #[serde(default)]
+    pub tool_signals: Vec<String>,
+    #[serde(default)]
+    pub context_keywords: Vec<String>,
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f64,
+    #[serde(default = "default_priority")]
+    pub priority: u32,
+    #[serde(default)]
+    pub exclusive_group: Option<String>,
+    #[serde(default)]
+    pub cooldown_secs: Option<u64>,
+}
+
+impl Default for SkillTriggers {
+    fn default() -> Self {
+        Self {
+            intent_patterns: Vec::new(),
+            tool_signals: Vec::new(),
+            context_keywords: Vec::new(),
+            confidence_threshold: DEFAULT_CONFIDENCE_THRESHOLD,
+            priority: DEFAULT_PRIORITY,
+            exclusive_group: None,
+            cooldown_secs: None,
+        }
+    }
+}
+
+impl SkillTriggers {
+    fn from_frontmatter(frontmatter: &SkillFrontmatter) -> Self {
+        let mut triggers = frontmatter.triggers.to_skill_triggers();
+        triggers.confidence_threshold = frontmatter
+            .confidence_threshold
+            .unwrap_or(triggers.confidence_threshold);
+        triggers.priority = frontmatter.priority.unwrap_or(triggers.priority);
+        triggers.exclusive_group = frontmatter
+            .exclusive_group
+            .clone()
+            .or(triggers.exclusive_group);
+        triggers.cooldown_secs = frontmatter.cooldown.or(triggers.cooldown_secs);
+        triggers
+    }
+
+    pub(crate) fn from_legacy_metadata(
+        metadata: &std::collections::HashMap<String, String>,
+    ) -> Self {
+        let mut triggers = Self::default();
+        apply_legacy_scalar_triggers(metadata, &mut triggers);
+        apply_legacy_yaml_triggers(metadata, &mut triggers);
+        triggers
+    }
+
+    pub(crate) fn has_any_signal(&self) -> bool {
+        !self.intent_patterns.is_empty()
+            || !self.tool_signals.is_empty()
+            || !self.context_keywords.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct FrontmatterTriggers {
+    #[serde(default)]
+    intent_patterns: Vec<String>,
+    #[serde(default)]
+    tool_signals: Vec<String>,
+    #[serde(default)]
+    context_signals: FrontmatterContextSignals,
+}
+
+impl FrontmatterTriggers {
+    fn to_skill_triggers(&self) -> SkillTriggers {
+        SkillTriggers {
+            intent_patterns: self.intent_patterns.clone(),
+            tool_signals: self.tool_signals.clone(),
+            context_keywords: self.context_signals.keywords.clone(),
+            ..SkillTriggers::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct FrontmatterContextSignals {
+    #[serde(default)]
+    keywords: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct SkillFrontmatter {
+    name: String,
+    description: String,
+    #[serde(default)]
+    triggers: FrontmatterTriggers,
+    #[serde(default)]
+    confidence_threshold: Option<f64>,
+    #[serde(default)]
+    priority: Option<u32>,
+    #[serde(default)]
+    exclusive_group: Option<String>,
+    #[serde(default)]
+    cooldown: Option<u64>,
+}
+
+#[derive(Debug)]
+struct ParsedFrontmatter {
+    frontmatter: SkillFrontmatter,
+    metadata: std::collections::HashMap<String, String>,
+}
 
 /// Discovered skill metadata.
 #[derive(Debug, Clone)]
@@ -35,6 +151,7 @@ pub struct SkillMetadata {
     pub location: PathBuf,
     pub source: String,
     pub metadata: std::collections::HashMap<String, String>,
+    pub triggers: SkillTriggers,
     /// In-memory body for synthesized skills (e.g. sidecar tool groups).
     /// When set, `body()` returns this instead of reading from disk.
     pub content: Option<String>,
@@ -49,6 +166,7 @@ impl SkillMetadata {
             location: PathBuf::new(),
             source: "sidecar".to_owned(),
             metadata: std::collections::HashMap::new(),
+            triggers: SkillTriggers::default(),
             content: Some(body),
         }
     }
@@ -131,52 +249,67 @@ fn read_skill(skill_dir: &Path, source: &str) -> Option<SkillMetadata> {
     }
 
     let content = std::fs::read_to_string(&skill_file).ok()?;
-    let frontmatter = parse_frontmatter(&content);
-
+    let parsed = parse_skill_frontmatter(&content)?;
+    let ParsedFrontmatter {
+        frontmatter,
+        metadata,
+    } = parsed;
     if !is_valid_frontmatter(skill_dir, &frontmatter) {
         return None;
     }
-
-    let name = frontmatter.get("name")?.trim().to_owned();
-    let description = frontmatter.get("description")?.trim().to_owned();
-
-    let metadata: std::collections::HashMap<String, String> = frontmatter
-        .iter()
-        .map(|(k, v)| (k.to_lowercase(), v.clone()))
-        .collect();
+    let triggers = SkillTriggers::from_frontmatter(&frontmatter);
 
     Some(SkillMetadata {
-        name,
-        description,
+        name: frontmatter.name,
+        description: frontmatter.description,
         location: skill_file
             .canonicalize()
             .unwrap_or_else(|_| skill_file.to_path_buf()),
         source: source.to_owned(),
         metadata,
+        triggers,
         content: None,
     })
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn parse_frontmatter(content: &str) -> std::collections::HashMap<String, String> {
+    let Some(value) = parse_frontmatter_value(content) else {
+        return std::collections::HashMap::new();
+    };
+    yaml_value_to_string_map(&value)
+}
+
+fn parse_skill_frontmatter(content: &str) -> Option<ParsedFrontmatter> {
+    let value = parse_frontmatter_value(content)?;
+    let frontmatter = serde_yaml::from_value::<SkillFrontmatter>(value.clone()).ok()?;
+    let metadata = yaml_value_to_string_map(&value);
+    Some(ParsedFrontmatter {
+        frontmatter,
+        metadata,
+    })
+}
+
+fn parse_frontmatter_value(content: &str) -> Option<serde_yaml::Value> {
     let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() || lines[0].trim() != "---" {
-        return std::collections::HashMap::new();
+        return None;
     }
 
     for (idx, line) in lines[1..].iter().enumerate() {
         if line.trim() == "---" {
             let payload = lines[1..=idx].join("\n");
-            return parse_yaml_to_string_map(&payload);
+            return serde_yaml::from_str::<serde_yaml::Value>(&payload).ok();
         }
     }
-    std::collections::HashMap::new()
+    None
 }
 
-fn parse_yaml_to_string_map(yaml_str: &str) -> std::collections::HashMap<String, String> {
+fn yaml_value_to_string_map(
+    value: &serde_yaml::Value,
+) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
-    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(yaml_str) else {
-        return map;
-    };
     let Some(mapping) = value.as_mapping() else {
         return map;
     };
@@ -197,14 +330,76 @@ fn format_yaml_value(value: &serde_yaml::Value) -> String {
     }
 }
 
-fn is_valid_frontmatter(
-    skill_dir: &Path,
+fn is_valid_frontmatter(skill_dir: &Path, frontmatter: &SkillFrontmatter) -> bool {
+    is_valid_name(&frontmatter.name, skill_dir) && is_valid_description(&frontmatter.description)
+}
+
+fn default_confidence_threshold() -> f64 {
+    DEFAULT_CONFIDENCE_THRESHOLD
+}
+
+fn default_priority() -> u32 {
+    DEFAULT_PRIORITY
+}
+
+fn apply_legacy_scalar_triggers(
     metadata: &std::collections::HashMap<String, String>,
-) -> bool {
-    metadata
-        .get("name")
-        .zip(metadata.get("description"))
-        .is_some_and(|(name, desc)| is_valid_name(name, skill_dir) && is_valid_description(desc))
+    triggers: &mut SkillTriggers,
+) {
+    if let Some(v) = metadata.get("confidence_threshold") {
+        triggers.confidence_threshold = v.parse().unwrap_or(DEFAULT_CONFIDENCE_THRESHOLD);
+    }
+    if let Some(v) = metadata.get("priority") {
+        triggers.priority = v.parse().unwrap_or(DEFAULT_PRIORITY);
+    }
+    if let Some(v) = metadata.get("exclusive_group") {
+        triggers.exclusive_group = Some(v.clone());
+    }
+    if let Some(v) = metadata.get("cooldown") {
+        triggers.cooldown_secs = v.parse().ok();
+    }
+}
+
+fn apply_legacy_yaml_triggers(
+    metadata: &std::collections::HashMap<String, String>,
+    triggers: &mut SkillTriggers,
+) {
+    let Some(triggers_yaml) = metadata.get("triggers") else {
+        return;
+    };
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(triggers_yaml) else {
+        return;
+    };
+    apply_legacy_yaml_triggers_value(&value, triggers);
+}
+
+fn apply_legacy_yaml_triggers_value(value: &serde_yaml::Value, triggers: &mut SkillTriggers) {
+    let Some(mapping) = value.as_mapping() else {
+        return;
+    };
+    if let Some(patterns) = mapping.get(serde_yaml::Value::String("intent_patterns".into())) {
+        triggers.intent_patterns = yaml_string_list(patterns);
+    }
+    if let Some(tools) = mapping.get(serde_yaml::Value::String("tool_signals".into())) {
+        triggers.tool_signals = yaml_string_list(tools);
+    }
+    if let Some(ctx) = mapping.get(serde_yaml::Value::String("context_signals".into()))
+        && let Some(ctx_map) = ctx.as_mapping()
+        && let Some(kw) = ctx_map.get(serde_yaml::Value::String("keywords".into()))
+    {
+        triggers.context_keywords = yaml_string_list(kw);
+    }
+}
+
+fn yaml_string_list(value: &serde_yaml::Value) -> Vec<String> {
+    match value {
+        serde_yaml::Value::Sequence(seq) => seq
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+            .collect(),
+        serde_yaml::Value::String(s) => vec![s.clone()],
+        _ => vec![],
+    }
 }
 
 fn is_valid_name(name: &str, skill_dir: &Path) -> bool {
@@ -289,6 +484,18 @@ mod tests {
         skill_file
     }
 
+    fn skill_metadata(name: &str, description: &str, location: PathBuf) -> SkillMetadata {
+        SkillMetadata {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            location,
+            source: "project".to_owned(),
+            metadata: std::collections::HashMap::new(),
+            triggers: SkillTriggers::default(),
+            content: None,
+        }
+    }
+
     // -- parse_frontmatter tests ----------------------------------------------
 
     #[test]
@@ -297,6 +504,19 @@ mod tests {
         let fm = parse_frontmatter(content);
         assert_eq!(fm.get("name").unwrap(), "my-skill");
         assert_eq!(fm.get("description").unwrap(), "A skill");
+    }
+
+    #[test]
+    fn test_parse_skill_frontmatter_parses_typed_triggers() {
+        let content = "---\nname: research\ndescription: Research skill\nconfidence_threshold: 0.8\npriority: 7\ntriggers:\n  intent_patterns:\n    - research\n  tool_signals:\n    - web_search\n  context_signals:\n    keywords:\n      - paper\n      - source\n---\nBody\n";
+        let parsed = parse_skill_frontmatter(content).unwrap();
+        let triggers = SkillTriggers::from_frontmatter(&parsed.frontmatter);
+        assert_eq!(parsed.frontmatter.name, "research");
+        assert_eq!(triggers.intent_patterns, vec!["research"]);
+        assert_eq!(triggers.tool_signals, vec!["web_search"]);
+        assert_eq!(triggers.context_keywords, vec!["paper", "source"]);
+        assert!((triggers.confidence_threshold - 0.8).abs() < f64::EPSILON);
+        assert_eq!(triggers.priority, 7);
     }
 
     #[test]
@@ -326,28 +546,18 @@ mod tests {
     fn test_skill_metadata_body_strips_frontmatter() {
         let tmp = tempfile::tempdir().unwrap();
         let skill_file = write_skill(tmp.path(), "demo-skill", "Demo", "Line 1\nLine 2");
-        let metadata = SkillMetadata {
-            name: "demo-skill".into(),
-            description: "Demo".into(),
-            location: skill_file,
-            source: "project".into(),
-            content: None,
-            metadata: std::collections::HashMap::new(),
-        };
+        let metadata = skill_metadata("demo-skill", "Demo", skill_file);
         let body = metadata.body().unwrap();
         assert_eq!(body, "Line 1\nLine 2");
     }
 
     #[test]
     fn test_skill_metadata_body_returns_none_for_missing_file() {
-        let metadata = SkillMetadata {
-            name: "missing".into(),
-            description: "Missing".into(),
-            location: PathBuf::from("/nonexistent/path/SKILL.md"),
-            source: "project".into(),
-            content: None,
-            metadata: std::collections::HashMap::new(),
-        };
+        let metadata = skill_metadata(
+            "missing",
+            "Missing",
+            PathBuf::from("/nonexistent/path/SKILL.md"),
+        );
         assert!(metadata.body().is_none());
     }
 
@@ -363,6 +573,19 @@ mod tests {
         assert_eq!(skill.name, "my-skill");
         assert_eq!(skill.description, "A skill");
         assert_eq!(skill.source, "project");
+    }
+
+    #[test]
+    fn test_read_skill_parses_typed_triggers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("research");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let content = "---\nname: research\ndescription: Research skill\npriority: 9\ntriggers:\n  intent_patterns:\n    - research\n  context_signals:\n    keywords:\n      - paper\n---\nBody\n";
+        std::fs::write(skill_dir.join(SKILL_FILE_NAME), content).unwrap();
+        let skill = read_skill(&skill_dir, "project").unwrap();
+        assert_eq!(skill.triggers.intent_patterns, vec!["research"]);
+        assert_eq!(skill.triggers.context_keywords, vec!["paper"]);
+        assert_eq!(skill.triggers.priority, 9);
     }
 
     #[test]
@@ -415,22 +638,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let skill_file = write_skill(tmp.path(), "skill-a", "desc-a", "body");
         let skills = vec![
-            SkillMetadata {
-                name: "skill-a".into(),
-                description: "desc-a".into(),
-                location: skill_file.clone(),
-                source: "project".into(),
-                content: None,
-                metadata: std::collections::HashMap::new(),
-            },
-            SkillMetadata {
-                name: "skill-b".into(),
-                description: "desc-b".into(),
-                location: skill_file,
-                source: "project".into(),
-                content: None,
-                metadata: std::collections::HashMap::new(),
-            },
+            skill_metadata("skill-a", "desc-a", skill_file.clone()),
+            skill_metadata("skill-b", "desc-b", skill_file),
         ];
         let rendered = render_skills_prompt(&skills, &HashSet::new());
         assert!(rendered.contains("<available_skills>"));
@@ -443,14 +652,7 @@ mod tests {
     fn test_render_skills_prompt_with_expanded_body() {
         let tmp = tempfile::tempdir().unwrap();
         let skill_file = write_skill(tmp.path(), "skill-a", "desc", "expanded body");
-        let skills = vec![SkillMetadata {
-            name: "skill-a".into(),
-            description: "desc".into(),
-            location: skill_file,
-            source: "project".into(),
-            content: None,
-            metadata: std::collections::HashMap::new(),
-        }];
+        let skills = vec![skill_metadata("skill-a", "desc", skill_file)];
         let mut expanded = HashSet::new();
         expanded.insert("skill-a".into());
         let rendered = render_skills_prompt(&skills, &expanded);

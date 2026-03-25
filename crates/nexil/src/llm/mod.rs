@@ -17,6 +17,7 @@ use crate::clients::parsing::parser_for_transport;
 pub use crate::core::api_format::ApiFormat;
 use crate::core::errors::{ConduitError, ErrorKind};
 use crate::core::execution::{ApiBaseConfig, ApiKeyConfig, LLMCore};
+use crate::core::provider_policies;
 use crate::core::response_parser::TransportResponse;
 use crate::core::results::{
     AsyncTextStream, StreamEvent, ToolAutoResult, ToolAutoResultKind, ToolExecution, UsageEvent,
@@ -1349,11 +1350,7 @@ enum ToolRoundOutcome {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn default_api_base(provider: &str) -> String {
-    match provider {
-        "openai" => "https://api.openai.com/v1".to_string(),
-        "anthropic" => "https://api.anthropic.com/v1".to_string(),
-        other => format!("https://api.{other}.com/v1"),
-    }
+    provider_policies::default_api_base(provider)
 }
 
 /// Strip image content blocks from a user message before tape persistence.

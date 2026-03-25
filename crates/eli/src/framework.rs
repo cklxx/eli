@@ -107,7 +107,7 @@ impl EliFramework {
     pub async fn process_inbound(&self, mut inbound: Envelope) -> anyhow::Result<TurnResult> {
         Self::strip_internal_context(&mut inbound);
 
-        let rt = self.hook_runtime.read().await;
+        let rt = self.hook_runtime_snapshot().await;
         let workspace = self.workspace.read().await.clone();
 
         if let Some(result) = Self::try_greet_shortcircuit(&rt, &inbound) {
@@ -167,6 +167,10 @@ impl EliFramework {
             })
         })
         .await
+    }
+
+    async fn hook_runtime_snapshot(&self) -> HookRuntime {
+        self.hook_runtime.read().await.clone()
     }
 
     fn strip_internal_context(inbound: &mut Envelope) {
@@ -445,6 +449,29 @@ mod tests {
         }
     }
 
+    struct BlockingModelPlugin {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl EliHookSpec for BlockingModelPlugin {
+        fn plugin_name(&self) -> &str {
+            "blocking-model-plugin"
+        }
+
+        async fn run_model(
+            &self,
+            prompt: &PromptValue,
+            _session_id: &str,
+            _state: &State,
+        ) -> Result<Option<String>, HookError> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(Some(format!("echo: {}", prompt.as_text())))
+        }
+    }
+
     // -- Creation tests -------------------------------------------------------
 
     #[tokio::test]
@@ -554,6 +581,38 @@ mod tests {
         let msg = json!({"content": "hello", "channel": "telegram", "chat_id": "42"});
         let result = fw.process_inbound(msg).await.unwrap();
         assert_eq!(result.session_id, "telegram:42");
+    }
+
+    #[tokio::test]
+    async fn test_process_inbound_snapshots_hook_runtime() {
+        let fw = Arc::new(EliFramework::new());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        fw.register_plugin(
+            "model",
+            Arc::new(BlockingModelPlugin {
+                started: started.clone(),
+                release: release.clone(),
+            }) as Arc<dyn EliHookSpec>,
+        )
+        .await;
+
+        let inbound = json!({"content": "ping", "session_id": "lock-test"});
+        let framework = fw.clone();
+        let turn = tokio::spawn(async move { framework.process_inbound(inbound).await });
+        started.notified().await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            fw.register_plugin("late", Arc::new(SessionPlugin) as Arc<dyn EliHookSpec>),
+        )
+        .await
+        .expect("register_plugin should not wait for an in-flight turn");
+
+        release.notify_waiters();
+        let result = turn.await.unwrap().unwrap();
+        assert_eq!(result.session_id, "lock-test");
+        assert!(fw.plugin_status().await.contains_key("late"));
     }
 
     // -- hook_report ----------------------------------------------------------

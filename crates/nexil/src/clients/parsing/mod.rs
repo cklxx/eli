@@ -4,6 +4,7 @@ pub mod common;
 pub mod completion;
 pub mod messages;
 pub mod responses;
+pub mod sse;
 pub mod types;
 
 pub use completion::CompletionTransportParser;
