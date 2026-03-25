@@ -82,9 +82,10 @@ impl OpenAIAdapter {
         let mut body = serde_json::Map::new();
         body.insert("model".to_owned(), Value::String(request.model_id.clone()));
         body.insert("input".to_owned(), Value::Array(input_items));
-        if let Some(instr) = instructions {
-            body.insert("instructions".to_owned(), Value::String(instr));
-        }
+        body.insert(
+            "instructions".to_owned(),
+            Value::String(instructions.unwrap_or_default()),
+        );
         if request.stream {
             body.insert("stream".to_owned(), Value::Bool(true));
         }
