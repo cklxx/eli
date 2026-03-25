@@ -89,7 +89,7 @@ No trigger → do not load.
 - Product: hook-first AI agent framework (CLI, Telegram, Webhook).
 - Two-crate workspace: `conduit` (LLM toolkit) → `eli` (agent framework).
 - Turn pipeline: `resolve_session → load_state → build_prompt → run_model → save_state → render_outbound → dispatch_outbound`.
-- Key dirs: `crates/eli/src/` (framework, hooks, builtins, channels, skills, tools), `crates/conduit/src/` (LLM, auth, tape), `sidecar/` (OpenClaw bridge).
+- Key dirs: `crates/eli/src/` (framework, hooks, builtins, channels, skills, tools), `crates/nexil/src/` (LLM, auth, tape), `sidecar/` (OpenClaw bridge).
 - Config: `ELI_*` env vars, `.env` for secrets, `~/.eli/config.toml` for profiles.
 
 ---

@@ -552,12 +552,12 @@ struct ChannelMessage {
 
 #### 4.1 `panic!()` in conduit provider adapters
 
-**Location**: `crates/conduit/src/providers/openai.rs:30`
+**Location**: `crates/nexil/src/providers/openai.rs:30`
 ```rust
 panic!("openai adapter does not support messages transport")
 ```
 
-**Location**: `crates/conduit/src/core/execution.rs:880, 898`
+**Location**: `crates/nexil/src/core/execution.rs:880, 898`
 ```rust
 panic!("Expected Single key config")
 panic!("Expected Single base config")
@@ -601,7 +601,7 @@ Anyone with network access can read all conversation tapes. No auth, no bind-to-
 
 #### 4.7 InMemoryTapeStore unbounded growth
 
-**Location**: `crates/conduit/src/tape/store.rs`
+**Location**: `crates/nexil/src/tape/store.rs`
 No eviction policy. Long-running agents accumulate entries forever → memory leak.
 
 ---
@@ -623,7 +623,7 @@ Polls `task.is_finished()` in a loop with `yield_now()`. Under high concurrency,
 
 ### 5.4 Orphan message pruning drops entire assistant messages
 
-**Location**: `crates/conduit/src/core/message_norm.rs:134`
+**Location**: `crates/nexil/src/core/message_norm.rs:134`
 If any tool_call in an assistant message lacks a matching result, the **entire** assistant message is dropped (including text content and other valid tool calls).
 
 ### 5.5 Subagent tool is a stub
@@ -650,7 +650,7 @@ Users have no reference for required environment variables.
 
 ### 5.10 Dead code: sync TapeManager
 
-**Location**: `crates/conduit/src/llm/mod.rs:291` — `#[allow(dead_code)] tape: TapeManager`
+**Location**: `crates/nexil/src/llm/mod.rs:291` — `#[allow(dead_code)] tape: TapeManager`
 Stored but never used; only AsyncTapeManager is active.
 
 ---

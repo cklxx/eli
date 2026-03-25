@@ -17,19 +17,19 @@ and request/response shaping lives in provider-family adapters.
 
 ## Proposed Rust Modules
 
-- **`crates/conduit/src/providers/mod.rs`** — New top-level module for all provider-family adapters; re-exports family submodules.
-- **`crates/conduit/src/providers/anthropic.rs`** — Anthropic-family adapter: request/response mapping, streaming SSE parsing, model-name normalization. Extracted from `execution.rs`.
-- **`crates/conduit/src/providers/openai.rs`** — OpenAI-compatible adapter (also covers Azure, Groq, Together). Chat completion serialization, tool-call delta stitching. Extracted from `execution.rs`.
-- **`crates/conduit/src/providers/gemini.rs`** — Google Gemini adapter: `generateContent` shape, safety-rating passthrough. New file.
-- **`crates/conduit/src/core/api_format.rs`** — Keep as the canonical wire-type definitions and format enums. Remove dispatch logic; adapters own translation.
-- **`crates/conduit/src/core/provider_runtime.rs`** — Keep and promote into the provider registry + dispatch layer: maps model strings to adapter trait objects and holds retry/timeout policy. `execution.rs` delegates here.
-- **`crates/conduit/src/core/execution.rs`** — Must shed provider-specific HTTP building, per-family streaming state machines, response deserialization branches, and model-name matching arms. Retains only the turn lifecycle: build request, dispatch via `provider_runtime`, collect stream, return normalized response.
-- **`crates/conduit/src/core/stream.rs`** — New file for streaming primitives (`StreamEvent`, `DeltaAccumulator`, SSE frame parser) currently buried in `execution.rs`.
-- **`crates/conduit/src/adapter.rs`** — Defines the `ProviderAdapter` trait (`fn build_request`, `fn parse_event`, `fn finish`). All provider files implement this.
-- **`crates/conduit/src/llm.rs`** — Keep but simplify. `LLMBuilder` wires the chosen adapter into `provider_runtime`; remove inline provider conditionals that leaked in here.
+- **`crates/nexil/src/providers/mod.rs`** — New top-level module for all provider-family adapters; re-exports family submodules.
+- **`crates/nexil/src/providers/anthropic.rs`** — Anthropic-family adapter: request/response mapping, streaming SSE parsing, model-name normalization. Extracted from `execution.rs`.
+- **`crates/nexil/src/providers/openai.rs`** — OpenAI-compatible adapter (also covers Azure, Groq, Together). Chat completion serialization, tool-call delta stitching. Extracted from `execution.rs`.
+- **`crates/nexil/src/providers/gemini.rs`** — Google Gemini adapter: `generateContent` shape, safety-rating passthrough. New file.
+- **`crates/nexil/src/core/api_format.rs`** — Keep as the canonical wire-type definitions and format enums. Remove dispatch logic; adapters own translation.
+- **`crates/nexil/src/core/provider_runtime.rs`** — Keep and promote into the provider registry + dispatch layer: maps model strings to adapter trait objects and holds retry/timeout policy. `execution.rs` delegates here.
+- **`crates/nexil/src/core/execution.rs`** — Must shed provider-specific HTTP building, per-family streaming state machines, response deserialization branches, and model-name matching arms. Retains only the turn lifecycle: build request, dispatch via `provider_runtime`, collect stream, return normalized response.
+- **`crates/nexil/src/core/stream.rs`** — New file for streaming primitives (`StreamEvent`, `DeltaAccumulator`, SSE frame parser) currently buried in `execution.rs`.
+- **`crates/nexil/src/adapter.rs`** — Defines the `ProviderAdapter` trait (`fn build_request`, `fn parse_event`, `fn finish`). All provider files implement this.
+- **`crates/nexil/src/llm.rs`** — Keep but simplify. `LLMBuilder` wires the chosen adapter into `provider_runtime`; remove inline provider conditionals that leaked in here.
 - **`crates/eli/src/builtin/agent.rs`** — Keep with no structural dependency on conduit's internals; it should consume conduit's public API only.
 - **`crates/eli/src/builtin/settings.rs`** — Keep and extend with a provider-family override so users can choose an adapter independently of the model string when needed.
-- **`crates/conduit/src/providers/tests/`** — One integration-test file per adapter (`anthropic_test.rs`, `openai_test.rs`) with recorded HTTP fixtures.
+- **`crates/nexil/src/providers/tests/`** — One integration-test file per adapter (`anthropic_test.rs`, `openai_test.rs`) with recorded HTTP fixtures.
 
 ## Execution Plan
 

@@ -14,7 +14,7 @@ name = "eli"
 path = "src/main.rs"
 
 [dependencies]
-nexil = { version = "0.6.2", path = "../conduit" }
+nexil = { version = "0.6.2", path = "../nexil" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

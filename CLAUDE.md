@@ -146,7 +146,7 @@ python3 -m pytest tests/test_vision.py -v # vision: multimodal image tests
 
 ## Key References
 
-[Turn pipeline](crates/eli/src/framework.rs) · [Hook contract](crates/eli/src/hooks.rs) · [Builtin plugins](crates/eli/src/builtin/) · [LLM client (nexil)](crates/conduit/src/llm.rs) · [Channel trait](crates/eli/src/channels/base.rs) · [Rust coding conventions](docs/rust-conventions.md)
+[Turn pipeline](crates/eli/src/framework.rs) · [Hook contract](crates/eli/src/hooks.rs) · [Builtin plugins](crates/eli/src/builtin/) · [LLM client (nexil)](crates/nexil/src/llm.rs) · [Channel trait](crates/eli/src/channels/base.rs) · [Rust coding conventions](docs/rust-conventions.md)
 
 ---
 
@@ -154,7 +154,7 @@ python3 -m pytest tests/test_vision.py -v # vision: multimodal image tests
 
 Two-crate Cargo workspace (edition 2024):
 
-**`nexil`** (crate dir: `crates/conduit`) — Provider-agnostic LLM toolkit. Transport, streaming, tool schema, tape storage, OAuth auth. Entry: `LLM` + `LLMBuilder` in `llm.rs`.
+**`nexil`** (crate dir: `crates/nexil`) — Provider-agnostic LLM toolkit. Transport, streaming, tool schema, tape storage, OAuth auth. Entry: `LLM` + `LLMBuilder` in `llm.rs`.
 
 **`eli`** — Hook-first agent framework. Turn pipeline:
 

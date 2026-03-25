@@ -74,8 +74,8 @@ All line counts from `wc -l` on current source. Code/test split from `#[cfg(test
 
 **Why not the full 6-file split**: `LLMBuilder` and `LLM` share private fields — splitting them requires `pub(crate)` field leakage. `streaming.rs` and `chat.rs` use identical internal state. Start with the clean extractions and reassess.
 
-**Current path**: `crates/conduit/src/llm.rs`
-**Proposed**: `crates/conduit/src/llm/embedding.rs`, `crates/conduit/src/llm/decisions.rs`
+**Current path**: `crates/nexil/src/llm.rs`
+**Proposed**: `crates/nexil/src/llm/embedding.rs`, `crates/nexil/src/llm/decisions.rs`
 **Impact**: HIGH — reduces cognitive load on the largest remaining file
 **Effort**: LOW — embedding and decisions are self-contained
 
@@ -143,7 +143,7 @@ The higher-criticality hooks (`resolve_session`, `load_state`) lack diagnostics 
 | L1 | Rename `types.rs` to `primitives.rs` | `eli/src/types.rs` (155 lines) | LOW | Style preference; small file, shared dependency root for 5+ modules |
 | L2 | Rename `clients/parsing/types.rs` to `transport.rs` | `conduit/src/clients/parsing/types.rs` (54 lines) | LOW | Content is `TransportKind`, `ToolCallDelta`, `BaseTransportParser` |
 | L3 | Narrow conduit `lib.rs` re-exports | `conduit/src/lib.rs` (46 re-exports) | LOW | 12 OAuth items noisy, but single-consumer crate |
-| L4 | Update conduit package description | `crates/conduit/Cargo.toml:5` | LOW | Says "Core library for the eli AI assistant" — update if ever published standalone |
+| L4 | Update conduit package description | `crates/nexil/Cargo.toml:5` | LOW | Says "Core library for the eli AI assistant" — update if ever published standalone |
 | L5 | Add `[workspace.lints]` for clippy settings | `Cargo.toml` | LOW | Nice-to-have for consistency |
 
 ---
