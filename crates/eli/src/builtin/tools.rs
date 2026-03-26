@@ -16,7 +16,7 @@ use crate::builtin::shell_manager::shell_manager;
 use crate::builtin::tape::TapeService;
 use crate::envelope::ValueExt;
 use crate::skills::discover_skills;
-use crate::tools::{REGISTRY, populate_model_tools_cache, shorten_text};
+use crate::tools::{REGISTRY, shorten_text};
 
 const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 10;
@@ -24,6 +24,227 @@ const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10MB
 
 static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(reqwest::Client::new);
+
+/// Maximum characters of CLI output included in the subagent completion message.
+const SUBAGENT_OUTPUT_TAIL: usize = 2000;
+
+// ---------------------------------------------------------------------------
+// Subagent CLI detection
+// ---------------------------------------------------------------------------
+
+/// Info about a detected coding CLI binary.
+#[derive(Clone, Debug)]
+struct CliInfo {
+    name: String,
+    path: String,
+}
+
+/// Ordered list of coding CLIs to probe.
+const CLI_CANDIDATES: &[&str] = &["claude", "codex", "kimi"];
+
+static DETECTED_CLI: std::sync::LazyLock<std::sync::Mutex<Option<CliInfo>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+fn detect_cli() -> Option<CliInfo> {
+    let mut cache = DETECTED_CLI.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref info) = *cache {
+        return Some(info.clone());
+    }
+    for &name in CLI_CANDIDATES {
+        if let Ok(output) = std::process::Command::new("which").arg(name).output()
+            && output.status.success()
+        {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            let info = CliInfo {
+                name: name.to_owned(),
+                path,
+            };
+            *cache = Some(info.clone());
+            return Some(info);
+        }
+    }
+    None
+}
+
+fn resolve_cli(explicit: Option<&str>) -> Result<CliInfo, ConduitError> {
+    if let Some(name) = explicit {
+        let output = std::process::Command::new("which")
+            .arg(name)
+            .output()
+            .map_err(|e| ConduitError::new(ErrorKind::Tool, format!("which {name}: {e}")))?;
+        if !output.status.success() {
+            return Err(ConduitError::new(
+                ErrorKind::Tool,
+                format!("CLI '{name}' not found in PATH"),
+            ));
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        return Ok(CliInfo {
+            name: name.to_owned(),
+            path,
+        });
+    }
+    detect_cli().ok_or_else(|| {
+        ConduitError::new(
+            ErrorKind::Tool,
+            format!(
+                "no coding CLI found in PATH (tried: {})",
+                CLI_CANDIDATES.join(", ")
+            ),
+        )
+    })
+}
+
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_owned();
+    }
+    if s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"_-./=".contains(&b))
+    {
+        return s.to_owned();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn build_cli_command(cli: &CliInfo, prompt_file: &str) -> String {
+    let bin = shell_quote(&cli.path);
+    let file = shell_quote(prompt_file);
+    match cli.name.as_str() {
+        // claude -p reads from stdin when no positional prompt is given.
+        "claude" => format!("{bin} -p --output-format text < {file}"),
+        // codex exec reads from stdin when prompt arg is `-` or omitted.
+        "codex" => format!("{bin} exec < {file}"),
+        // kimi -p takes the prompt as a direct argument; use $() to read from file.
+        "kimi" => format!("{bin} -p \"$(cat {file})\" --print"),
+        // Fallback: assume stdin piping works.
+        _ => format!("{bin} < {file}"),
+    }
+}
+
+fn write_prompt_tempfile(prompt: &str) -> Result<NamedTempFile, ConduitError> {
+    let mut f = tempfile::Builder::new()
+        .prefix(".eli-prompt-")
+        .tempfile()
+        .map_err(|e| ConduitError::new(ErrorKind::Tool, format!("prompt tempfile: {e}")))?;
+    f.write_all(prompt.as_bytes())
+        .map_err(|e| ConduitError::new(ErrorKind::Tool, format!("write prompt: {e}")))?;
+    Ok(f)
+}
+
+fn snapshot_git_head(workspace: &str) -> Option<String> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+}
+
+async fn collect_artifacts(workspace: &str, pre_head: Option<&str>) -> String {
+    let is_git = tokio::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(workspace)
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !is_git {
+        return "(not a git repo)".to_owned();
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    // Current HEAD.
+    let current_head = tokio::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
+
+    // Commits since spawn.
+    if let (Some(pre), Some(cur)) = (pre_head, &current_head)
+        && pre != cur
+        && let Ok(o) = tokio::process::Command::new("git")
+            .args(["log", "--oneline", &format!("{pre}..{cur}")])
+            .current_dir(workspace)
+            .output()
+            .await
+    {
+        let log = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+        if !log.is_empty() {
+            parts.push(format!("commits:\n{log}"));
+        }
+    }
+
+    // Working tree status.
+    if let Ok(o) = tokio::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(workspace)
+        .output()
+        .await
+    {
+        let status = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+        if !status.is_empty() {
+            parts.push(format!("working tree:\n{status}"));
+        }
+    }
+
+    // Diff stat.
+    if let Ok(o) = tokio::process::Command::new("git")
+        .args(["diff", "--stat"])
+        .current_dir(workspace)
+        .output()
+        .await
+    {
+        let stat = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+        if !stat.is_empty() {
+            parts.push(stat);
+        }
+    }
+
+    if parts.is_empty() {
+        "(no changes)".to_owned()
+    } else {
+        parts.join("\n")
+    }
+}
+
+fn build_completion_message(
+    agent_id: &str,
+    cli_name: &str,
+    exit_code: Option<i32>,
+    output: &str,
+    artifacts: &str,
+) -> String {
+    let status = match exit_code {
+        Some(0) => "success (exit 0)".to_owned(),
+        Some(code) => format!("failed (exit {code})"),
+        None => "unknown".to_owned(),
+    };
+
+    let output_section = if output.trim().is_empty() {
+        "(no output)".to_owned()
+    } else if output.len() > SUBAGENT_OUTPUT_TAIL {
+        let tail_start = output.len() - SUBAGENT_OUTPUT_TAIL;
+        let boundary = output.ceil_char_boundary(tail_start);
+        format!("...(truncated)\n{}", &output[boundary..])
+    } else {
+        output.to_owned()
+    };
+
+    format!(
+        "[subagent {agent_id} completed ({cli_name})]\n\n\
+         status: {status}\n\n\
+         output:\n{output_section}\n\n\
+         changes:\n{artifacts}"
+    )
+}
 
 tokio::task_local! {
     static CURRENT_TAPE_SERVICE: TapeService;
@@ -33,8 +254,6 @@ tokio::task_local! {
 pub fn register_builtin_tools() {
     let mut reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     reg.extend(builtin_tools().into_iter().map(|t| (t.name.clone(), t)));
-    drop(reg);
-    populate_model_tools_cache();
 }
 
 /// Run a future with the current tape service bound for tool handlers.
@@ -308,10 +527,49 @@ fn invalid_input(error: anyhow::Error) -> ConduitError {
     ConduitError::new(ErrorKind::InvalidInput, error.to_string())
 }
 
-fn get_notice_description(args: &Value) -> Option<&str> {
-    args.get_str_field("description")
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+/// Build a short, human-readable notice from the tool name and its arguments.
+///
+/// Examples: "读 src/main.rs", "执行 cargo build", "搜索 tape: error",
+/// "写 config.toml", "编辑 lib.rs", "获取 https://…"
+fn auto_notice(tool_name: &str, args: &Value) -> String {
+    let primary = |key: &str| args.get(key).and_then(|v| v.as_str()).unwrap_or("");
+    let shorten = |s: &str, max: usize| -> String {
+        if s.len() <= max {
+            s.to_owned()
+        } else {
+            let end = s.floor_char_boundary(max);
+            format!("{}…", &s[..end])
+        }
+    };
+    match tool_name {
+        "bash" => {
+            let cmd = primary("cmd");
+            let desc = primary("description");
+            if !desc.is_empty() {
+                shorten(desc, 60)
+            } else {
+                format!("执行 {}", shorten(cmd, 50))
+            }
+        }
+        "fs.read" => format!("读 {}", shorten(primary("path"), 60)),
+        "fs.write" => format!("写 {}", shorten(primary("path"), 60)),
+        "fs.edit" => format!("编辑 {}", shorten(primary("path"), 60)),
+        "web.fetch" => format!("获取 {}", shorten(primary("url"), 60)),
+        "tape.search" => format!("搜索 tape: {}", shorten(primary("query"), 40)),
+        "tape.info" => "查看 tape 信息".to_owned(),
+        "tape.reset" => "重置 tape".to_owned(),
+        "tape.handoff" => {
+            let name = primary("name");
+            if name.is_empty() {
+                "创建 handoff".to_owned()
+            } else {
+                format!("handoff: {name}")
+            }
+        }
+        "tape.anchors" => "列出 anchors".to_owned(),
+        "subagent" => format!("子任务: {}", shorten(primary("prompt"), 50)),
+        _ => tool_name.to_owned(),
+    }
 }
 
 fn ok_val(s: impl Into<String>) -> ToolResult {
@@ -336,20 +594,20 @@ fn tape_name_from_context(ctx: Option<&ToolContext>) -> Result<String, ConduitEr
     })
 }
 
-async fn maybe_send_user_facing_notice(ctx: Option<&ToolContext>, args: &Value) {
-    if let Some((description, session_id, url)) = extract_notice_params(ctx, args) {
-        send_notice(&url, session_id, description).await;
+async fn maybe_send_user_facing_notice(tool_name: &str, ctx: Option<&ToolContext>, args: &Value) {
+    if let Some((notice, session_id, url)) = extract_notice_params(tool_name, ctx, args) {
+        send_notice(&url, &session_id, &notice).await;
     }
 }
 
-fn extract_notice_params<'a>(
-    ctx: Option<&'a ToolContext>,
-    args: &'a Value,
-) -> Option<(&'a str, &'a str, String)> {
+fn extract_notice_params(
+    tool_name: &str,
+    ctx: Option<&ToolContext>,
+    args: &Value,
+) -> Option<(String, String, String)> {
     if !crate::builtin::config::EliConfig::load().tool_notices {
         return None;
     }
-    let description = get_notice_description(args)?;
     let ctx = ctx?;
     let output_channel = ctx.state.get("output_channel").and_then(|v| v.as_str())?;
     if output_channel != "webhook" {
@@ -359,12 +617,14 @@ fn extract_notice_params<'a>(
         .state
         .get("session_id")
         .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty())?;
+        .filter(|s| !s.trim().is_empty())?
+        .to_owned();
     let url = crate::tools::SIDECAR_URL
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone()?;
-    Some((description, session_id, url))
+    let notice = auto_notice(tool_name, args);
+    Some((notice, session_id, url))
 }
 
 async fn send_notice(url: &str, session_id: &str, description: &str) {
@@ -464,7 +724,7 @@ fn tool_bash() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+                maybe_send_user_facing_notice("bash", ctx.as_ref(), &args).await;
                 let cmd = args
                     .require_str_field("cmd")
                     .map_err(invalid_input)?
@@ -697,14 +957,14 @@ fn fs_edit_request(args: &Value) -> Result<FsEditRequest, ConduitError> {
 }
 
 async fn run_fs_read(args: Value, ctx: Option<ToolContext>) -> ToolResult {
-    maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+    maybe_send_user_facing_notice("fs.read", ctx.as_ref(), &args).await;
     let request = fs_read_request(&args)?;
     let path = resolve_tool_path(ctx, &request.raw_path)?;
     ok_val(read_text_window(&path, request.offset, request.limit)?)
 }
 
 async fn run_fs_write(args: Value, ctx: Option<ToolContext>) -> ToolResult {
-    maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+    maybe_send_user_facing_notice("fs.write", ctx.as_ref(), &args).await;
     let request = fs_write_request(&args)?;
     let path = resolve_tool_path(ctx, &request.raw_path)?;
     write_text_file(&path, &request.content)?;
@@ -712,7 +972,7 @@ async fn run_fs_write(args: Value, ctx: Option<ToolContext>) -> ToolResult {
 }
 
 async fn run_fs_edit(args: Value, ctx: Option<ToolContext>) -> ToolResult {
-    maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+    maybe_send_user_facing_notice("fs.edit", ctx.as_ref(), &args).await;
     let request = fs_edit_request(&args)?;
     let path = resolve_tool_path(ctx, &request.raw_path)?;
     edit_text_file(&path, &request.old, &request.new, request.start)?;
@@ -727,7 +987,6 @@ fn tool_fs_read() -> Tool {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path (absolute or relative to workspace)."},
-                "description": {"type": "string", "description": "Brief user-facing status text to send before reading when the channel supports it."},
                 "offset": {"type": "integer", "description": "Line number to start reading from (0-based)."},
                 "limit": {"type": "integer", "description": "Max number of lines to return. Set this for large files to avoid wasted tokens."}
             },
@@ -751,7 +1010,6 @@ fn tool_fs_write() -> Tool {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path (absolute or relative to workspace)."},
-                "description": {"type": "string", "description": "Brief user-facing status text to send before writing when the channel supports it."},
                 "content": {"type": "string", "description": "Full file content to write."}
             },
             "required": ["path", "content"]
@@ -774,7 +1032,6 @@ fn tool_fs_edit() -> Tool {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path (absolute or relative to workspace)."},
-                "description": {"type": "string", "description": "Brief user-facing status text to send before editing when the channel supports it."},
                 "old": {"type": "string", "description": "Exact text to find and replace (first occurrence only)."},
                 "new": {"type": "string", "description": "Replacement text."},
                 "start": {"type": "integer", "description": "Line number to start searching from (0-based, optional)."}
@@ -864,12 +1121,11 @@ fn tool_tape_info() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "description": {"type": "string", "description": "Brief user-facing status text to send before reading tape info when the channel supports it."}
             }
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+                maybe_send_user_facing_notice("tape.info", ctx.as_ref(), &args).await;
                 let tape_name = tape_name_from_context(ctx.as_ref())?;
                 let service = current_tape_service()?;
                 let info = service.info(&tape_name).await?;
@@ -891,7 +1147,6 @@ fn tool_tape_search() -> Tool {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Keyword to search for in tape entries."},
-                "description": {"type": "string", "description": "Brief user-facing status text to send before searching tape when the channel supports it."},
                 "limit": {"type": "integer", "description": "Max results (default 20)."},
                 "start": {"type": "string", "description": "Optional start date (ISO)."},
                 "end": {"type": "string", "description": "Optional end date (ISO)."},
@@ -905,7 +1160,7 @@ fn tool_tape_search() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+                maybe_send_user_facing_notice("tape.search", ctx.as_ref(), &args).await;
                 let query_text = args
                     .require_str_field("query")
                     .map_err(invalid_input)?
@@ -969,13 +1224,12 @@ fn tool_tape_reset() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "description": {"type": "string", "description": "Brief user-facing status text to send before resetting tape when the channel supports it."},
                 "archive": {"type": "boolean", "description": "Save a tape snapshot before wiping (default false)."}
             }
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+                maybe_send_user_facing_notice("tape.reset", ctx.as_ref(), &args).await;
                 let archive = args.get_bool_field("archive").unwrap_or(false);
                 let tape_name = tape_name_from_context(ctx.as_ref())?;
                 let service = current_tape_service()?;
@@ -997,14 +1251,13 @@ fn tool_tape_handoff() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "description": {"type": "string", "description": "Brief user-facing status text to send before creating a handoff when the channel supports it."},
                 "name": {"type": "string", "description": "Anchor name (default: handoff)."},
                 "summary": {"type": "string", "description": "What was accomplished — used for context when resuming later."}
             }
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+                maybe_send_user_facing_notice("tape.handoff", ctx.as_ref(), &args).await;
                 let name = args.get_str_field("name").unwrap_or("handoff").to_owned();
                 let summary = args.get_str_field("summary").unwrap_or("").to_owned();
                 let tape_name = tape_name_from_context(ctx.as_ref())?;
@@ -1032,13 +1285,12 @@ fn tool_tape_anchors() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "description": {"type": "string", "description": "Brief user-facing status text to send before listing anchors when the channel supports it."},
                 "limit": {"type": "integer", "description": "Max anchors to return (default 20)."}
             }
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+                maybe_send_user_facing_notice("tape.anchors", ctx.as_ref(), &args).await;
                 let limit = args.get_i64_field("limit").unwrap_or(20) as usize;
                 let tape_name = tape_name_from_context(ctx.as_ref())?;
                 let service = current_tape_service()?;
@@ -1184,7 +1436,6 @@ fn tool_web_fetch() -> Tool {
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "The URL to fetch."},
-                "description": {"type": "string", "description": "Brief user-facing status text to send before fetching when the channel supports it."},
                 "headers": {"type": "object", "description": "Custom HTTP headers as key-value pairs."},
                 "timeout": {"type": "integer", "description": "Request timeout in seconds (default 10)."}
             },
@@ -1192,7 +1443,7 @@ fn tool_web_fetch() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
+                maybe_send_user_facing_notice("web.fetch", ctx.as_ref(), &args).await;
                 let url = args
                     .require_str_field("url")
                     .map_err(invalid_input)?
@@ -1257,41 +1508,141 @@ fn tool_web_fetch() -> Tool {
 fn tool_subagent() -> Tool {
     Tool::with_context(
         "subagent",
-        "[EXPERIMENTAL] Spawn an isolated sub-agent with its own context.\n\nExamples: parallelize independent research, delegate a focused coding subtask, explore a codebase without polluting the main tape. Configure model, session strategy, and tool/skill allowlists. Currently returns prompt acknowledgement only — full isolation not yet implemented.",
+        "Spawn an async coding sub-agent using an external CLI (claude, codex, kimi).\n\nThe sub-agent runs in the background. When it finishes, its output and a git diff of changes are injected back as an inbound message so you can review the result. Returns immediately with an agent ID.\n\nExamples: delegate a focused coding subtask, parallelize independent work across repos, run a long refactor without blocking the main conversation.",
         serde_json::json!({
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "description": "Task description for the sub-agent."},
-                "description": {"type": "string", "description": "Brief user-facing status text to send before delegating when the channel supports it."},
-                "model": {"type": "string", "description": "Model to use (optional)."},
-                "session": {"type": "string", "description": "Session strategy: inherit, temp, or custom id."},
-                "allowed_tools": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Allowed tool names."
-                },
-                "allowed_skills": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Allowed skill names."
-                }
+                "prompt": {"type": "string", "description": "Task description for the sub-agent. Should be self-contained — the CLI starts fresh in the workspace."},
+                "cwd": {"type": "string", "description": "Absolute working directory for the sub-agent. Defaults to the current workspace."},
+                "cli": {"type": "string", "description": "Force a specific CLI binary (e.g. 'claude', 'codex', 'kimi'). Auto-detected if omitted."}
             },
             "required": ["prompt"]
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                maybe_send_user_facing_notice(ctx.as_ref(), &args).await;
-                let prompt = match args.get("prompt") {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => serde_json::to_string(other).unwrap_or_default(),
-                    None => {
-                        return Err(ConduitError::new(
-                            ErrorKind::InvalidInput,
-                            "missing required argument 'prompt'",
-                        ));
+                maybe_send_user_facing_notice("subagent", ctx.as_ref(), &args).await;
+
+                let prompt = args
+                    .require_str_field("prompt")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                if prompt.trim().is_empty() {
+                    return Err(ConduitError::new(
+                        ErrorKind::InvalidInput,
+                        "prompt must not be empty",
+                    ));
+                }
+
+                let cli_arg = args
+                    .get_str_field("cli")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let cli = resolve_cli(cli_arg)?;
+
+                let state = ctx.map(|c| c.state).unwrap_or_default();
+                let workspace = args
+                    .get_str_field("cwd")
+                    .map(|s| s.to_owned())
+                    .or_else(|| {
+                        state
+                            .get("_runtime_workspace")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_owned())
+                    })
+                    .unwrap_or_else(|| {
+                        std::env::current_dir()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|_| ".".to_owned())
+                    });
+
+                // Write prompt to temp file, pipe to CLI via stdin redirection.
+                let prompt_tempfile = write_prompt_tempfile(&prompt)?;
+                let prompt_path = prompt_tempfile
+                    .path()
+                    .to_str()
+                    .ok_or_else(|| {
+                        ConduitError::new(ErrorKind::Tool, "prompt tempfile path not UTF-8")
+                    })?
+                    .to_owned();
+
+                let pre_head = snapshot_git_head(&workspace);
+
+                let full_cmd = build_cli_command(&cli, &prompt_path);
+
+                let mgr = shell_manager();
+                let shell_id = mgr.start(&full_cmd, Some(&workspace)).await.map_err(|e| {
+                    ConduitError::new(ErrorKind::Tool, format!("failed to start CLI: {e}"))
+                })?;
+
+                let agent_id = shell_id.replace("bash-", "agent-");
+                let cli_name = cli.name.clone();
+
+                // Capture everything the monitor task needs.
+                let inject_fn = crate::control_plane::inbound_injector();
+                let session_id = state
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                let chat_id = state
+                    .get("chat_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                let output_channel = state
+                    .get("output_channel")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+
+                let monitor_agent_id = agent_id.clone();
+                let monitor_cli_name = cli_name.clone();
+                let monitor_shell_id = shell_id.clone();
+                let monitor_workspace = workspace.clone();
+
+                tokio::spawn(async move {
+                    // Keep prompt file alive until the CLI has a chance to read it.
+                    let _prompt_file = prompt_tempfile;
+
+                    let mgr = shell_manager();
+                    let (output, exit_code, _) = mgr
+                        .wait_closed(&monitor_shell_id)
+                        .await
+                        .unwrap_or_else(|e| (e.to_string(), Some(-1), "error".to_owned()));
+
+                    let artifacts =
+                        collect_artifacts(&monitor_workspace, pre_head.as_deref()).await;
+                    let message = build_completion_message(
+                        &monitor_agent_id,
+                        &monitor_cli_name,
+                        exit_code,
+                        &output,
+                        &artifacts,
+                    );
+
+                    if let Some(inject) = inject_fn {
+                        inject(serde_json::json!({
+                            "session_id": session_id,
+                            "channel": "subagent",
+                            "chat_id": chat_id,
+                            "content": message,
+                            "output_channel": output_channel,
+                            "context": {
+                                "source": "subagent",
+                                "agent_id": monitor_agent_id,
+                                "exit_code": exit_code,
+                            }
+                        }))
+                        .await;
+                    } else {
+                        tracing::warn!(
+                            agent_id = %monitor_agent_id,
+                            "subagent completed but no inbound injector set"
+                        );
                     }
-                };
-                ok_val(format!("(subagent invoked with prompt: {prompt})"))
+                });
+
+                ok_val(format!("{agent_id} spawned ({cli_name})"))
             })
         },
     )
@@ -1338,153 +1689,65 @@ fn tool_help() -> Tool {
 // quit
 // ---------------------------------------------------------------------------
 
-fn build_message_send_envelope(
-    args: &Value,
-    state: &HashMap<String, Value>,
-) -> Result<Option<Value>, ConduitError> {
-    let text = optional_string_arg(args, "text")?.unwrap_or_default();
-    let media = message_send_media(args)?;
-    if text.trim().is_empty() && media.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(message_send_envelope(state, text, media)))
-}
-
-fn message_send_envelope(
-    state: &HashMap<String, Value>,
-    text: String,
-    media: Vec<crate::control_plane::OutboundMedia>,
-) -> Value {
-    let mut context = serde_json::Map::new();
-    if !media.is_empty() {
-        let media_json: Vec<Value> = media
-            .iter()
-            .map(|item| {
-                serde_json::json!({
-                    "path": item.path,
-                    "media_type": item.media_type,
-                    "mime_type": item.mime_type,
-                })
-            })
-            .collect();
-        context.insert("outbound_media".to_owned(), Value::Array(media_json));
-    }
-    serde_json::json!({
-        "content": text,
-        "session_id": state_str(state, "session_id"),
-        "channel": state_str(state, "channel"),
-        "chat_id": state_str(state, "chat_id"),
-        "output_channel": state_str(state, "output_channel"),
-        "context": context,
-    })
-}
-
-fn message_send_media(
-    args: &Value,
-) -> Result<Vec<crate::control_plane::OutboundMedia>, ConduitError> {
-    message_send_paths(args)?
-        .into_iter()
-        .map(message_send_media_item)
-        .collect()
-}
-
-fn message_send_paths(args: &Value) -> Result<Vec<String>, ConduitError> {
-    let mut paths = string_array_arg(args, "media_paths")?;
-    push_optional_string(args, "media_path", &mut paths)?;
-    push_optional_string(args, "image_path", &mut paths)?;
-    Ok(paths)
-}
-
-fn message_send_media_item(
-    path: String,
-) -> Result<crate::control_plane::OutboundMedia, ConduitError> {
-    let path_obj = Path::new(&path);
-    if !path_obj.exists() {
-        return Err(ConduitError::new(
-            ErrorKind::InvalidInput,
-            format!("media path not found: {path}"),
-        ));
-    }
-    let mime = crate::control_plane::mime_from_extension(path_obj);
-    let media_type = crate::control_plane::media_type_from_mime(mime);
-    Ok(crate::control_plane::OutboundMedia {
-        path,
-        media_type: media_type.to_owned(),
-        mime_type: mime.to_owned(),
-    })
-}
-
-fn push_optional_string(
-    args: &Value,
-    key: &str,
-    values: &mut Vec<String>,
-) -> Result<(), ConduitError> {
-    if let Some(value) = optional_string_arg(args, key)? {
-        values.push(value);
-    }
-    Ok(())
-}
-
-fn optional_string_arg(args: &Value, key: &str) -> Result<Option<String>, ConduitError> {
-    match args.get(key) {
-        None => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value.clone())),
-        Some(value) => Err(invalid_tool_arg(key, "a string", value)),
-    }
-}
-
-fn string_array_arg(args: &Value, key: &str) -> Result<Vec<String>, ConduitError> {
-    match args.get(key) {
-        None => Ok(Vec::new()),
-        Some(Value::Array(values)) => values
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| invalid_tool_arg(key, "an array of strings", value))
-            })
-            .collect(),
-        Some(value) => Err(invalid_tool_arg(key, "an array of strings", value)),
-    }
-}
-
-fn invalid_tool_arg(key: &str, expected: &str, value: &Value) -> ConduitError {
-    ConduitError::new(
-        ErrorKind::InvalidInput,
-        format!("argument '{key}' must be {expected}, got {value}"),
-    )
-}
-
-fn state_str<'a>(state: &'a HashMap<String, Value>, key: &str) -> &'a str {
-    state
-        .get(key)
-        .and_then(|value| value.as_str())
-        .unwrap_or("")
-}
-
 fn tool_message_send() -> Tool {
     Tool::with_context(
         "message.send",
-        "Send a message to the user immediately, without waiting for the turn to finish.\n\nUse this to acknowledge the user's request before starting long-running work, or to provide progress updates mid-task. The message is dispatched to the same channel the user sent from. Provide at least one of `text`, `media_path`, `media_paths`, or `image_path`.",
+        "Send a message to the user immediately, without waiting for the turn to finish.\n\nUse this to acknowledge the user's request before starting long-running work, or to provide progress updates mid-task. The message is dispatched to the same channel the user sent from.",
         serde_json::json!({
             "type": "object",
             "properties": {
-                "text": {"type": "string", "description": "Optional message text to send to the user."},
+                "text": {"type": "string", "description": "Message text to send to the user."},
                 "media_path": {"type": "string", "description": "Optional local media path to send along with the message on channels that support media."},
                 "media_paths": {"type": "array", "items": {"type": "string"}, "description": "Optional list of local media paths to send along with the message on channels that support media."},
                 "image_path": {"type": "string", "description": "Deprecated alias for media_path; kept for backward compatibility."}
             },
-            "additionalProperties": false
+            "required": ["text"]
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
+                let text = args
+                    .require_str_field("text")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                let image_path = args
+                    .get("image_path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned());
+                if text.trim().is_empty() && image_path.is_none() {
+                    return ok_val("skipped: empty message");
+                }
+
                 let ctx = ctx.ok_or_else(|| {
                     ConduitError::new(ErrorKind::InvalidInput, "no tool context available")
                 })?;
-                let Some(envelope) = build_message_send_envelope(&args, &ctx.state)? else {
-                    return ok_val("skipped: empty message");
-                };
+                let state = &ctx.state;
+
+                let mut envelope = serde_json::json!({
+                    "content": text,
+                    "session_id": state.get("session_id").and_then(|v| v.as_str()).unwrap_or(""),
+                    "channel": state.get("channel").and_then(|v| v.as_str()).unwrap_or(""),
+                    "chat_id": state.get("chat_id").and_then(|v| v.as_str()).unwrap_or(""),
+                    "output_channel": state.get("output_channel").and_then(|v| v.as_str()).unwrap_or(""),
+                });
+                if let Some(path) = image_path {
+                    let path_obj = std::path::Path::new(&path);
+                    if !path_obj.exists() {
+                        return Err(ConduitError::new(
+                            ErrorKind::InvalidInput,
+                            format!("image_path not found: {path}"),
+                        ));
+                    }
+                    let mime = crate::control_plane::mime_from_extension(path_obj);
+                    let media_type = crate::control_plane::media_type_from_mime(mime);
+                    envelope["outbound_media"] = serde_json::json!([
+                        {
+                            "path": path,
+                            "mime_type": mime,
+                            "media_type": media_type,
+                        }
+                    ]);
+                }
+
                 crate::control_plane::dispatch_mid_turn(envelope).await;
                 ok_val("sent")
             })
@@ -1523,7 +1786,6 @@ fn tool_sidecar() -> Tool {
                 },
                 "description": {
                     "type": "string",
-                    "description": "Brief user-facing status text to send before executing an external action when the channel supports it."
                 },
                 "params": {
                     "type": "object",
@@ -1617,12 +1879,10 @@ fn build_sidecar_request_payload(
 mod tests {
     use super::*;
     use crate::builtin::store::{FileTapeStore, ForkTapeStore};
-    use crate::control_plane::{TurnContext, with_turn_context};
     use serde_json::json;
     use std::io::BufWriter;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::Arc;
 
     const LARGE_FILE_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -1633,31 +1893,6 @@ mod tests {
         let service = TapeService::new(tapes_dir, store);
         let tape_name = "workspace__session".to_owned();
         (tmp, service, tape_name)
-    }
-
-    fn message_send_tool_context() -> ToolContext {
-        ToolContext::new("test-run")
-            .with_state("session_id", json!("session-1"))
-            .with_state("channel", json!("webhook"))
-            .with_state("chat_id", json!("chat-1"))
-            .with_state("output_channel", json!("webhook"))
-    }
-
-    fn message_send_turn_context(
-        sent: Arc<std::sync::Mutex<Vec<Value>>>,
-    ) -> crate::control_plane::TurnContext {
-        let dispatch: crate::control_plane::DispatchFn = Arc::new(move |envelope| {
-            let sent = Arc::clone(&sent);
-            Box::pin(async move { sent.lock().unwrap().push(envelope) })
-        });
-        TurnContext {
-            cancellation: nexil::CancellationToken::new(),
-            wrap_tools: None,
-            usage: Default::default(),
-            save_events: Default::default(),
-            dispatch: Some(dispatch),
-            outbound_media: Default::default(),
-        }
     }
 
     #[tokio::test]
@@ -1733,91 +1968,6 @@ mod tests {
             payload["params"],
             json!({"action": "create", "description": "domain field"})
         );
-    }
-
-    #[tokio::test]
-    async fn test_message_send_supports_media_path_without_text() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("photo.png");
-        let path_arg = path.to_string_lossy().to_string();
-        std::fs::write(&path, b"png").unwrap();
-        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let tool = tool_message_send();
-
-        with_turn_context(message_send_turn_context(Arc::clone(&sent)), async move {
-            tool.run(
-                json!({"media_path": path_arg}),
-                Some(message_send_tool_context()),
-            )
-            .await
-            .unwrap();
-        })
-        .await;
-
-        let sent = sent.lock().unwrap();
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0]["content"], "");
-        assert_eq!(
-            sent[0]["context"]["outbound_media"][0]["path"].as_str(),
-            Some(path.to_str().unwrap())
-        );
-    }
-
-    #[tokio::test]
-    async fn test_message_send_supports_multiple_media_paths() {
-        let tmp = tempfile::tempdir().unwrap();
-        let image = tmp.path().join("a.png");
-        let doc = tmp.path().join("b.pdf");
-        std::fs::write(&image, b"png").unwrap();
-        std::fs::write(&doc, b"pdf").unwrap();
-        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let tool = tool_message_send();
-
-        with_turn_context(message_send_turn_context(Arc::clone(&sent)), async move {
-            tool.run(
-                json!({"text": "files", "media_paths": [image.to_string_lossy(), doc.to_string_lossy()]}),
-                Some(message_send_tool_context()),
-            )
-            .await
-            .unwrap();
-        })
-        .await;
-
-        let sent = sent.lock().unwrap();
-        assert_eq!(
-            sent[0]["context"]["outbound_media"][0]["media_type"],
-            "image"
-        );
-        assert_eq!(
-            sent[0]["context"]["outbound_media"][1]["media_type"],
-            "document"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_message_send_rejects_missing_media_path() {
-        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let tool = tool_message_send();
-        let err = with_turn_context(message_send_turn_context(sent), async move {
-            tool.run(
-                json!({"image_path": "/tmp/eli-missing.png"}),
-                Some(message_send_tool_context()),
-            )
-            .await
-            .unwrap_err()
-        })
-        .await;
-
-        assert!(err.message.contains("media path not found"));
-    }
-
-    #[test]
-    fn test_message_send_schema_avoids_top_level_combinators() {
-        let schema = tool_message_send().schema();
-        let parameters = &schema["function"]["parameters"];
-        assert_eq!(parameters["type"], "object");
-        assert!(parameters.get("anyOf").is_none());
-        assert!(parameters.get("oneOf").is_none());
     }
 
     #[tokio::test]
@@ -1914,9 +2064,18 @@ mod tests {
     }
 
     #[test]
-    fn test_user_facing_tools_expose_description_field() {
+    fn test_bash_exposes_description_field() {
+        let tool = tool_bash();
+        assert_eq!(
+            tool.parameters["properties"]["description"]["type"],
+            json!("string"),
+            "bash should expose a description field for command purpose"
+        );
+    }
+
+    #[test]
+    fn test_non_bash_tools_omit_description_field() {
         let tools = [
-            tool_bash(),
             tool_fs_read(),
             tool_fs_write(),
             tool_fs_edit(),
@@ -1927,16 +2086,180 @@ mod tests {
             tool_tape_anchors(),
             tool_web_fetch(),
             tool_subagent(),
-            tool_sidecar(),
         ];
 
         for tool in tools {
-            assert_eq!(
-                tool.parameters["properties"]["description"]["type"],
-                json!("string"),
-                "tool {} should expose a description field",
+            assert!(
+                tool.parameters["properties"].get("description").is_none(),
+                "tool {} should not expose a description field (auto-generated notices instead)",
                 tool.name
             );
         }
+    }
+
+    #[test]
+    fn test_auto_notice_generates_semantic_descriptions() {
+        assert_eq!(auto_notice("fs.read", &json!({"path": "src/main.rs"})), "读 src/main.rs");
+        assert_eq!(auto_notice("fs.write", &json!({"path": "out.txt"})), "写 out.txt");
+        assert_eq!(auto_notice("fs.edit", &json!({"path": "lib.rs"})), "编辑 lib.rs");
+        assert_eq!(
+            auto_notice("web.fetch", &json!({"url": "https://example.com"})),
+            "获取 https://example.com"
+        );
+        assert_eq!(
+            auto_notice("bash", &json!({"cmd": "cargo build", "description": "编译项目"})),
+            "编译项目"
+        );
+        assert_eq!(
+            auto_notice("bash", &json!({"cmd": "cargo build"})),
+            "执行 cargo build"
+        );
+        assert_eq!(
+            auto_notice("tape.search", &json!({"query": "error"})),
+            "搜索 tape: error"
+        );
+        assert_eq!(auto_notice("tape.info", &json!({})), "查看 tape 信息");
+        assert_eq!(auto_notice("tape.reset", &json!({})), "重置 tape");
+        assert_eq!(auto_notice("tape.anchors", &json!({})), "列出 anchors");
+        assert_eq!(
+            auto_notice("tape.handoff", &json!({"name": "phase-1"})),
+            "handoff: phase-1"
+        );
+        assert_eq!(auto_notice("tape.handoff", &json!({})), "创建 handoff");
+        // Unknown tools fall back to tool name
+        assert_eq!(auto_notice("unknown.tool", &json!({})), "unknown.tool");
+    }
+
+    // -----------------------------------------------------------------------
+    // Subagent helper tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_cli_command_claude() {
+        let cli = CliInfo {
+            name: "claude".to_owned(),
+            path: "/usr/local/bin/claude".to_owned(),
+        };
+        let cmd = build_cli_command(&cli, "/tmp/prompt.txt");
+        assert_eq!(
+            cmd,
+            "/usr/local/bin/claude -p --output-format text < /tmp/prompt.txt"
+        );
+    }
+
+    #[test]
+    fn test_build_cli_command_codex() {
+        let cli = CliInfo {
+            name: "codex".to_owned(),
+            path: "/usr/bin/codex".to_owned(),
+        };
+        let cmd = build_cli_command(&cli, "/tmp/prompt.txt");
+        assert_eq!(cmd, "/usr/bin/codex exec < /tmp/prompt.txt");
+    }
+
+    #[test]
+    fn test_build_cli_command_kimi() {
+        let cli = CliInfo {
+            name: "kimi".to_owned(),
+            path: "/opt/bin/kimi".to_owned(),
+        };
+        let cmd = build_cli_command(&cli, "/tmp/prompt.txt");
+        assert!(cmd.contains("-p"));
+        assert!(cmd.contains("--print"));
+        assert!(cmd.contains("$(cat /tmp/prompt.txt)"));
+    }
+
+    #[test]
+    fn test_build_cli_command_path_with_spaces() {
+        let cli = CliInfo {
+            name: "claude".to_owned(),
+            path: "/my path/claude".to_owned(),
+        };
+        let cmd = build_cli_command(&cli, "/tmp/prompt.txt");
+        assert!(cmd.starts_with("'/my path/claude'"));
+    }
+
+    #[test]
+    fn test_shell_quote_simple() {
+        assert_eq!(shell_quote("hello"), "hello");
+        assert_eq!(shell_quote("/usr/bin/foo"), "/usr/bin/foo");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn test_shell_quote_special_chars() {
+        assert_eq!(shell_quote("has space"), "'has space'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn test_build_completion_message_success() {
+        let msg =
+            build_completion_message("agent-abc", "claude", Some(0), "all good", "(no changes)");
+        assert!(msg.contains("agent-abc"));
+        assert!(msg.contains("claude"));
+        assert!(msg.contains("success (exit 0)"));
+        assert!(msg.contains("all good"));
+        assert!(msg.contains("(no changes)"));
+    }
+
+    #[test]
+    fn test_build_completion_message_failure() {
+        let msg = build_completion_message("agent-def", "codex", Some(1), "error!", "M foo.rs");
+        assert!(msg.contains("failed (exit 1)"));
+        assert!(msg.contains("error!"));
+        assert!(msg.contains("M foo.rs"));
+    }
+
+    #[test]
+    fn test_build_completion_message_truncates_long_output() {
+        let long_output = "x".repeat(5000);
+        let msg =
+            build_completion_message("agent-trunc", "claude", Some(0), &long_output, "(clean)");
+        assert!(msg.contains("(truncated)"));
+        // The output section should be at most SUBAGENT_OUTPUT_TAIL chars + overhead
+        let output_section = msg.split("output:\n").nth(1).unwrap_or("");
+        let output_before_changes = output_section.split("\n\nchanges:").next().unwrap_or("");
+        assert!(output_before_changes.len() <= SUBAGENT_OUTPUT_TAIL + 20);
+    }
+
+    #[test]
+    fn test_build_completion_message_empty_output() {
+        let msg = build_completion_message("agent-empty", "claude", Some(0), "", "(clean)");
+        assert!(msg.contains("(no output)"));
+    }
+
+    #[test]
+    fn test_write_prompt_tempfile() {
+        let f = write_prompt_tempfile("hello world").unwrap();
+        let content = std::fs::read_to_string(f.path()).unwrap();
+        assert_eq!(content, "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_collect_artifacts_non_git_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = collect_artifacts(tmp.path().to_str().unwrap(), None).await;
+        assert_eq!(result, "(not a git repo)");
+    }
+
+    #[tokio::test]
+    async fn test_collect_artifacts_clean_git_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        // Initialize a git repo with one commit.
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        let head = snapshot_git_head(dir);
+        let result = collect_artifacts(dir, head.as_deref()).await;
+        assert_eq!(result, "(no changes)");
     }
 }
