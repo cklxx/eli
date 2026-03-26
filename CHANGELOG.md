@@ -6,10 +6,42 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## [Unreleased]
+## [0.4.0] — 2026-03-26
+
+eli 0.4.0 · nexil 0.7.0
+
+Lazy context management, universal media pipeline, parallel tool execution, and control plane foundations.
+
+### Added
+- **Lazy context** — spill large tool results and arguments to disk; strip images from tape to keep context lean
+- **message.send tool** — mid-turn user messaging so the model can communicate progress before finishing
+- **Universal outbound media pipeline** — skills can send images to any channel (CLI, Telegram, etc.)
+- **Parallel tool execution** — run independent tool calls concurrently; cache model-tools schemas
+- **Tool feedback signals** — structured notices for better LLM comprehension of tool outcomes
+- **Auto-generated tool notices** — notice text derived from schema, manual description param removed
+- **save_state / dispatch_outbound hooks** — two new hook points wired into BuiltinImpl
+- **Feature flags** — `telegram`, `gateway`, `tape-viewer` for conditional compilation
+- **Token usage display** — show token counts in `eli chat` and `eli run`; write usage to tape events
+- **Control plane Phase 0** — turn context, cancellation tokens, budget ledger
+- **Autoresearch skill** — autonomous experiment loop for research workflows
+- **Security hardening** — subagent sandboxing, sensitive field redaction in Debug impls
 
 ### Changed
+- **Elegance sweep** — SRP splits, iterator pipelines, dead code removal across both crates
+- **All 31 SKILL.md files** standardized to English with uniform structure
+- **Gateway internals** — JoinSet + bounded channel, model.rs SRP, envelope lifetime fix
+- **tool_notices** setting moved from env var to `config.toml`
 - Command prefix changed from `,` to `/`
+
+### Fixed
+- Telegram gateway replies silently dropped due to `output_channel("null")`
+- Duplicate replies from `message.send` on simple questions
+- Spill path canonicalization, char-count thresholds, image restore on current turn
+- `run_tools` now uses tape history + full current-turn context
+- Outbound control flow — `sendText` errors propagate correctly
+- HTML stripping regex handles arbitrary closing tag content
+- CodeQL data-flow chain in login account masking
+- `express-rate-limit` static import + direct dependency
 
 ---
 
