@@ -40,21 +40,24 @@ fn authenticate(token: &str, secret: &str) -> Result<Claims, AuthError> {
 ```
 No wrapper structs for one field. No builders unless >4 params. Transform pipeline.
 
-### 1.3 Branch safety
-- Use worktree for code changes; never edit directly on `main`.
-- On `main`, run before any edit:
-  1. `git diff --stat` + `git log --oneline -10`
-  2. If suspicious diffs: report to ckl before continuing.
+### 1.3 Approach confirmation
+- Changes touching >3 files or involving architectural decisions → outline approach in 3–5 bullets before writing code. Wait for ckl's approval.
+- When proposing structural changes (tool grouping, caching, prompt restructuring), consider downstream impact on LLM KV cache and call patterns. Flag anything that would break cache efficiency.
 
 ### 1.4 Prior art
 - Before implementing non-trivial logic, WebSearch for how the world solves it. Prior art > invention. Skip for trivial or project-specific changes.
 
-### 1.5 Delivery
+### 1.5 Editing safety
+- When modifying existing content (prompts, system messages, config), NEVER delete content not explicitly targeted. Only add/modify what was requested.
+- Show a diff summary before committing any deletions of existing content.
+
+### 1.6 Delivery
 - Prefer TDD for logic changes; cover edge cases.
 - Run lint + tests before delivery: `cargo fmt --all -- --check && cargo clippy --workspace -- -D warnings && cargo test --workspace`.
 - Fix P0/P1 before commit; follow-up for P2.
 - Small, scoped commits. Warn before destructive ops.
 - Follow Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`.
+- **Release safety**: Check latest published version before bumping. If publish fails on version conflict, bump patch and retry (max 3).
 
 ---
 
@@ -107,3 +110,15 @@ No trigger → do not load.
 ## 6. Detail Sources (trigger-gated only)
 
 `CLAUDE.md` · `docs/rust-conventions.md` · `docs/plans/` · `docs/experience/errors/` · `docs/experience/wins/`
+
+---
+
+## 7. Compact Instructions
+
+When compressing, preserve in priority order:
+
+1. Architecture decisions (NEVER summarize)
+2. Modified files and their key changes
+3. Current verification status (pass/fail)
+4. Open TODOs and rollback notes
+5. Tool outputs (can delete, keep pass/fail only)

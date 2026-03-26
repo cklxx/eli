@@ -77,12 +77,20 @@ Non-trivial tasks follow phases. **Each phase runs in its own Agent context** to
 
 ---
 
+## Editing Rules
+
+- **Preserve by default**: When modifying existing content (prompts, config, docs), NEVER delete content that wasn't explicitly asked to change. Only add/modify what was requested.
+- **Diff before delete**: Before committing any deletion of existing content, show what's being removed and get confirmation.
+- **Approach-first for complex features**: For changes touching >3 files or involving architectural decisions, outline the approach in 3–5 bullets (files to modify, key decision, tradeoffs) and wait for approval before writing code.
+
+---
+
 ## Behavior Rules
 
 - **Self-correction**: On ANY user correction → codify a preventive feedback memory before resuming.
 - **Auto-continue**: Same decision ≥2 times in memory → proceed with inline note. Ask when ambiguous, irreversible, or no match.
 - **Opportunistic cleanup**: Reading code and spot something inelegant (dead code, unnecessary clone, unclear naming, redundant logic, etc.) → fix it in a separate commit, report the change inline, and log to `docs/experience/wins/YYYY-MM-DD-cleanup-slug.md`.
-- `cargo clippy` after non-trivial changes — CI treats warnings as errors.
+- **Release safety**: Before bumping a version, check the latest published version first. Never assume a version number is available. If publish fails due to version conflict, bump patch and retry (max 3 attempts).
 
 ---
 
@@ -152,6 +160,8 @@ python3 -m pytest tests/test_vision.py -v # vision: multimodal image tests
 ---
 
 ## Architecture
+
+Primary languages: **Rust** (core) and **Python** (integration tests). Secondary: TypeScript (sidecar).
 
 Two-crate Cargo workspace (edition 2024):
 

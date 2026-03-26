@@ -35,9 +35,13 @@ pub enum PromptMode {
 pub enum SectionKind {
     /// Base system prompt from SOUL.md or built-in default.
     Identity,
+    /// Safety hard limits and project policies.
+    Guardrails,
+    /// Workspace conventions and file rules.
+    Workspace,
     /// `<available_skills>` block listing discovered skills.
     Skills,
-    /// Runtime context (date, workspace, etc.).
+    /// Runtime context (date, workspace, environment).
     Runtime,
 }
 
@@ -70,13 +74,23 @@ impl PromptBuilder {
                     truncation_priority: 255,
                 },
                 SectionConfig {
+                    kind: SectionKind::Guardrails,
+                    max_chars: Some(1_500),
+                    truncation_priority: 240,
+                },
+                SectionConfig {
+                    kind: SectionKind::Workspace,
+                    max_chars: Some(1_000),
+                    truncation_priority: 180,
+                },
+                SectionConfig {
                     kind: SectionKind::Skills,
                     max_chars: Some(8_000),
                     truncation_priority: 10,
                 },
                 SectionConfig {
                     kind: SectionKind::Runtime,
-                    max_chars: Some(1_000),
+                    max_chars: Some(1_500),
                     truncation_priority: 200,
                 },
             ],
@@ -85,6 +99,11 @@ impl PromptBuilder {
                     kind: SectionKind::Identity,
                     max_chars: None,
                     truncation_priority: 255,
+                },
+                SectionConfig {
+                    kind: SectionKind::Guardrails,
+                    max_chars: Some(1_500),
+                    truncation_priority: 240,
                 },
                 SectionConfig {
                     kind: SectionKind::Runtime,
@@ -231,6 +250,8 @@ impl PromptBuilder {
     ) -> String {
         match sec.kind {
             SectionKind::Identity => load_system_prompt_base(settings, workspace),
+            SectionKind::Guardrails => build_guardrails_section(),
+            SectionKind::Workspace => build_workspace_section(workspace),
             SectionKind::Skills => {
                 let skills = crate::skills::discover_skills(workspace);
                 let filtered: Vec<SkillMetadata> = match allowed_skills {
@@ -243,15 +264,59 @@ impl PromptBuilder {
                 let all_expanded = Self::merge_expanded_skills(expanded_skills, prompt_text);
                 render_skills_prompt(&filtered, &all_expanded)
             }
-            SectionKind::Runtime => {
-                let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-                format!(
-                    "<runtime>\nDate: {now}\nWorkspace: {}\n</runtime>",
-                    workspace.display()
-                )
-            }
+            SectionKind::Runtime => build_runtime_section(workspace),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Section builders
+// ---------------------------------------------------------------------------
+
+fn build_guardrails_section() -> String {
+    "\
+# Guardrails
+
+## Safety
+- NEVER fabricate tool outputs, file contents, or completion claims.
+- NEVER execute irreversible actions without explicit user consent.
+- NEVER include secrets, API keys, or credentials in responses.
+- When blocked, escalate with concrete evidence of the blocker.
+
+## Policies
+- Priority: safety > correctness > maintainability > speed.
+- Ground claims in verified tool output — no invented facts or paths.
+- When facing ambiguity after all viable attempts, ask exactly one targeted question."
+        .to_owned()
+}
+
+fn build_workspace_section(workspace: &Path) -> String {
+    format!(
+        "\
+# Workspace
+
+- Root: {}
+- Use active repository root as working directory.
+- Default temp files to /tmp; NEVER write generated files into the repo tree unless requested.
+- Primary docs live under ./docs; read them before changing architecture or config contracts.",
+        workspace.display()
+    )
+}
+
+fn build_runtime_section(workspace: &Path) -> String {
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    let tz = chrono::Local::now().format("%Z");
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    format!(
+        "<runtime>\n\
+         Date: {now}\n\
+         Timezone: {tz}\n\
+         Workspace: {}\n\
+         Platform: {os}/{arch}\n\
+         </runtime>",
+        workspace.display()
+    )
 }
 
 /// Load persona and system prompt with precedence:
