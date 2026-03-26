@@ -746,11 +746,11 @@ fn tool_bash() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "cmd": {"type": "string", "description": "Shell command to execute."},
+                "cmd": {"type": "string"},
                 "description": {"type": "string", "description": "Brief description of what this command does and why."},
-                "cwd": {"type": "string", "description": "Absolute working directory for the command."},
+                "cwd": {"type": "string", "description": "Absolute path. Defaults to workspace."},
                 "timeout_seconds": {"type": "integer", "description": "Kill the process after N seconds (default 30). Ignored when background=true."},
-                "background": {"type": "boolean", "description": "Run asynchronously. Returns a shell_id immediately — poll with bash.output, stop with bash.kill."}
+                "background": {"type": "boolean", "description": "Returns shell_id; poll with bash.output."}
             },
             "required": ["cmd", "description"]
         }),
@@ -851,9 +851,9 @@ fn tool_bash_output() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "shell_id": {"type": "string", "description": "The background shell ID returned by bash."},
-                "offset": {"type": "integer", "description": "Character offset to resume reading from (use next_offset from previous call)."},
-                "limit": {"type": "integer", "description": "Max characters to return per call."}
+                "shell_id": {"type": "string"},
+                "offset": {"type": "integer", "description": "Resume from next_offset of previous call."},
+                "limit": {"type": "integer"}
             },
             "required": ["shell_id"]
         }),
@@ -915,7 +915,7 @@ fn tool_bash_kill() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "shell_id": {"type": "string", "description": "The background shell ID to terminate."}
+                "shell_id": {"type": "string"}
             },
             "required": ["shell_id"]
         }),
@@ -1096,9 +1096,9 @@ fn tool_fs_read() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path (absolute or relative to workspace)."},
-                "offset": {"type": "integer", "description": "Line number to start reading from (0-based)."},
-                "limit": {"type": "integer", "description": "Max number of lines to return. Set this for large files to avoid wasted tokens."}
+                "path": {"type": "string", "description": "Absolute or workspace-relative."},
+                "offset": {"type": "integer", "description": "0-based line number."},
+                "limit": {"type": "integer", "description": "Max lines."}
             },
             "required": ["path"]
         }),
@@ -1119,8 +1119,8 @@ fn tool_fs_write() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path (absolute or relative to workspace)."},
-                "content": {"type": "string", "description": "Full file content to write."}
+                "path": {"type": "string", "description": "Absolute or workspace-relative."},
+                "content": {"type": "string"}
             },
             "required": ["path", "content"]
         }),
@@ -1144,10 +1144,10 @@ fn tool_fs_edit() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path (absolute or relative to workspace)."},
-                "old": {"type": "string", "description": "Exact text to find and replace (first occurrence only)."},
-                "new": {"type": "string", "description": "Replacement text."},
-                "start": {"type": "integer", "description": "Line number to start searching from (0-based, optional)."}
+                "path": {"type": "string", "description": "Absolute or workspace-relative."},
+                "old": {"type": "string"},
+                "new": {"type": "string"},
+                "start": {"type": "integer", "description": "0-based line to start search."}
             },
             "required": ["path", "old", "new"]
         }),
@@ -1168,7 +1168,7 @@ fn tool_skill() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Skill name (e.g. 'deploy', 'feishu-calendar')."}
+                "name": {"type": "string", "description": "e.g. 'deploy', 'feishu-calendar'."}
             },
             "required": ["name"]
         }),
@@ -1259,14 +1259,14 @@ fn tool_tape_search() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Keyword to search for in tape entries."},
-                "limit": {"type": "integer", "description": "Max results (default 20)."},
-                "start": {"type": "string", "description": "Optional start date (ISO)."},
-                "end": {"type": "string", "description": "Optional end date (ISO)."},
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "description": "Default 20."},
+                "start": {"type": "string", "description": "ISO date."},
+                "end": {"type": "string", "description": "ISO date."},
                 "kinds": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Entry kinds to filter (default: message, tool_result)."
+                    "description": "Default: message, tool_result."
                 }
             },
             "required": ["query"]
@@ -1337,7 +1337,7 @@ fn tool_tape_reset() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "archive": {"type": "boolean", "description": "Save a tape snapshot before wiping (default false)."}
+                "archive": {"type": "boolean", "description": "Default false."}
             }
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
@@ -1364,8 +1364,8 @@ fn tool_tape_handoff() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Anchor name (default: handoff)."},
-                "summary": {"type": "string", "description": "What was accomplished — used for context when resuming later."}
+                "name": {"type": "string", "description": "Default: handoff."},
+                "summary": {"type": "string", "description": "Context for resuming later."}
             }
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
@@ -1403,7 +1403,7 @@ fn tool_tape_anchors() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "description": "Max anchors to return (default 20)."}
+                "limit": {"type": "integer", "description": "Default 20."}
             }
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
@@ -1433,7 +1433,7 @@ fn tool_decision_set() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "text": {"type": "string", "description": "The decision to record."}
+                "text": {"type": "string"}
             },
             "required": ["text"]
         }),
@@ -1506,7 +1506,7 @@ fn tool_decision_remove() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "index": {"type": "integer", "description": "The decision number to remove (1-based, from decision.list)."}
+                "index": {"type": "integer", "description": "1-based, from decision.list."}
             },
             "required": ["index"]
         }),
@@ -1558,9 +1558,9 @@ fn tool_web_fetch() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "The URL to fetch."},
-                "headers": {"type": "object", "description": "Custom HTTP headers as key-value pairs."},
-                "timeout": {"type": "integer", "description": "Request timeout in seconds (default 10)."}
+                "url": {"type": "string"},
+                "headers": {"type": "object"},
+                "timeout": {"type": "integer", "description": "Seconds. Default 10."}
             },
             "required": ["url"]
         }),
@@ -1673,9 +1673,9 @@ fn tool_subagent() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "description": "Self-contained task description. The sub-agent starts fresh with no conversation history, so include all necessary context: what to do, which files/modules to focus on, acceptance criteria, and any constraints. Be specific — vague prompts produce vague results."},
-                "cwd": {"type": "string", "description": "Absolute working directory for the sub-agent. Defaults to the current workspace."},
-                "cli": {"type": "string", "description": "Force a specific CLI binary (e.g. 'claude', 'codex', 'kimi'). Auto-detected if omitted."}
+                "prompt": {"type": "string"},
+                "cwd": {"type": "string", "description": "Absolute path. Defaults to workspace."},
+                "cli": {"type": "string", "description": "e.g. 'claude', 'codex'. Auto-detected if omitted."}
             },
             "required": ["prompt"]
         }),
@@ -1861,10 +1861,10 @@ fn tool_message_send() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "text": {"type": "string", "description": "Message text to send to the user."},
-                "media_path": {"type": "string", "description": "Optional local media path to send along with the message on channels that support media."},
-                "media_paths": {"type": "array", "items": {"type": "string"}, "description": "Optional list of local media paths to send along with the message on channels that support media."},
-                "image_path": {"type": "string", "description": "Deprecated alias for media_path; kept for backward compatibility."}
+                "text": {"type": "string"},
+                "media_path": {"type": "string", "description": "Local file path."},
+                "media_paths": {"type": "array", "items": {"type": "string"}, "description": "Multiple local file paths."},
+                "image_path": {"type": "string", "description": "Deprecated; use media_path."}
             },
             "required": ["text"]
         }),
@@ -1948,14 +1948,14 @@ fn tool_sidecar() -> Tool {
             "properties": {
                 "tool": {
                     "type": "string",
-                    "description": "The sidecar tool name to execute (e.g. feishu_calendar_event)."
+                    "description": "e.g. feishu_calendar_event."
                 },
                 "description": {
                     "type": "string",
                 },
                 "params": {
                     "type": "object",
-                    "description": "Parameters for the tool."
+                    "description": "Tool-specific parameters."
                 }
             },
             "required": ["tool"]
