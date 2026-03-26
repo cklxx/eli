@@ -9,6 +9,41 @@ use nexil::Tool;
 pub static REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, Tool>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Cached model-ready tools (names rewritten with underscores).
+/// Populated once via `populate_model_tools_cache` after registration.
+static MODEL_TOOLS_CACHE: std::sync::LazyLock<Mutex<Vec<Tool>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Populate the model-tools cache from the current REGISTRY contents.
+/// Should be called once after `register_builtin_tools()`.
+pub fn populate_model_tools_cache() {
+    let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    let cached: Vec<Tool> = reg
+        .values()
+        .map(|tool| {
+            let mut cloned = tool.clone();
+            cloned.name = to_model_name(&cloned.name);
+            cloned
+        })
+        .collect();
+    let mut cache = MODEL_TOOLS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    *cache = cached;
+}
+
+/// Return the cached model-ready tool list. Falls back to dynamic generation
+/// if the cache is empty (e.g. in tests that don't call registration).
+pub fn model_tools_cached() -> Vec<Tool> {
+    let cache = MODEL_TOOLS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.is_empty() {
+        drop(cache);
+        // Fallback: build from current registry.
+        let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        model_tools(&reg.values().cloned().collect::<Vec<_>>())
+    } else {
+        cache.clone()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sidecar state
 // ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ use crate::builtin::store::ForkTapeStore;
 use crate::prompt_builder::{PromptBuilder, PromptMode};
 use crate::skill_matcher::{MatchContext, SkillMatcher};
 use crate::skills::discover_skills;
-use crate::tools::{REGISTRY, model_tools};
+use crate::tools::{REGISTRY, model_tools, model_tools_cached};
 use crate::types::PromptValue;
 
 pub(super) fn build_tool_state(
@@ -238,6 +238,7 @@ pub(super) async fn run_tools_once(
     allowed_tools: Option<&HashSet<String>>,
     tape_context: Option<&TapeContext>,
 ) -> Result<ToolAutoResult, ConduitError> {
+    let has_filter = allowed_tools.is_some();
     let mut tools: Vec<Tool> = {
         let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(allowed) = allowed_tools {
@@ -251,11 +252,17 @@ pub(super) async fn run_tools_once(
     };
 
     // Apply tool wrapping from the turn context (set by framework).
-    if let Some(wrap_fn) = crate::control_plane::turn_wrap_tools() {
-        tools = wrap_fn(tools);
+    let wrap_fn = crate::control_plane::turn_wrap_tools();
+    if let Some(ref wf) = wrap_fn {
+        tools = wf(tools);
     }
 
-    let model_tool_list = model_tools(&tools);
+    // Use cached model tools when no filtering or wrapping was applied.
+    let model_tool_list = if !has_filter && wrap_fn.is_none() {
+        model_tools_cached()
+    } else {
+        model_tools(&tools)
+    };
     let schemas: Vec<Value> = model_tool_list.iter().map(|t| t.schema()).collect();
     let tool_set = ToolSet {
         schemas,

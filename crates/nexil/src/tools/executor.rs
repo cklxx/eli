@@ -5,6 +5,7 @@ use crate::core::results::{ErrorPayload, ToolExecution};
 use crate::core::tool_calls::normalize_tool_calls;
 use crate::tools::context::ToolContext;
 use crate::tools::schema::{Tool, ToolResult};
+use futures::future::join_all;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -59,12 +60,45 @@ impl ToolExecutor {
             return Ok(ToolExecution::default());
         }
 
+        // Group tool calls by tool name so same-tool calls run sequentially,
+        // while different tools run concurrently.
+        let mut groups: HashMap<String, Vec<(usize, &Value)>> = HashMap::new();
+        for (idx, call) in tool_calls.iter().enumerate() {
+            let name = call
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            groups.entry(name).or_default().push((idx, call));
+        }
+
+        // Each group runs its calls sequentially; groups run concurrently.
+        let group_futures = groups.into_values().map(|calls| {
+            let tool_map = &tool_map;
+            async move {
+                let mut group_results: Vec<(usize, Result<Value, ConduitError>)> =
+                    Vec::with_capacity(calls.len());
+                for (idx, call) in calls {
+                    let result = self.handle_tool_call(call, tool_map, context).await;
+                    group_results.push((idx, result));
+                }
+                group_results
+            }
+        });
+
+        let all_group_results = join_all(group_futures).await;
+
+        // Reassemble results in original order.
+        let mut indexed_results: Vec<(usize, Result<Value, ConduitError>)> =
+            all_group_results.into_iter().flatten().collect();
+        indexed_results.sort_by_key(|(idx, _)| *idx);
+
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut first_error: Option<ErrorPayload> = None;
-
-        for call in &tool_calls {
-            match self.handle_tool_call(call, &tool_map, context).await {
-                Ok(result) => results.push(result),
+        for (_idx, result) in indexed_results {
+            match result {
+                Ok(value) => results.push(value),
                 Err(err) => {
                     let payload = ErrorPayload::new(err.kind, &err.message);
                     let err_value = serde_json::to_value(&payload).unwrap_or(Value::Null);

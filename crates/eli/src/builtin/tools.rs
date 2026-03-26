@@ -16,7 +16,7 @@ use crate::builtin::shell_manager::shell_manager;
 use crate::builtin::tape::TapeService;
 use crate::envelope::ValueExt;
 use crate::skills::discover_skills;
-use crate::tools::{REGISTRY, shorten_text};
+use crate::tools::{REGISTRY, populate_model_tools_cache, shorten_text};
 
 const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 10;
@@ -33,6 +33,8 @@ tokio::task_local! {
 pub fn register_builtin_tools() {
     let mut reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     reg.extend(builtin_tools().into_iter().map(|t| (t.name.clone(), t)));
+    drop(reg);
+    populate_model_tools_cache();
 }
 
 /// Run a future with the current tape service bound for tool handlers.
