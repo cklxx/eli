@@ -1,6 +1,6 @@
 # Builtin Tools: Performance & Context Optimization
 
-**Status**: Draft → Review
+**Status**: P0 done, P1 done, P3 done, P4 done. Remaining: P0.2 ✅ (e748b42), P2 deferred.
 **Date**: 2026-03-26
 **Goal**: Reduce token overhead, lower latency, and improve context-awareness of the 21 builtin tools.
 

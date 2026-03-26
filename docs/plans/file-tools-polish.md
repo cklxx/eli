@@ -1,5 +1,7 @@
 # 2026-03-25 · File Tools Polish
 
+**Status**: ✅ Complete
+
 ## Goal
 
 Make the text file tools reliable on large files and keep their read/edit loop token-cheap:
@@ -8,16 +10,13 @@ Make the text file tools reliable on large files and keep their read/edit loop t
 - `fs.write` should avoid partial overwrites
 - `fs.edit` should work on large files without loading the whole file first
 
-## Failure Modes
+## Results
 
-- `fs.read` strips CRLF or trailing newlines, so `fs.edit` cannot match what it just read
-- `fs.edit` rejects large files because it reads the entire file before replacing
-- overwrite paths leave partially written files behind on failure
-- new write paths change file permissions on existing files
-
-## Execution
-
-1. Replace whole-file reads with line-preserving streaming reads.
-2. Move write/edit paths onto temp-file rewrite plus atomic persist.
-3. Add regression tests for CRLF, offsets, large-file edits, and existing permissions.
-4. Run `fmt`, `clippy`, and `test`, then prune any extra abstraction.
+| Goal | Implementation | Test |
+|------|---------------|------|
+| Stream reads, preserve line endings | `read_text_window` via `BufReader::read_line` | `test_fs_read_preserves_original_newlines` |
+| Atomic writes | `AtomicTextWriter` (temp file → `persist()`) | `test_fs_write_preserves_existing_permissions` |
+| Large-file streaming edit | `replace_stream` sliding window, flush prefix | `test_fs_edit_streams_large_files` (>50MB) |
+| Preserve file permissions | `existing_permissions` + `apply_permissions` in `AtomicTextWriter` | `test_fs_write_preserves_existing_permissions` (unix) |
+| CRLF preservation | Byte-exact streaming, no normalization | `test_fs_edit_preserves_crlf_and_trailing_newline` |
+| Start offset skip | `copy_prefix_lines` streams prefix to writer | `test_fs_edit_start_skips_earlier_matches` |
