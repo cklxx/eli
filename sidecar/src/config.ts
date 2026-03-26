@@ -11,6 +11,8 @@ export interface SidecarConfig {
   port: number;
   /** List of plugin npm package names or local paths. */
   plugins: string[];
+  /** Whether sidecar shutdown may call remote-affecting plugin stop hooks. Defaults to false for safety. */
+  allow_remote_shutdown: boolean;
   /** Per-channel account configuration, keyed by channel id. */
   channels: Record<string, ChannelAccountConfig>;
 }
@@ -25,6 +27,7 @@ const DEFAULTS: SidecarConfig = {
   port: 3101,
   plugins: [],
   channels: {},
+  allow_remote_shutdown: false,
 };
 
 /**
@@ -131,5 +134,11 @@ export function loadConfig(path?: string): SidecarConfig {
     channels[channelId].accounts.default[configKey] = value;
   }
 
-  return { eli_url, port, plugins, channels };
+  return {
+    eli_url,
+    port,
+    plugins,
+    channels,
+    allow_remote_shutdown: process.env.SIDECAR_ALLOW_REMOTE_CHANNEL_SHUTDOWN === "1",
+  };
 }

@@ -860,6 +860,8 @@ export async function startChannels(config: SidecarConfig): Promise<void> {
  * Stop all registered channel gateways.
  */
 export async function stopChannels(config: SidecarConfig): Promise<void> {
+  const allowRemoteShutdown = config.allow_remote_shutdown === true;
+
   // Signal abort to all running gateways.
   for (const [key, ac] of abortControllers) {
     ac.abort();
@@ -882,21 +884,25 @@ export async function stopChannels(config: SidecarConfig): Promise<void> {
     }
 
     for (const accountId of accountIds) {
+      if (!allowRemoteShutdown) {
+        log.info("skipping remote-affecting channel stop hook by default", { channel: channelId, account: accountId });
+        continue;
+      }
+
       try {
         // Timeout per-account stop to prevent one hung plugin from blocking shutdown.
-        const stopPromise = stopFn.call(plugin.gateway, {
-          accountId,
-          cfg: { channels: { [channelId]: channelConfig } },
-          log: pluginLogger(`${channelId}.${accountId}`),
-        });
-        const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 3000));
-        const result = await Promise.race([stopPromise.then(() => "ok" as const), timeout]);
-        if (result === "timeout") {
-          log.warn("channel stop timed out", { channel: channelId, account: accountId });
-        } else {
-          log.info("channel stopped", { channel: channelId, account: accountId });
-        }
-      } catch (err) {
+        await Promise.race([
+          Promise.resolve(
+            stopFn.call(plugin.gateway, {
+              accountId,
+              cfg: { channels: { [channelId]: channelConfig } },
+            } as any),
+          ),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("stop timeout")), 5000),
+          ),
+        ]);
+      } catch (err: any) {
         log.error("failed to stop channel", { channel: channelId, account: accountId, err: String(err) });
       }
     }

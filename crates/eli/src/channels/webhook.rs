@@ -143,13 +143,14 @@ pub(crate) fn build_webhook_payload(message: &ChannelMessage) -> serde_json::Val
         }
     }
 
-    if media_json.is_empty()
-        && let Some(outbound) = message
+    if media_json.is_empty() {
+        if let Some(outbound) = message
             .context
             .get("outbound_media")
             .and_then(|v| v.as_array())
-    {
-        media_json = outbound.clone();
+        {
+            media_json = outbound.clone();
+        }
     }
 
     if !media_json.is_empty() {

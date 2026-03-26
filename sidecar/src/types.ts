@@ -173,6 +173,14 @@ export interface ChannelLifecycleHooks {
 // Inbound envelope — normalized message from any channel.
 // ---------------------------------------------------------------------------
 
+export interface InboundMediaItem {
+  media_type: "image" | "file" | "audio" | "video" | "sticker";
+  mime_type?: string;
+  filename?: string;
+  path?: string;
+  data_base64?: string;
+}
+
 export interface InboundEnvelope {
   channel: string;
   accountId: string;
@@ -187,6 +195,8 @@ export interface InboundEnvelope {
   media_paths?: string[];
   /** Media types corresponding to media_paths (image, file, audio, video, sticker). */
   media_types?: string[];
+  /** Structured inbound media; prefer this over media_paths for first-turn fidelity. */
+  media?: InboundMediaItem[];
   replyToId?: string;
   [key: string]: any;
 }

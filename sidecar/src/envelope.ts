@@ -1,4 +1,13 @@
-import type { InboundEnvelope, EliChannelMessage } from "./types.js";
+import type { InboundEnvelope, EliChannelMessage, InboundMediaItem } from "./types.js";
+
+function mediaToPayload(item: InboundMediaItem): Record<string, any> {
+  const payload: Record<string, any> = { media_type: item.media_type };
+  if (item.mime_type) payload.mime_type = item.mime_type;
+  if (item.filename) payload.filename = item.filename;
+  if (item.path) payload.path = item.path;
+  if (item.data_base64) payload.data_base64 = item.data_base64;
+  return payload;
+}
 
 /**
  * Convert an OpenClaw-style inbound envelope to eli's ChannelMessage format
@@ -19,7 +28,7 @@ export function envelopeToEliMessage(env: InboundEnvelope): EliChannelMessage {
     channel_target: env.channel_target ?? (env as any).feishu_to ?? "",
   };
 
-  // Forward media metadata so the agent can access downloaded files.
+  // Backward-compatible fallback for channels that still only provide local file paths.
   if (env.media_paths && env.media_paths.length > 0) {
     context.media_paths = env.media_paths;
     context.media_types = env.media_types ?? [];
@@ -32,6 +41,7 @@ export function envelopeToEliMessage(env: InboundEnvelope): EliChannelMessage {
     chat_id: chatId,
     is_active: true,
     kind: "normal",
+    media: env.media?.map(mediaToPayload) ?? [],
     context,
     output_channel: "webhook",
   };
