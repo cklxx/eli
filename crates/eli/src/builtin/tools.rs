@@ -1733,6 +1733,7 @@ mod tests {
         );
     }
 
+    #[tokio::test]
     async fn test_message_send_supports_media_path_without_text() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("photo.png");
