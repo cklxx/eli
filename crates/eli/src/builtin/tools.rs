@@ -1354,7 +1354,19 @@ fn message_send_envelope(
     media: Vec<crate::control_plane::OutboundMedia>,
 ) -> Value {
     let mut context = serde_json::Map::new();
-    crate::control_plane::insert_outbound_media(&mut context, &media);
+    if !media.is_empty() {
+        let media_json: Vec<Value> = media
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "path": item.path,
+                    "media_type": item.media_type,
+                    "mime_type": item.mime_type,
+                })
+            })
+            .collect();
+        context.insert("outbound_media".to_owned(), Value::Array(media_json));
+    }
     serde_json::json!({
         "content": text,
         "session_id": state_str(state, "session_id"),
@@ -1391,7 +1403,13 @@ fn message_send_media_item(
             format!("media path not found: {path}"),
         ));
     }
-    Ok(crate::control_plane::OutboundMedia::from_path(path_obj))
+    let mime = crate::control_plane::mime_from_extension(path_obj);
+    let media_type = crate::control_plane::media_type_from_mime(mime);
+    Ok(crate::control_plane::OutboundMedia {
+        path,
+        media_type: media_type.to_owned(),
+        mime_type: mime.to_owned(),
+    })
 }
 
 fn push_optional_string(
@@ -1597,10 +1615,12 @@ fn build_sidecar_request_payload(
 mod tests {
     use super::*;
     use crate::builtin::store::{FileTapeStore, ForkTapeStore};
+    use crate::control_plane::{TurnContext, with_turn_context};
     use serde_json::json;
     use std::io::BufWriter;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
 
     const LARGE_FILE_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -1611,6 +1631,31 @@ mod tests {
         let service = TapeService::new(tapes_dir, store);
         let tape_name = "workspace__session".to_owned();
         (tmp, service, tape_name)
+    }
+
+    fn message_send_tool_context() -> ToolContext {
+        ToolContext::new("test-run")
+            .with_state("session_id", json!("session-1"))
+            .with_state("channel", json!("webhook"))
+            .with_state("chat_id", json!("chat-1"))
+            .with_state("output_channel", json!("webhook"))
+    }
+
+    fn message_send_turn_context(
+        sent: Arc<std::sync::Mutex<Vec<Value>>>,
+    ) -> crate::control_plane::TurnContext {
+        let dispatch: crate::control_plane::DispatchFn = Arc::new(move |envelope| {
+            let sent = Arc::clone(&sent);
+            Box::pin(async move { sent.lock().unwrap().push(envelope) })
+        });
+        TurnContext {
+            cancellation: nexil::CancellationToken::new(),
+            wrap_tools: None,
+            usage: Default::default(),
+            save_events: Default::default(),
+            dispatch: Some(dispatch),
+            outbound_media: Default::default(),
+        }
     }
 
     #[tokio::test]

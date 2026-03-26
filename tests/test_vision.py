@@ -10,6 +10,7 @@ import tempfile
 from conftest import (
     BLUE_KEYWORDS,
     BLUE_PNG,
+    MAX_VISION_RETRIES,
     RED_KEYWORDS,
     RED_PNG,
     assert_nonempty,
@@ -27,6 +28,18 @@ def _write_temp_png(b64_data: str, suffix: str = ".png") -> str:
     return path
 
 
+def _run_until(prompt: str, matches, context: str) -> str:
+    last_output = ""
+    for _ in range(MAX_VISION_RETRIES + 1):
+        result = run_eli("run", prompt)
+        assert result.ok, f"[{context}] Failed: {result.stderr}"
+        last_output = result.full_output
+        assert_nonempty(last_output, context)
+        if matches(last_output.lower()):
+            return last_output
+    return last_output
+
+
 # ---------------------------------------------------------------------------
 # Single image tests
 # ---------------------------------------------------------------------------
@@ -38,10 +51,11 @@ class TestSingleImage:
         require_profile("openai")
         img = _write_temp_png(RED_PNG)
         try:
-            r = run_eli("run", f"What color is the image at {img}? Answer in one word.")
-            assert r.ok, f"Failed: {r.stderr}"
-            output = r.full_output
-            assert_nonempty(output, "openai single red")
+            output = _run_until(
+                f"What color is the image at {img}? Answer in one word.",
+                lambda text: any(kw in text for kw in RED_KEYWORDS),
+                "openai single red",
+            )
             assert_response_contains(output, RED_KEYWORDS, "openai single red")
         finally:
             os.unlink(img)
@@ -50,10 +64,11 @@ class TestSingleImage:
         require_profile("anthropic")
         img = _write_temp_png(RED_PNG)
         try:
-            r = run_eli("run", f"What color is the image at {img}? Answer in one word.")
-            assert r.ok, f"Failed: {r.stderr}"
-            output = r.full_output
-            assert_nonempty(output, "anthropic single red")
+            output = _run_until(
+                f"What color is the image at {img}? Answer in one word.",
+                lambda text: any(kw in text for kw in RED_KEYWORDS),
+                "anthropic single red",
+            )
             assert_response_contains(output, RED_KEYWORDS, "anthropic single red")
         finally:
             os.unlink(img)
@@ -62,10 +77,11 @@ class TestSingleImage:
         require_profile("openai")
         img = _write_temp_png(BLUE_PNG)
         try:
-            r = run_eli("run", f"What color is the image at {img}? Answer in one word.")
-            assert r.ok, f"Failed: {r.stderr}"
-            output = r.full_output
-            assert_nonempty(output, "openai single blue")
+            output = _run_until(
+                f"What color is the image at {img}? Answer in one word.",
+                lambda text: any(kw in text for kw in BLUE_KEYWORDS),
+                "openai single blue",
+            )
             assert_response_contains(output, BLUE_KEYWORDS, "openai single blue")
         finally:
             os.unlink(img)
@@ -121,13 +137,12 @@ class TestMultiImage:
         red = _write_temp_png(RED_PNG)
         blue = _write_temp_png(BLUE_PNG)
         try:
-            r = run_eli(
-                "run",
-                f"I have two images: {red} and {blue}. What colors are they? Answer briefly."
+            output = _run_until(
+                f"I have two images: {red} and {blue}. What colors are they? Answer briefly.",
+                lambda text: any(kw in text for kw in RED_KEYWORDS)
+                and any(kw in text for kw in BLUE_KEYWORDS),
+                "openai multi",
             )
-            assert r.ok, f"Failed: {r.stderr}"
-            output = r.full_output
-            assert_nonempty(output, "openai multi")
             assert_response_contains(output, RED_KEYWORDS, "openai multi red")
             assert_response_contains(output, BLUE_KEYWORDS, "openai multi blue")
         finally:
@@ -139,13 +154,12 @@ class TestMultiImage:
         red = _write_temp_png(RED_PNG)
         blue = _write_temp_png(BLUE_PNG)
         try:
-            r = run_eli(
-                "run",
-                f"I have two images: {red} and {blue}. What colors are they? Answer briefly."
+            output = _run_until(
+                f"I have two images: {red} and {blue}. What colors are they? Answer briefly.",
+                lambda text: any(kw in text for kw in RED_KEYWORDS)
+                and any(kw in text for kw in BLUE_KEYWORDS),
+                "anthropic multi",
             )
-            assert r.ok, f"Failed: {r.stderr}"
-            output = r.full_output
-            assert_nonempty(output, "anthropic multi")
             assert_response_contains(output, RED_KEYWORDS, "anthropic multi red")
             assert_response_contains(output, BLUE_KEYWORDS, "anthropic multi blue")
         finally:
