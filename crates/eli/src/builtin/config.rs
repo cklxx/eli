@@ -24,6 +24,29 @@ pub struct Profile {
     pub model: String,
 }
 
+/// Default greeting shown when `enabled = true` but no custom message is set.
+const DEFAULT_GREETING: &str = "\
+Hey! I'm Eli, your AI assistant.
+
+Here are some things I can help with:
+- Answer questions about code, docs, or anything you're curious about
+- Help you write, debug, or refactor code
+- Brainstorm ideas or talk through a problem
+- Summarize articles, translate text, or explain concepts
+
+Just type whatever's on your mind — there are no wrong questions.";
+
+/// Greeting configuration for new sessions / channel joins.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GreetingConfig {
+    /// Whether greeting is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Static greeting message text. Falls back to a built-in default when empty.
+    #[serde(default)]
+    pub message: String,
+}
+
 /// Eli user configuration persisted to `~/.eli/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EliConfig {
@@ -37,6 +60,9 @@ pub struct EliConfig {
     /// Default: false.
     #[serde(default)]
     pub tool_notices: bool,
+    /// Greeting for new sessions / channel joins.
+    #[serde(default)]
+    pub greeting: GreetingConfig,
 }
 
 impl EliConfig {
@@ -125,6 +151,26 @@ impl EliConfig {
     /// Add or update a profile.
     pub fn add_profile(&mut self, name: &str, profile: Profile) {
         self.profiles.insert(name.to_string(), profile);
+    }
+
+    /// Return the greeting message if enabled, checking env override first.
+    ///
+    /// Priority: `ELI_GREETING_MESSAGE` env > `greeting.message` config > built-in default.
+    pub fn greeting_message(&self) -> Option<String> {
+        // Env override takes precedence.
+        if let Ok(env_msg) = std::env::var("ELI_GREETING_MESSAGE")
+            && !env_msg.is_empty()
+        {
+            return Some(env_msg);
+        }
+        if !self.greeting.enabled {
+            return None;
+        }
+        if self.greeting.message.is_empty() {
+            Some(DEFAULT_GREETING.to_owned())
+        } else {
+            Some(self.greeting.message.clone())
+        }
     }
 
     /// Migrate from the legacy `config.json` format.

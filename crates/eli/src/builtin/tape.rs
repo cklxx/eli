@@ -92,7 +92,8 @@ impl TapeService {
     }
 
     /// Ensure the tape has a bootstrap anchor. Creates one if none exist.
-    pub async fn ensure_bootstrap_anchor(&self, tape_name: &str) -> Result<(), ConduitError> {
+    /// Returns `true` when a new anchor was created (i.e. the session is brand new).
+    pub async fn ensure_bootstrap_anchor(&self, tape_name: &str) -> Result<bool, ConduitError> {
         let query = TapeQuery::new(tape_name).kinds(vec!["anchor".to_owned()]);
         let anchors = self.store.fetch_all(&query).await?;
         if anchors.is_empty() {
@@ -102,8 +103,19 @@ impl TapeService {
                 Value::Object(Default::default()),
             );
             self.store.append(tape_name, &anchor).await?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
+    }
+
+    /// Check whether a tape has any entries (i.e. the session already exists).
+    pub async fn tape_has_entries(&self, tape_name: &str) -> bool {
+        let query = TapeQuery::new(tape_name);
+        self.store
+            .fetch_all(&query)
+            .await
+            .map(|entries| !entries.is_empty())
+            .unwrap_or(false)
     }
 
     /// List anchors in a tape.

@@ -105,6 +105,7 @@ fn parse_message_kind(s: &str) -> MessageKind {
     match s {
         "error" => MessageKind::Error,
         "command" => MessageKind::Command,
+        "join" => MessageKind::Join,
         _ => MessageKind::Normal,
     }
 }

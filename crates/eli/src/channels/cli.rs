@@ -271,6 +271,10 @@ impl Channel for CliChannel {
 
         renderer.welcome(&model, &workspace.display().to_string());
 
+        if let Some(greeting) = crate::builtin::config::EliConfig::load().greeting_message() {
+            renderer.assistant_output(&greeting);
+        }
+
         let handle = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Handle::current();
             let stdin = io::stdin();
@@ -337,7 +341,9 @@ impl Channel for CliChannel {
         match message.kind {
             MessageKind::Error => self.renderer.error(&message.content),
             MessageKind::Command => self.renderer.command_output(&message.content),
-            MessageKind::Normal => self.renderer.assistant_output(&message.content),
+            MessageKind::Normal | MessageKind::Join => {
+                self.renderer.assistant_output(&message.content)
+            }
         }
         self.request_done.notify_one();
         Ok(())

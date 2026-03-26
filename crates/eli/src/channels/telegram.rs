@@ -9,14 +9,17 @@ use serde_json::json;
 use teloxide::dispatching::{Dispatcher, UpdateFilterExt};
 use teloxide::net::Download;
 use teloxide::prelude::*;
-use teloxide::types::{ChatKind, MediaKind, MessageKind as TgMessageKind, ParseMode, Update};
+use teloxide::types::{
+    ChatKind, ChatMemberKind, ChatMemberUpdated, MediaKind, MessageKind as TgMessageKind,
+    ParseMode, Update,
+};
 use teloxide::update_listeners::Polling;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use super::base::Channel;
-use super::message::{ChannelMessage, DataFetcher, MediaItem, MediaType};
+use super::message::{ChannelMessage, DataFetcher, MediaItem, MediaType, MessageKind};
 
 // ---------------------------------------------------------------------------
 // TelegramSettings
@@ -593,41 +596,79 @@ impl Channel for TelegramChannel {
         let bot_for_handler = bot.clone();
 
         let handle = tokio::spawn(async move {
-            let handler = Update::filter_message().endpoint(move |bot: Bot, msg: Message| {
-                let tx = tx.clone();
-                let allow_users = allow_users.clone();
-                let allow_chats = allow_chats.clone();
+            let tx_for_join = tx.clone();
 
-                async move {
-                    match check_access(&msg, &allow_chats, &allow_users) {
-                        AccessResult::DeniedChat => {
-                            if msg.text().is_some_and(|t| t.starts_with("/start")) {
-                                let _ = bot.send_message(msg.chat.id, NO_ACCESS_MESSAGE).await;
+            let message_handler =
+                Update::filter_message().endpoint(move |bot: Bot, msg: Message| {
+                    let tx = tx.clone();
+                    let allow_users = allow_users.clone();
+                    let allow_chats = allow_chats.clone();
+
+                    async move {
+                        match check_access(&msg, &allow_chats, &allow_users) {
+                            AccessResult::DeniedChat => {
+                                if msg.text().is_some_and(|t| t.starts_with("/start")) {
+                                    let _ = bot.send_message(msg.chat.id, NO_ACCESS_MESSAGE).await;
+                                }
+                                return respond(());
                             }
-                            return respond(());
+                            AccessResult::DeniedUser => {
+                                let _ = bot.send_message(msg.chat.id, "Access denied.").await;
+                                return Ok(());
+                            }
+                            AccessResult::StartCommand => {
+                                let _ = bot
+                                    .send_message(msg.chat.id, "Eli is online. Send text to start.")
+                                    .await;
+                                return Ok(());
+                            }
+                            AccessResult::Allowed => {}
                         }
-                        AccessResult::DeniedUser => {
-                            let _ = bot.send_message(msg.chat.id, "Access denied.").await;
-                            return Ok(());
-                        }
-                        AccessResult::StartCommand => {
-                            let _ = bot
-                                .send_message(msg.chat.id, "Eli is online. Send text to start.")
-                                .await;
-                            return Ok(());
-                        }
-                        AccessResult::Allowed => {}
-                    }
 
-                    let (bot_id, bot_uname) = resolve_bot_identity(&bot).await;
-                    let channel_msg = build_channel_message(&msg, &bot, bot_id, &bot_uname);
-                    let _ = tx.send(channel_msg);
-                    Ok(())
-                }
-            });
+                        let (bot_id, bot_uname) = resolve_bot_identity(&bot).await;
+                        let channel_msg = build_channel_message(&msg, &bot, bot_id, &bot_uname);
+                        let _ = tx.send(channel_msg);
+                        Ok(())
+                    }
+                });
+
+            let join_handler = Update::filter_my_chat_member().endpoint(
+                move |_bot: Bot, update: ChatMemberUpdated| {
+                    let tx = tx_for_join.clone();
+                    async move {
+                        let was_absent = matches!(
+                            update.old_chat_member.kind,
+                            ChatMemberKind::Left | ChatMemberKind::Banned(_)
+                        );
+                        let is_present = matches!(
+                            update.new_chat_member.kind,
+                            ChatMemberKind::Member
+                                | ChatMemberKind::Administrator(_)
+                                | ChatMemberKind::Owner(_)
+                        );
+                        if was_absent && is_present {
+                            let chat_id = update.chat.id.to_string();
+                            let session_id = format!("telegram:{chat_id}");
+                            let msg = ChannelMessage::new(&session_id, "telegram", "")
+                                .with_chat_id(&chat_id)
+                                .with_kind(MessageKind::Join)
+                                .with_is_active(true)
+                                .finalize();
+                            let _ = tx.send(msg);
+                        }
+                        respond(())
+                    }
+                },
+            );
+
+            let handler = dptree::entry().branch(message_handler).branch(join_handler);
 
             let listener = Polling::builder(bot_for_handler.clone())
                 .timeout(std::time::Duration::from_secs(5))
+                .allowed_updates(vec![
+                    teloxide::types::AllowedUpdate::Message,
+                    teloxide::types::AllowedUpdate::MyChatMember,
+                ])
                 .delete_webhook()
                 .await
                 .build();

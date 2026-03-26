@@ -226,7 +226,6 @@ fn is_valid_frontmatter(skill_dir: &Path, frontmatter: &SkillFrontmatter) -> boo
     is_valid_name(&frontmatter.name, skill_dir) && is_valid_description(&frontmatter.description)
 }
 
-
 fn is_valid_name(name: &str, skill_dir: &Path) -> bool {
     let normalized = name.trim();
     if normalized.is_empty() || normalized.len() > 64 {

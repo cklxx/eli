@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 
 use nexil::CancellationToken;
 
+use crate::builtin::config::EliConfig;
 use crate::control_plane::{BudgetLedger, DispatchFn, TurnContext, turn_usage, with_turn_context};
 use crate::envelope::{ValueExt, unpack_batch_vec};
 use crate::hooks::{ChannelHook, EliHookSpec, HookRuntime, TapeStoreKind};
@@ -138,6 +139,32 @@ impl EliFramework {
             let state = self
                 .build_state(&rt, &inbound, &session_id, &workspace)
                 .await;
+
+            // --- Greeting on join / new session ---
+            let is_join = inbound.get("kind").and_then(|v| v.as_str()) == Some("join");
+            let is_new_session = state
+                .get("_is_new_session")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            if is_join || is_new_session {
+                if let Some(greeting) = EliConfig::load().greeting_message() {
+                    let outbound = Self::build_greeting_outbound(&inbound, &session_id, &greeting);
+                    rt.call_dispatch_outbound(&outbound).await;
+                }
+
+                if is_join {
+                    // Join events have no user message — return after greeting.
+                    return Ok(TurnResult {
+                        session_id,
+                        prompt: PromptValue::Text(String::new()),
+                        model_output: String::new(),
+                        outbounds: Vec::new(),
+                        usage: TurnUsageInfo::default(),
+                    });
+                }
+            }
+
             let prompt = Self::build_prompt(&rt, &inbound, &session_id, &state).await;
             let model_output = Self::run_model(&rt, &prompt, &session_id, &state, &inbound).await;
 
@@ -205,6 +232,25 @@ impl EliFramework {
             model_output: reply.clone(),
             outbounds: vec![outbound],
             usage: TurnUsageInfo::default(),
+        })
+    }
+
+    /// Build an outbound envelope for a greeting message.
+    fn build_greeting_outbound(inbound: &Envelope, session_id: &str, greeting: &str) -> Envelope {
+        let channel = inbound.field_str("channel", "");
+        let chat_id = inbound.field_str("chat_id", "");
+        let output_channel = inbound
+            .get("output_channel")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&channel)
+            .to_owned();
+
+        serde_json::json!({
+            "content": greeting,
+            "session_id": session_id,
+            "channel": channel,
+            "chat_id": chat_id,
+            "output_channel": output_channel,
         })
     }
 

@@ -324,6 +324,15 @@ impl EliHookSpec for BuiltinImpl {
                 state.insert(field.to_owned(), value);
             }
         }
+
+        // Detect new session: tape has no entries yet.
+        let workspace = std::env::current_dir().unwrap_or_default();
+        let tape_name = TapeService::session_tape_name(session_id, &workspace);
+        let has_entries = self.tape_service().tape_has_entries(&tape_name).await;
+        if !has_entries {
+            state.insert("_is_new_session".to_owned(), Value::Bool(true));
+        }
+
         Ok(Some(state))
     }
 
