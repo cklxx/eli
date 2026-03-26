@@ -106,8 +106,9 @@ export function loadConfig(path?: string): SidecarConfig {
     }
   }
 
-  // Channel config can also come from env vars:
-  //   SIDECAR_LARK_APP_ID, SIDECAR_LARK_APP_SECRET → channels.lark.accounts.default
+  // Channel config from env vars (SIDECAR_ prefix only):
+  //   SIDECAR_DISCORD_TOKEN → channels.discord.token + accounts.default.token
+  //   SIDECAR_LARK_APP_ID   → channels.lark.accounts.default.app_id
   for (const [key, value] of Object.entries(process.env)) {
     const match = key.match(/^SIDECAR_([A-Z]+)_(.+)$/);
     if (!match) continue;
@@ -120,9 +121,13 @@ export function loadConfig(path?: string): SidecarConfig {
     if (!channels[channelId]) {
       channels[channelId] = { accounts: {} };
     }
+    if (!channels[channelId].accounts) {
+      channels[channelId].accounts = {};
+    }
     if (!channels[channelId].accounts.default) {
       channels[channelId].accounts.default = {};
     }
+    channels[channelId][configKey] = value;
     channels[channelId].accounts.default[configKey] = value;
   }
 

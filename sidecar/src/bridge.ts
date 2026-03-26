@@ -299,8 +299,8 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
         // Send media independently — fire-and-forget, errors logged but don't fail the response.
         if (mediaItems.length > 0 && sendMedia) {
           for (const item of mediaItems) {
-            const isFeishu = sourceChannel === "openclaw-lark" || sourceChannel === "feishu";
-            const mediaParams = isFeishu
+            const usesMediaUrl = sourceChannel === "openclaw-lark" || sourceChannel === "feishu" || sourceChannel === "discord";
+            const mediaParams = usesMediaUrl
               ? { cfg, to, text: undefined, mediaUrl: item.path, mediaLocalRoots: ["/tmp"], accountId }
               : {
                   text: undefined,
@@ -475,7 +475,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
 
     // Setup: start QR login for a channel.
     app.post("/setup/:channel/start", setupLimiter, async (req, res) => {
-      const channelId = req.params.channel;
+      const channelId = req.params.channel as string;
       const plugin = registry.channels.get(channelId);
       if (!plugin) {
         res.status(404).json({ error: `channel "${channelId}" not found` });
@@ -498,7 +498,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
 
     // Setup: wait for QR scan result.
     app.post("/setup/:channel/wait", setupLimiter, async (req, res) => {
-      const channelId = req.params.channel;
+      const channelId = req.params.channel as string;
       const plugin = registry.channels.get(channelId);
       if (!plugin) {
         res.status(404).json({ error: `channel "${channelId}" not found` });

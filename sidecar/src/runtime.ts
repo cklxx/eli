@@ -235,6 +235,27 @@ export function endPendingTyping(params: {
  * pipeline. We intercept dispatchReplyFromConfig to route messages to eli
  * instead of openclaw's agent runtime.
  */
+function buildDiscordRuntimeNamespace(): Record<string, any> {
+  try {
+    const sdk = require("openclaw/plugin-sdk/discord");
+    return {
+      sendMessageDiscord: sdk.sendMessageDiscord,
+      monitorDiscordProvider: sdk.monitorDiscordProvider,
+      probeDiscord: sdk.probeDiscord,
+      sendPollDiscord: sdk.sendPollDiscord,
+      auditChannelPermissions: sdk.auditDiscordChannelPermissions,
+      resolveChannelAllowlist: sdk.resolveDiscordChannelAllowlist,
+      resolveUserAllowlist: sdk.resolveDiscordUserAllowlist,
+      listDirectoryPeersLive: sdk.listDiscordDirectoryPeersLive,
+      listDirectoryGroupsLive: sdk.listDiscordDirectoryGroupsLive,
+      messageActions: sdk.discordMessageActions,
+    };
+  } catch (e: any) {
+    log.debug("discord SDK not available", { err: e.message });
+    return {};
+  }
+}
+
 function buildPluginRuntime(config: SidecarConfig) {
   return {
     config: {
@@ -244,7 +265,13 @@ function buildPluginRuntime(config: SidecarConfig) {
     },
     log: (...args: any[]) => log.info(args.map(String).join(" ")),
     error: (...args: any[]) => log.error(args.map(String).join(" ")),
+    logging: {
+      shouldLogVerbose: () => false,
+      logInbound: () => {},
+      logOutbound: () => {},
+    },
     channel: {
+      discord: buildDiscordRuntimeNamespace(),
       reply: {
         /**
          * The main intercept point. When a channel plugin finishes processing
@@ -423,10 +450,6 @@ function buildPluginRuntime(config: SidecarConfig) {
         readAllowFromStore: () => ["*"],
         upsertPairingRequest: async () => {},
       },
-    },
-    logging: {
-      logInbound: () => {},
-      logOutbound: () => {},
     },
     system: {
       enqueueSystemEvent: (_msg: string, _data?: any) => {

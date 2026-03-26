@@ -14,6 +14,15 @@
           "domain": "feishu"
         }
       }
+    },
+    "discord": {
+      "enabled": true,
+      "token": "your-discord-bot-token",
+      "accounts": {
+        "default": {
+          "token": "your-discord-bot-token"
+        }
+      }
     }
   }
 }

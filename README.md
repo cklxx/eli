@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="Eli Banner" width="100%">
+</p>
+
 # Eli — Ease Lives Instantly
 
 > Open-source AI agent that lives in your group chat. WeChat, Feishu, Telegram, Slack, Discord — one command.

@@ -30,6 +30,7 @@
     "openclaw",
     "feishu",
     "lark",
+    "discord",
     "sidecar",
     "agent",
     "channel"
@@ -44,15 +45,20 @@
     "openclaw": "^2026.3.13"
   },
   "peerDependencies": {
-    "@larksuite/openclaw-lark": ">=2026.0.0"
+    "@larksuite/openclaw-lark": ">=2026.0.0",
+    "@openclaw/discord": ">=2026.0.0"
   },
   "peerDependenciesMeta": {
     "@larksuite/openclaw-lark": {
+      "optional": true
+    },
+    "@openclaw/discord": {
       "optional": true
     }
   },
   "devDependencies": {
     "@larksuite/openclaw-lark": "^2026.3.25",
+    "@openclaw/discord": "^2026.3.13",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
