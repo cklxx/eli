@@ -1,6 +1,6 @@
 # Eli — Ease Lives Instantly
 
-> Hook-first AI agent framework in Rust. One pipeline for CLI, Telegram, and any channel.
+> Open-source AI agent that lives in your group chat. WeChat, Feishu, Telegram, Slack, Discord — one command.
 
 I needed an AI agent that could live in my team's group chat — not a chatbot, a teammate. Everything in the space was Python, couldn't deploy as a single binary, and fell apart the moment you needed real concurrency. So I built eli in Rust.
 
@@ -51,18 +51,16 @@ eli gateway                 # multi-channel listener
 
 ## Features
 
-- **Hook-based pipeline** — 12 hook points, last-registered-wins. Builtins register first, your plugins override
-- **Multi-channel** — CLI REPL, Telegram bot, Feishu/WeChat/DingTalk/Discord/Slack via OpenClaw sidecar
-- **Provider-agnostic LLM** — OpenAI, Anthropic Claude, GitHub Copilot, DeepSeek, Ollama, custom endpoints
-- **20 builtin tools** — shell, filesystem, web fetch, subagent, mid-turn messaging, tape operations, decisions
-- **Parallel tool execution** — independent tool calls run concurrently with schema caching
-- **Lazy context** — large results spill to disk, images stripped from tape to keep context lean
-- **Universal media pipeline** — skills can send images to any channel (CLI, Telegram, etc.)
-- **Skills** — Markdown-defined capabilities (`SKILL.md`) with project/global precedence
-- **Tape system** — Append-only conversation history with anchors, search, and forking
-- **MCP server mode** — Expose sidecar tools over stdio for Claude Code / Cursor integration
-- **Auto-handoff** — Context-aware tape branching when approaching token limits
-- **Security hardening** — subagent sandboxing, sensitive field redaction, OOM protection
+- **丢进群聊就能用** — 微信、飞书、Telegram、Slack、Discord、DingTalk，一行命令接入，读上下文、调工具、群里直接回复
+- **同时处理多件事** — 多个工具并行跑，复杂任务快很多
+- **长聊天不断片** — 对话太长自动瘦身，关键信息不丢
+- **干活时主动汇报** — 中途告诉你进展，不用干等到最后
+- **能发图片** — 任何渠道都能发图，CLI 和群聊一样
+- **换模型一行搞定** — OpenAI、Claude、Copilot、DeepSeek、Ollama，随时切
+- **技能系统** — 用 Markdown 定义能力，项目级 / 全局可覆盖
+- **单二进制部署** — `cargo install` 或 Docker，没有依赖地狱
+- **MCP server** — 接入 Claude Code / Cursor 当工具用
+- **自动上下文切换** — 接近 token 上限时自动分支，不打断对话
 
 ## Commands
 
