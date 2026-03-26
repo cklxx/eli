@@ -20,6 +20,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "postinstall": "node scripts/patch-openclaw-exports.cjs",
     "prepublishOnly": "npm run build",
     "start": "node start.cjs",
     "dev": "node --watch start.cjs",
@@ -42,7 +43,7 @@
     "express": "^5.1.0",
     "express-rate-limit": "^8.3.1",
     "jiti": "^2.6.1",
-    "openclaw": "^2026.3.13"
+    "openclaw": "^2026.3.24"
   },
   "peerDependencies": {
     "@larksuite/openclaw-lark": ">=2026.0.0",
