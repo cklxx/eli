@@ -26,19 +26,6 @@
 
 ---
 
-## P1: 多信号技能匹配 + 互斥组 + 冷却
-
-**What:** 升级技能匹配引擎：加权多信号打分（intent 正则 0.6 + 最近工具 0.25 + 关键词 0.15）、互斥组（同组只激活最高分）、冷却机制（同一技能 N 秒内不重复触发）。
-
-**Why:** 当前技能匹配较简单，容易误触发或重复触发。多信号匹配更精准，互斥组防冲突，冷却防刷屏。
-
-**参考:** elephant.ai 的 `skills/matcher.go`，`MatchContext` + `resolveConflicts` + `cooldownTracker`。
-
-**Effort:** M
-**Priority:** P1
-
----
-
 ## P1: 网关快速分类路由
 
 **What:** 在网关加一个快速分类步骤：用轻量 LLM 调用（或规则）把消息分成 direct（直接回复）、think（快确认+深度回复）、delegate（确认+后台 ReAct），简单消息不走完整 turn。
@@ -63,20 +50,6 @@
 **Effort:** M
 **Priority:** P1
 **Depends on:** 确认 openclaw telegram 插件功能对齐（webhook 模式、群组、media）
-
----
-
-## P2: 技能反馈循环
-
-**What:** 跟踪每次技能激活后是否有用（用户是否采纳、是否中断），维护 helpful ratio，下次匹配时乘以调整系数（0.7x–1.2x）。
-
-**Why:** 技能越用越准，不好用的技能自动降权，免去手动调优 threshold。
-
-**参考:** elephant.ai `matcher.go` 的 feedback-based score adjustment。
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** 多信号技能匹配先完成
 
 ---
 

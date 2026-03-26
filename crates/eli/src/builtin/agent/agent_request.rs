@@ -10,8 +10,7 @@ use serde_json::Value;
 use crate::builtin::settings::{AgentSettings, ApiBaseConfig, ApiKeyConfig};
 use crate::builtin::store::ForkTapeStore;
 use crate::prompt_builder::{PromptBuilder, PromptMode};
-use crate::skill_matcher::{MatchContext, SkillMatcher};
-use crate::skills::discover_skills;
+
 use crate::tools::{REGISTRY, model_tools, model_tools_cached};
 use crate::types::PromptValue;
 
@@ -204,25 +203,12 @@ pub(super) fn build_system_prompt(
     allowed_skills: Option<&HashSet<String>>,
     workspace: &Path,
 ) -> String {
-    let skills = discover_skills(workspace);
-    let matcher = SkillMatcher::new();
-    let session_id = state
-        .get("_session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let match_ctx = MatchContext {
-        task_input: prompt_text,
-        recent_tools: &[],
-        session_id,
-    };
-    let auto_expanded = matcher.match_skills(&skills, &match_ctx);
-
     PromptBuilder::new(PromptMode::Full).build(
         settings,
         prompt_text,
         state,
         allowed_skills,
-        &auto_expanded,
+        &HashSet::new(),
         workspace,
     )
 }

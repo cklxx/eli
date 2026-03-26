@@ -49,7 +49,7 @@
 │                              │                                      │
 │  ┌───────────────────────────┴──────────────────────────────────┐  │
 │  │                    BuiltinImpl (plugin)                       │  │
-│  │  Per-session Agent · SkillMatcher · SmartRouter              │  │
+│  │  Per-session Agent · SmartRouter                             │  │
 │  │  ToolMiddleware (CircuitBreaker + Metrics)                   │  │
 │  │  TapeService · ShellManager · PromptBuilder                  │  │
 │  └──────────────────────────┬───────────────────────────────────┘  │
@@ -291,7 +291,6 @@ eli/src/
 ├── envelope.rs                     field_of, content_of, OutboundMessage
 ├── prompt_builder.rs               PromptBuilder (identity/skills/runtime sections)
 ├── smart_router.rs                 SmartRouter — greeting detection (15 triggers)
-├── skill_matcher.rs                Multi-signal skill activation (intent/tool/keyword)
 ├── skills.rs                       SkillMetadata discovery (project > global)
 ├── tools.rs                        REGISTRY, model_tools(), shorten_text()
 ├── tool_middleware.rs              CircuitBreaker, MetricsCollector, MiddlewareChain
@@ -443,7 +442,7 @@ struct ChannelMessage {
 |----------|---------|
 | `new()` | Load settings from env |
 | `run(prompt, session_id, state, ...)` | **Main execution**: fork tape → detect slash cmd → agent_loop → merge |
-| `system_prompt(state, skills, ...)` | PromptBuilder + SkillMatcher |
+| `system_prompt(state, skills, ...)` | PromptBuilder |
 | `create_llm(model, state)` | Construct conduit::LLM with API key chain |
 | `resolve_stored_api_key()` | Check ~/.codex/auth.json, ~/.eli/auth.json, Copilot |
 | `build_tool_context(tape, state)` | ToolContext with tape + state |
@@ -496,7 +495,6 @@ struct ChannelMessage {
 |--------|--------------|
 | **PromptBuilder** | `build(settings, text, state, skills, ...)` — assemble system prompt with priority-based truncation (cap 32K, identity never removed) |
 | **SmartRouter** | `classify(content) → Option<RouteDecision>` — 15 greeting triggers × 5 responses |
-| **SkillMatcher** | `match_skills(skills, context)` — score = intent×0.6 + tool×0.25 + keyword×0.15; threshold 0.3 |
 | **ShellManager** | `start(cmd)`, `get(id)`, `terminate(id)`, `wait_closed(id)` — background process manager |
 | **TapeViewer** | axum server: `GET /`, `/api/tapes`, `/api/tapes/{name}`, `/api/tapes/{name}/info`, `/api/tapes/{name}/context` |
 | **ModelSpecs** | 87-entry table: `infer_context_window(model)`, `infer_max_output_tokens(model)` |

@@ -32,7 +32,6 @@ pub mod envelope;
 pub mod framework;
 pub mod hooks;
 pub mod prompt_builder;
-pub mod skill_matcher;
 pub mod skills;
 pub mod smart_router;
 pub mod tool_middleware;

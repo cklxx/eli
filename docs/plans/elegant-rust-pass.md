@@ -28,7 +28,7 @@ Refactor the current Rust hotspots to better match the project contract:
 
 - Worker A: `crates/eli/src/builtin/tools.rs`
 - Worker B: `crates/nexil/src/clients/chat.rs` and related parsing support
-- Worker C: `crates/eli/src/skills.rs` and `crates/eli/src/skill_matcher.rs`
+- Worker C: `crates/eli/src/skills.rs`
 - Worker D: provider metadata consolidation
 - Main thread: framework/core integration, verification, merge handling
 
