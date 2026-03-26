@@ -262,6 +262,18 @@ fn parse_message_kind(message: &Envelope) -> MessageKind {
 
 fn envelope_to_channel_message(message: &Envelope) -> ChannelMessage {
     let channel = envelope_str(message, "channel", "cli");
+    let mut context = message
+        .get("context")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    if !context.contains_key("outbound_media")
+        && let Some(media) = message.get("outbound_media")
+    {
+        context.insert("outbound_media".to_owned(), media.clone());
+    }
+
     ChannelMessage {
         session_id: envelope_str(message, "session_id", "").to_owned(),
         channel: channel.to_owned(),
@@ -272,11 +284,7 @@ fn envelope_to_channel_message(message: &Envelope) -> ChannelMessage {
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         kind: parse_message_kind(message),
-        context: message
-            .get("context")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default(),
+        context,
         media: Vec::new(),
         output_channel: envelope_str(message, "output_channel", channel).to_owned(),
     }

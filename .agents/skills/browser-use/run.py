@@ -4,7 +4,7 @@
 每次调用启动一个 playwright-mcp 进程，通过 stdin JSON-RPC 发送工具调用。
 单动作直接调用，多步操作用 pipeline 在同一个浏览器会话内批量执行。
 
-actions: navigate, snapshot, click, type, screenshot, tabs, evaluate, run_code, press_key, wait_for, pipeline
+actions: navigate, snapshot, click, type, screenshot, tabs, evaluate, run_code, press_key, wait_for, pipeline, follow_user
 """
 
 from __future__ import annotations
@@ -311,6 +311,106 @@ def pipeline(a: dict) -> dict:
     return {"success": all(r.get("success") for r in results), "results": results}
 
 
+def _find_follow_button_ref(snapshot_text: str) -> str | None:
+    patterns = [
+        r'button\s+"Follow"\s+\[ref=(e\d+)\]',
+        r'button\s+"Follow @[^"]+"\s+\[ref=(e\d+)\]',
+        r'button\s+"Follow"\s+\[cursor=pointer\]\s+\[ref=(e\d+)\]',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, snapshot_text)
+        if m:
+            return m.group(1)
+    return None
+
+
+def follow_user(a: dict) -> dict:
+    """Open an X profile, click Follow if visible, and verify the result in one session."""
+    handle = (a.get("handle") or "").strip().lstrip("@")
+    if not handle:
+        return {"success": False, "error": "handle is required"}
+
+    wait_seconds = int(a.get("wait_seconds", 5))
+    verify_wait = int(a.get("verify_wait", 4))
+    session = McpSession(timeout=max(_CALL_TIMEOUT, 60))
+    session.start()
+    try:
+        url = f"https://x.com/{handle}"
+        nav = session.call("browser_navigate", {"url": url})
+        if not nav.get("success"):
+            return nav
+
+        wait_result = session.call("browser_wait_for", {"time": wait_seconds})
+        snap1 = session.call("browser_snapshot", {})
+        if not snap1.get("success"):
+            return snap1
+        snap1_text = snap1.get("output", "")
+
+        if re.search(r'button\s+"Following"', snap1_text) or re.search(r'button\s+"Requested"', snap1_text) or re.search(r'button\s+"Unfollow"', snap1_text):
+            return {
+                "success": True,
+                "status": "already_following",
+                "handle": f"@{handle}",
+                "url": url,
+                "wait_success": wait_result.get("success", False),
+            }
+
+        ref = _find_follow_button_ref(snap1_text)
+        if not ref:
+            return {
+                "success": False,
+                "status": "follow_button_not_found",
+                "handle": f"@{handle}",
+                "url": url,
+                "wait_success": wait_result.get("success", False),
+                "snapshot_excerpt": snap1_text[:4000],
+            }
+
+        click = session.call("browser_click", {"ref": ref, "element": f"Follow @{handle}"})
+        if not click.get("success"):
+            return click
+
+        session.call("browser_wait_for", {"time": verify_wait})
+        snap2 = session.call("browser_snapshot", {})
+        if not snap2.get("success"):
+            return snap2
+        snap2_text = snap2.get("output", "")
+
+        if re.search(r'button\s+"Following"', snap2_text) or re.search(r'button\s+"Requested"', snap2_text) or re.search(r'button\s+"Unfollow"', snap2_text):
+            status = "requested" if re.search(r'button\s+"Requested"', snap2_text) else "followed"
+            return {
+                "success": True,
+                "status": status,
+                "handle": f"@{handle}",
+                "url": url,
+                "clicked_ref": ref,
+                "wait_success": wait_result.get("success", False),
+                "snapshot_excerpt": snap2_text[:4000],
+            }
+
+        if re.search(r'button\s+"Follow"', snap2_text) and not re.search(r'button\s+"Following"', snap2_text):
+            return {
+                "success": False,
+                "status": "follow_click_no_effect",
+                "handle": f"@{handle}",
+                "url": url,
+                "clicked_ref": ref,
+                "wait_success": wait_result.get("success", False),
+                "snapshot_excerpt": snap2_text[:4000],
+            }
+
+        return {
+            "success": False,
+            "status": "clicked_but_unverified",
+            "handle": f"@{handle}",
+            "url": url,
+            "clicked_ref": ref,
+            "wait_success": wait_result.get("success", False),
+            "snapshot_excerpt": snap2_text[:4000],
+        }
+    finally:
+        session.close()
+
 def post(a: dict) -> dict:
     """Smart post: navigate to URL, find textbox, type text, click Post."""
     url = a.get("url", "")
@@ -331,7 +431,7 @@ _ACTIONS = {
     "navigate": navigate, "snapshot": snapshot, "click": click,
     "type": type_text, "screenshot": screenshot, "tabs": tabs,
     "evaluate": evaluate, "run_code": run_code, "press_key": press_key,
-    "wait_for": wait_for, "pipeline": pipeline, "post": post,
+    "wait_for": wait_for, "pipeline": pipeline, "follow_user": follow_user, "post": post,
 }
 
 

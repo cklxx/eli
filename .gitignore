@@ -25,3 +25,6 @@ backup/
 .openmax/
 .openmax-worktrees/
 test-results/
+
+autoresearch-results.tsv
+tiny16mb/

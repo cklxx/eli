@@ -186,6 +186,39 @@ pub fn turn_wrap_tools() -> Option<WrapToolsFn> {
 }
 
 // ---------------------------------------------------------------------------
+// Inbound injection (subagent results, synthetic messages)
+// ---------------------------------------------------------------------------
+
+/// Closure type for injecting a synthetic inbound message into the framework
+/// pipeline. Set once at startup by the chat/gateway entry point.
+pub type InjectInboundFn =
+    Arc<dyn Fn(Value) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
+static INBOUND_INJECTOR: std::sync::LazyLock<std::sync::Mutex<Option<InjectInboundFn>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// Register the global inbound injector. Called once at startup.
+pub fn set_inbound_injector(f: InjectInboundFn) {
+    *INBOUND_INJECTOR.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+}
+
+/// Clone the current inbound injector, if set.
+pub fn inbound_injector() -> Option<InjectInboundFn> {
+    INBOUND_INJECTOR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Inject a synthetic inbound envelope into the framework pipeline.
+/// No-op if no injector has been registered.
+pub async fn inject_inbound(envelope: Value) {
+    if let Some(f) = inbound_injector() {
+        f(envelope).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Budget ledger
 // ---------------------------------------------------------------------------
 
