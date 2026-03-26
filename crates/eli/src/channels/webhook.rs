@@ -11,12 +11,15 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
+use base64::Engine;
+use serde::Deserialize;
+use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::base::Channel;
-use super::message::ChannelMessage;
+use super::message::{ChannelMessage, DataFetcher, MediaItem, MediaType};
 
 // ---------------------------------------------------------------------------
 // WebhookSettings
@@ -91,27 +94,157 @@ struct AppState {
     tx: mpsc::UnboundedSender<ChannelMessage>,
 }
 
-async fn handle_inbound(
-    State(state): State<AppState>,
-    Json(mut msg): Json<ChannelMessage>,
-) -> StatusCode {
-    if msg.channel.is_empty() {
-        msg.channel = "webhook".to_owned();
-    }
-    if msg.output_channel.is_empty() {
-        msg.output_channel = "webhook".to_owned();
-    }
-    if !msg.is_active {
-        msg.is_active = true;
-    }
+#[derive(Debug, Deserialize)]
+struct InboundWebhookMessage {
+    #[serde(flatten)]
+    message: ChannelMessage,
+    #[serde(default)]
+    media: Vec<InboundMediaPayload>,
+}
 
-    match state.tx.send(msg) {
+#[derive(Debug, Deserialize)]
+struct InboundMediaPayload {
+    #[serde(default)]
+    media_type: String,
+    #[serde(default)]
+    mime_type: String,
+    #[serde(default)]
+    filename: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    data_base64: Option<String>,
+}
+
+impl InboundWebhookMessage {
+    fn into_message(self) -> ChannelMessage {
+        let mut message = self.message;
+        message.media = restore_inbound_media(self.media);
+        apply_inbound_defaults(&mut message);
+        message
+    }
+}
+
+fn restore_inbound_media(media: Vec<InboundMediaPayload>) -> Vec<MediaItem> {
+    media
+        .into_iter()
+        .filter_map(restore_inbound_media_item)
+        .collect()
+}
+
+fn restore_inbound_media_item(item: InboundMediaPayload) -> Option<MediaItem> {
+    let media_type = parse_media_type(&item.media_type)?;
+    let data_fetcher = build_inbound_fetcher(&item)?;
+    Some(MediaItem {
+        media_type,
+        mime_type: inbound_mime_type(&item, media_type),
+        filename: item.filename.or(item.path.clone()),
+        data_fetcher: Some(data_fetcher),
+    })
+}
+
+fn build_inbound_fetcher(item: &InboundMediaPayload) -> Option<DataFetcher> {
+    item.data_base64
+        .as_deref()
+        .filter(|data| !data.is_empty())
+        .and_then(base64_data_fetcher)
+        .or_else(|| {
+            item.path
+                .as_deref()
+                .filter(|path| !path.is_empty())
+                .map(path_data_fetcher)
+        })
+}
+
+fn base64_data_fetcher(data: &str) -> Option<DataFetcher> {
+    let bytes = decode_base64_data(data)?;
+    Some(Arc::new(move || {
+        let bytes = bytes.clone();
+        Box::pin(async move { bytes })
+    }))
+}
+
+fn decode_base64_data(data: &str) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|error| warn!(%error, "webhook: invalid inbound media base64"))
+        .ok()
+}
+
+fn path_data_fetcher(path: &str) -> DataFetcher {
+    let path = path.to_owned();
+    Arc::new(move || {
+        let path = path.clone();
+        Box::pin(async move { tokio::fs::read(path).await.unwrap_or_default() })
+    })
+}
+
+fn parse_media_type(value: &str) -> Option<MediaType> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "image" | "img" | "photo" | "picture" | "sticker" => Some(MediaType::Image),
+        "audio" | "voice" => Some(MediaType::Audio),
+        "video" => Some(MediaType::Video),
+        "document" | "doc" | "file" => Some(MediaType::Document),
+        other => unsupported_media_type(other),
+    }
+}
+
+fn unsupported_media_type(value: &str) -> Option<MediaType> {
+    if !value.is_empty() {
+        warn!(
+            media_type = value,
+            "webhook: unsupported inbound media type"
+        );
+    }
+    None
+}
+
+fn inbound_mime_type(item: &InboundMediaPayload, media_type: MediaType) -> String {
+    if !item.mime_type.is_empty() {
+        return item.mime_type.clone();
+    }
+    default_mime_type(media_type).to_owned()
+}
+
+fn default_mime_type(media_type: MediaType) -> &'static str {
+    match media_type {
+        MediaType::Image => "image/jpeg",
+        MediaType::Audio => "audio/mpeg",
+        MediaType::Video => "video/mp4",
+        MediaType::Document => "application/octet-stream",
+    }
+}
+
+fn apply_inbound_defaults(message: &mut ChannelMessage) {
+    if message.channel.is_empty() {
+        message.channel = "webhook".to_owned();
+    }
+    if message.output_channel.is_empty() {
+        message.output_channel = "webhook".to_owned();
+    }
+    if !message.is_active {
+        message.is_active = true;
+    }
+}
+
+fn enqueue_inbound(
+    tx: &mpsc::UnboundedSender<ChannelMessage>,
+    message: ChannelMessage,
+) -> StatusCode {
+    match tx.send(message) {
         Ok(()) => StatusCode::OK,
-        Err(e) => {
-            error!(error = %e, "webhook: failed to enqueue inbound message");
+        Err(error) => {
+            error!(%error, "webhook: failed to enqueue inbound message");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+async fn handle_inbound(
+    State(state): State<AppState>,
+    Json(payload): Json<InboundWebhookMessage>,
+) -> StatusCode {
+    enqueue_inbound(&state.tx, payload.into_message())
 }
 
 // ---------------------------------------------------------------------------
@@ -143,14 +276,13 @@ pub(crate) fn build_webhook_payload(message: &ChannelMessage) -> serde_json::Val
         }
     }
 
-    if media_json.is_empty() {
-        if let Some(outbound) = message
+    if media_json.is_empty()
+        && let Some(outbound) = message
             .context
             .get("outbound_media")
             .and_then(|v| v.as_array())
-        {
-            media_json = outbound.clone();
-        }
+    {
+        media_json = outbound.clone();
     }
 
     if !media_json.is_empty() {
@@ -286,9 +418,10 @@ fn webhook_media_payload(message: &ChannelMessage) -> Option<serde_json::Value> 
 
 #[cfg(test)]
 mod webhook_payload_tests {
+    use base64::Engine;
     use serde_json::json;
 
-    use super::build_webhook_payload;
+    use super::{InboundWebhookMessage, build_webhook_payload};
     use crate::channels::message::{ChannelMessage, MediaItem, MediaType};
 
     #[test]
@@ -323,5 +456,93 @@ mod webhook_payload_tests {
         assert_eq!(payload["media"][0]["path"], "/tmp/b.jpg");
         assert_eq!(payload["media"][0]["media_type"], "image");
         assert_eq!(payload["media"][0]["mime_type"], "image/jpeg");
+    }
+
+    fn parse_inbound_payload(payload: serde_json::Value) -> ChannelMessage {
+        serde_json::from_value::<InboundWebhookMessage>(payload)
+            .unwrap()
+            .into_message()
+    }
+
+    fn inbound_message_payload(media: serde_json::Value) -> serde_json::Value {
+        json!({
+            "session_id": "s1",
+            "channel": "webhook",
+            "content": "hello",
+            "chat_id": "42",
+            "is_active": true,
+            "kind": "normal",
+            "context": {},
+            "output_channel": "webhook",
+            "media": media
+        })
+    }
+
+    fn defaulted_message_payload(media: serde_json::Value) -> serde_json::Value {
+        json!({
+            "session_id": "s1",
+            "channel": "",
+            "content": "hello",
+            "chat_id": "42",
+            "is_active": false,
+            "kind": "normal",
+            "context": {},
+            "output_channel": "",
+            "media": media
+        })
+    }
+
+    fn base64_image_payload(data_base64: String) -> serde_json::Value {
+        json!({
+            "media_type": "image",
+            "mime_type": "image/png",
+            "filename": "inline.png",
+            "data_base64": data_base64
+        })
+    }
+
+    fn path_image_payload(path: &str) -> serde_json::Value {
+        json!({
+            "media_type": "image",
+            "mime_type": "image/png",
+            "path": path
+        })
+    }
+
+    async fn fetch_media_bytes(message: &ChannelMessage, index: usize) -> Vec<u8> {
+        message.media[index].data_fetcher.as_ref().unwrap()().await
+    }
+
+    #[tokio::test]
+    async fn test_restore_inbound_media_builds_base64_and_path_fetchers() {
+        let tmp = tempfile::NamedTempFile::with_suffix(".png").unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        let path_bytes = vec![9_u8, 8, 7];
+        std::fs::write(tmp.path(), &path_bytes).unwrap();
+        let inline_bytes = vec![1_u8, 2, 3, 4];
+        let inline_b64 = base64::engine::general_purpose::STANDARD.encode(&inline_bytes);
+        let media = json!([base64_image_payload(inline_b64), path_image_payload(&path)]);
+        let message = parse_inbound_payload(inbound_message_payload(media));
+        let inline = fetch_media_bytes(&message, 0).await;
+        let from_path = fetch_media_bytes(&message, 1).await;
+        assert_eq!(message.media.len(), 2);
+        assert_eq!(message.media[0].media_type, MediaType::Image);
+        assert_eq!(message.media[0].filename.as_deref(), Some("inline.png"));
+        assert_eq!(inline, inline_bytes);
+        assert_eq!(from_path, path_bytes);
+    }
+
+    #[test]
+    fn test_restore_inbound_media_applies_defaults_and_ignores_unsupported_types() {
+        let media = json!([
+            { "media_type": "binary", "path": "/tmp/ignored.bin" },
+            { "media_type": "file", "path": "/tmp/doc.pdf" }
+        ]);
+        let message = parse_inbound_payload(defaulted_message_payload(media));
+        assert_eq!(message.channel, "webhook");
+        assert_eq!(message.output_channel, "webhook");
+        assert!(message.is_active);
+        assert_eq!(message.media.len(), 1);
+        assert_eq!(message.media[0].media_type, MediaType::Document);
     }
 }
