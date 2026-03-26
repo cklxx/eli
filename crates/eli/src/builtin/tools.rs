@@ -1336,40 +1336,135 @@ fn tool_help() -> Tool {
 // quit
 // ---------------------------------------------------------------------------
 
+fn build_message_send_envelope(
+    args: &Value,
+    state: &HashMap<String, Value>,
+) -> Result<Option<Value>, ConduitError> {
+    let text = optional_string_arg(args, "text")?.unwrap_or_default();
+    let media = message_send_media(args)?;
+    if text.trim().is_empty() && media.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(message_send_envelope(state, text, media)))
+}
+
+fn message_send_envelope(
+    state: &HashMap<String, Value>,
+    text: String,
+    media: Vec<crate::control_plane::OutboundMedia>,
+) -> Value {
+    let mut context = serde_json::Map::new();
+    crate::control_plane::insert_outbound_media(&mut context, &media);
+    serde_json::json!({
+        "content": text,
+        "session_id": state_str(state, "session_id"),
+        "channel": state_str(state, "channel"),
+        "chat_id": state_str(state, "chat_id"),
+        "output_channel": state_str(state, "output_channel"),
+        "context": context,
+    })
+}
+
+fn message_send_media(
+    args: &Value,
+) -> Result<Vec<crate::control_plane::OutboundMedia>, ConduitError> {
+    message_send_paths(args)?
+        .into_iter()
+        .map(message_send_media_item)
+        .collect()
+}
+
+fn message_send_paths(args: &Value) -> Result<Vec<String>, ConduitError> {
+    let mut paths = string_array_arg(args, "media_paths")?;
+    push_optional_string(args, "media_path", &mut paths)?;
+    push_optional_string(args, "image_path", &mut paths)?;
+    Ok(paths)
+}
+
+fn message_send_media_item(
+    path: String,
+) -> Result<crate::control_plane::OutboundMedia, ConduitError> {
+    let path_obj = Path::new(&path);
+    if !path_obj.exists() {
+        return Err(ConduitError::new(
+            ErrorKind::InvalidInput,
+            format!("media path not found: {path}"),
+        ));
+    }
+    Ok(crate::control_plane::OutboundMedia::from_path(path_obj))
+}
+
+fn push_optional_string(
+    args: &Value,
+    key: &str,
+    values: &mut Vec<String>,
+) -> Result<(), ConduitError> {
+    if let Some(value) = optional_string_arg(args, key)? {
+        values.push(value);
+    }
+    Ok(())
+}
+
+fn optional_string_arg(args: &Value, key: &str) -> Result<Option<String>, ConduitError> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(value) => Err(invalid_tool_arg(key, "a string", value)),
+    }
+}
+
+fn string_array_arg(args: &Value, key: &str) -> Result<Vec<String>, ConduitError> {
+    match args.get(key) {
+        None => Ok(Vec::new()),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| invalid_tool_arg(key, "an array of strings", value))
+            })
+            .collect(),
+        Some(value) => Err(invalid_tool_arg(key, "an array of strings", value)),
+    }
+}
+
+fn invalid_tool_arg(key: &str, expected: &str, value: &Value) -> ConduitError {
+    ConduitError::new(
+        ErrorKind::InvalidInput,
+        format!("argument '{key}' must be {expected}, got {value}"),
+    )
+}
+
+fn state_str<'a>(state: &'a HashMap<String, Value>, key: &str) -> &'a str {
+    state
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+}
+
 fn tool_message_send() -> Tool {
     Tool::with_context(
         "message.send",
-        "Send a message to the user immediately, without waiting for the turn to finish.\n\nUse this to acknowledge the user's request before starting long-running work, or to provide progress updates mid-task. The message is dispatched to the same channel the user sent from.",
+        "Send a message to the user immediately, without waiting for the turn to finish.\n\nUse this to acknowledge the user's request before starting long-running work, or to provide progress updates mid-task. The message is dispatched to the same channel the user sent from. Provide at least one of `text`, `media_path`, `media_paths`, or `image_path`.",
         serde_json::json!({
             "type": "object",
             "properties": {
-                "text": {"type": "string", "description": "The message text to send to the user."}
+                "text": {"type": "string", "description": "Optional message text to send to the user."},
+                "media_path": {"type": "string", "description": "Optional local media path to send along with the message on channels that support media."},
+                "media_paths": {"type": "array", "items": {"type": "string"}, "description": "Optional list of local media paths to send along with the message on channels that support media."},
+                "image_path": {"type": "string", "description": "Deprecated alias for media_path; kept for backward compatibility."}
             },
-            "required": ["text"]
+            "additionalProperties": false
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                let text = args
-                    .require_str_field("text")
-                    .map_err(invalid_input)?
-                    .to_owned();
-                if text.trim().is_empty() {
-                    return ok_val("skipped: empty message");
-                }
-
                 let ctx = ctx.ok_or_else(|| {
                     ConduitError::new(ErrorKind::InvalidInput, "no tool context available")
                 })?;
-                let state = &ctx.state;
-
-                let envelope = serde_json::json!({
-                    "content": text,
-                    "session_id": state.get("session_id").and_then(|v| v.as_str()).unwrap_or(""),
-                    "channel": state.get("channel").and_then(|v| v.as_str()).unwrap_or(""),
-                    "chat_id": state.get("chat_id").and_then(|v| v.as_str()).unwrap_or(""),
-                    "output_channel": state.get("output_channel").and_then(|v| v.as_str()).unwrap_or(""),
-                });
-
+                let Some(envelope) = build_message_send_envelope(&args, &ctx.state)? else {
+                    return ok_val("skipped: empty message");
+                };
                 crate::control_plane::dispatch_mid_turn(envelope).await;
                 ok_val("sent")
             })
@@ -1591,6 +1686,90 @@ mod tests {
             payload["params"],
             json!({"action": "create", "description": "domain field"})
         );
+    }
+
+    async fn test_message_send_supports_media_path_without_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("photo.png");
+        let path_arg = path.to_string_lossy().to_string();
+        std::fs::write(&path, b"png").unwrap();
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool = tool_message_send();
+
+        with_turn_context(message_send_turn_context(Arc::clone(&sent)), async move {
+            tool.run(
+                json!({"media_path": path_arg}),
+                Some(message_send_tool_context()),
+            )
+            .await
+            .unwrap();
+        })
+        .await;
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["content"], "");
+        assert_eq!(
+            sent[0]["context"]["outbound_media"][0]["path"].as_str(),
+            Some(path.to_str().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_message_send_supports_multiple_media_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = tmp.path().join("a.png");
+        let doc = tmp.path().join("b.pdf");
+        std::fs::write(&image, b"png").unwrap();
+        std::fs::write(&doc, b"pdf").unwrap();
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool = tool_message_send();
+
+        with_turn_context(message_send_turn_context(Arc::clone(&sent)), async move {
+            tool.run(
+                json!({"text": "files", "media_paths": [image.to_string_lossy(), doc.to_string_lossy()]}),
+                Some(message_send_tool_context()),
+            )
+            .await
+            .unwrap();
+        })
+        .await;
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(
+            sent[0]["context"]["outbound_media"][0]["media_type"],
+            "image"
+        );
+        assert_eq!(
+            sent[0]["context"]["outbound_media"][1]["media_type"],
+            "document"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_message_send_rejects_missing_media_path() {
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool = tool_message_send();
+        let err = with_turn_context(message_send_turn_context(sent), async move {
+            tool.run(
+                json!({"image_path": "/tmp/eli-missing.png"}),
+                Some(message_send_tool_context()),
+            )
+            .await
+            .unwrap_err()
+        })
+        .await;
+
+        assert!(err.message.contains("media path not found"));
+    }
+
+    #[test]
+    fn test_message_send_schema_avoids_top_level_combinators() {
+        let schema = tool_message_send().schema();
+        let parameters = &schema["function"]["parameters"];
+        assert_eq!(parameters["type"], "object");
+        assert!(parameters.get("anyOf").is_none());
+        assert!(parameters.get("oneOf").is_none());
     }
 
     #[tokio::test]

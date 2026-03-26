@@ -7,12 +7,15 @@ media_paths mechanism, and verify the model actually sees the image content.
 import os
 import base64
 import tempfile
-import pytest
 from conftest import (
-    run_eli, switch_profile,
-    RED_PNG, BLUE_PNG,
-    RED_KEYWORDS, BLUE_KEYWORDS,
-    assert_response_contains, assert_nonempty,
+    BLUE_KEYWORDS,
+    BLUE_PNG,
+    RED_KEYWORDS,
+    RED_PNG,
+    assert_nonempty,
+    assert_response_contains,
+    require_profile,
+    run_eli,
 )
 
 
@@ -32,7 +35,7 @@ class TestSingleImage:
     """Send one image + text prompt, verify the model describes it correctly."""
 
     def test_openai_red_image(self):
-        switch_profile("openai")
+        require_profile("openai")
         img = _write_temp_png(RED_PNG)
         try:
             r = run_eli("run", f"What color is the image at {img}? Answer in one word.")
@@ -44,7 +47,7 @@ class TestSingleImage:
             os.unlink(img)
 
     def test_anthropic_red_image(self):
-        switch_profile("anthropic")
+        require_profile("anthropic")
         img = _write_temp_png(RED_PNG)
         try:
             r = run_eli("run", f"What color is the image at {img}? Answer in one word.")
@@ -56,7 +59,7 @@ class TestSingleImage:
             os.unlink(img)
 
     def test_openai_blue_image(self):
-        switch_profile("openai")
+        require_profile("openai")
         img = _write_temp_png(BLUE_PNG)
         try:
             r = run_eli("run", f"What color is the image at {img}? Answer in one word.")
@@ -77,7 +80,7 @@ class TestImageOnly:
 
     def test_openai_describe_blue(self):
         """Send blue image, ask to describe — should NOT say red."""
-        switch_profile("openai")
+        require_profile("openai")
         img = _write_temp_png(BLUE_PNG)
         try:
             r = run_eli("run", f"Describe the image at {img} in one sentence.")
@@ -95,7 +98,7 @@ class TestImageOnly:
             os.unlink(img)
 
     def test_anthropic_describe_blue(self):
-        switch_profile("anthropic")
+        require_profile("anthropic")
         img = _write_temp_png(BLUE_PNG)
         try:
             r = run_eli("run", f"Describe the image at {img} in one sentence.")
@@ -114,7 +117,7 @@ class TestMultiImage:
     """Send multiple images and verify the model sees both."""
 
     def test_openai_two_colors(self):
-        switch_profile("openai")
+        require_profile("openai")
         red = _write_temp_png(RED_PNG)
         blue = _write_temp_png(BLUE_PNG)
         try:
@@ -132,7 +135,7 @@ class TestMultiImage:
             os.unlink(blue)
 
     def test_anthropic_two_colors(self):
-        switch_profile("anthropic")
+        require_profile("anthropic")
         red = _write_temp_png(RED_PNG)
         blue = _write_temp_png(BLUE_PNG)
         try:

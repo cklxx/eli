@@ -332,8 +332,11 @@ impl EliHookSpec for BuiltinImpl {
         if let Some(parts) = message.get("media_parts").and_then(|v| v.as_array())
             && !parts.is_empty()
         {
-            let mut content =
-                vec![serde_json::json!({"type": "text", "text": text_prompt.as_text()})];
+            let mut content = Vec::new();
+            let text = text_prompt.as_text();
+            if !text.trim().is_empty() {
+                content.push(serde_json::json!({"type": "text", "text": text}));
+            }
             content.extend(parts.iter().cloned());
             return Some(PromptValue::Parts(content));
         }
@@ -871,6 +874,36 @@ mod tests {
                 assert_eq!(parts[2]["mime_type"], "image/jpeg");
             }
             PromptValue::Text(_) => panic!("expected Parts with multiple images"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_user_prompt_image_only_omits_empty_text_part() {
+        let builtin = BuiltinImpl::new();
+        let envelope = serde_json::json!({
+            "session_id": "test",
+            "channel": "telegram",
+            "chat_id": "123",
+            "content": "",
+            "context": {},
+            "kind": "normal",
+            "output_channel": "telegram",
+            "media_parts": [
+                {"type": "image_base64", "mime_type": "image/png", "data": "X"}
+            ]
+        });
+
+        let prompt = builtin
+            .build_user_prompt(&envelope, "test", &HashMap::new())
+            .await
+            .unwrap();
+
+        match prompt {
+            PromptValue::Parts(parts) => {
+                assert_eq!(parts.len(), 1);
+                assert_eq!(parts[0]["type"], "image_base64");
+            }
+            PromptValue::Text(_) => panic!("expected Parts for image-only prompts"),
         }
     }
 

@@ -697,6 +697,42 @@ mod tests {
     }
 
     #[test]
+    fn test_split_messages_for_responses_keeps_multimodal_parts() {
+        let messages = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "compare"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,A"}},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,B"}}
+            ]
+        })];
+        let (_, items) = LLMCore::split_messages_for_responses(&messages);
+        assert_eq!(items.len(), 1);
+        let content = items[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[2]["type"], "input_image");
+        assert_eq!(content[1]["image_url"], "data:image/png;base64,A");
+    }
+
+    #[test]
+    fn test_split_messages_for_responses_keeps_image_only_message() {
+        let messages = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,ONLY"}}
+            ]
+        })];
+        let (_, items) = LLMCore::split_messages_for_responses(&messages);
+        assert_eq!(items.len(), 1);
+        let content = items[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "input_image");
+        assert_eq!(content[0]["image_url"], "data:image/png;base64,ONLY");
+    }
+
+    #[test]
     fn test_convert_tools_for_responses() {
         let tools = vec![json!({
             "type": "function",

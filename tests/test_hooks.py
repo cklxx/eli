@@ -11,8 +11,7 @@ import json
 import os
 from pathlib import Path
 
-import pytest
-from conftest import run_eli, switch_profile
+from conftest import require_profile, run_eli, unique_name
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +46,21 @@ def read_tape_events(session_id: str) -> list[dict]:
         if entry.get("kind") == "event":
             events.append(entry)
     return events
+
+
+def remove_tape(session_id: str):
+    name = tape_name_for(session_id)
+    tape_file = TAPES_DIR / f"{name}.jsonl"
+    spill_dir = TAPES_DIR / f"{name}.d"
+    if tape_file.exists():
+        tape_file.unlink()
+    if spill_dir.exists():
+        import shutil
+        shutil.rmtree(spill_dir)
+
+
+def make_session_id(label: str) -> str:
+    return f"cli:{unique_name(label)}"
 
 
 def find_events_by_name(events: list[dict], name: str) -> list[dict]:
@@ -108,70 +122,74 @@ class TestSaveState:
 
     def test_agent_run_event_written(self):
         """After eli run, an agent.run event should appear in the tape."""
-        session_id = "cli:test_save_state_run"
-        switch_profile("openai")
-        r = run_eli(
-            "run", "Reply with one word: banana",
-            "--session-id", session_id,
-        )
-        assert r.ok, f"eli run failed: {r.stderr}"
+        session_id = make_session_id("save_state_run")
+        require_profile("openai")
+        try:
+            r = run_eli(
+                "run", "Reply with one word: banana",
+                "--session-id", session_id,
+            )
+            assert r.ok, f"eli run failed: {r.stderr}"
 
-        events = read_tape_events(session_id)
-        run_events = find_events_by_name(events, "agent.run")
-        assert len(run_events) > 0, (
-            f"No agent.run event found in tape for session {session_id}. "
-            f"Total events: {len(events)}"
-        )
+            events = read_tape_events(session_id)
+            run_events = find_events_by_name(events, "agent.run")
+            assert len(run_events) > 0, (
+                f"No agent.run event found in tape for session {session_id}. "
+                f"Total events: {len(events)}"
+            )
 
-        # Verify event structure
-        last_run = run_events[-1]
-        data = last_run["payload"]["data"]
-        assert "elapsed_ms" in data, "Missing elapsed_ms"
-        assert "status" in data, "Missing status"
-        assert data["status"] == "ok", f"Expected status=ok, got {data['status']}"
-        assert "usage" in data, "Missing usage"
-        usage = data["usage"]
-        assert usage["input_tokens"] > 0, "input_tokens should be > 0"
-        assert usage["output_tokens"] > 0, "output_tokens should be > 0"
-        assert usage["total_tokens"] > 0, "total_tokens should be > 0"
-        assert usage["rounds"] >= 1, "rounds should be >= 1"
+            last_run = run_events[-1]
+            data = last_run["payload"]["data"]
+            assert "elapsed_ms" in data, "Missing elapsed_ms"
+            assert "status" in data, "Missing status"
+            assert data["status"] == "ok", f"Expected status=ok, got {data['status']}"
+            assert "usage" in data, "Missing usage"
+            usage = data["usage"]
+            assert usage["input_tokens"] > 0, "input_tokens should be > 0"
+            assert usage["output_tokens"] > 0, "output_tokens should be > 0"
+            assert usage["total_tokens"] > 0, "total_tokens should be > 0"
+            assert usage["rounds"] >= 1, "rounds should be >= 1"
+        finally:
+            remove_tape(session_id)
 
     def test_agent_run_start_event_written(self):
         """agent.run.start event should appear before agent.run."""
-        session_id = "cli:test_save_state_start"
-        switch_profile("openai")
-        r = run_eli(
-            "run", "Reply with one word: cherry",
-            "--session-id", session_id,
-        )
-        assert r.ok, f"eli run failed: {r.stderr}"
+        session_id = make_session_id("save_state_start")
+        require_profile("openai")
+        try:
+            r = run_eli(
+                "run", "Reply with one word: cherry",
+                "--session-id", session_id,
+            )
+            assert r.ok, f"eli run failed: {r.stderr}"
 
-        events = read_tape_events(session_id)
-        start_events = find_events_by_name(events, "agent.run.start")
-        run_events = find_events_by_name(events, "agent.run")
+            events = read_tape_events(session_id)
+            start_events = find_events_by_name(events, "agent.run.start")
+            run_events = find_events_by_name(events, "agent.run")
 
-        assert len(start_events) > 0, "No agent.run.start event"
-        assert len(run_events) > 0, "No agent.run event"
-
-        # start should contain the prompt
-        last_start = start_events[-1]
-        assert "prompt" in last_start["payload"]["data"]
+            assert len(start_events) > 0, "No agent.run.start event"
+            assert len(run_events) > 0, "No agent.run event"
+            assert "prompt" in start_events[-1]["payload"]["data"]
+        finally:
+            remove_tape(session_id)
 
     def test_multiple_turns_accumulate_events(self):
         """Two turns on the same session should produce two agent.run events."""
-        session_id = "cli:test_save_state_multi"
-        switch_profile("openai")
+        session_id = make_session_id("save_state_multi")
+        require_profile("openai")
+        try:
+            r1 = run_eli("run", "Say apple", "--session-id", session_id)
+            assert r1.ok
+            r2 = run_eli("run", "Say orange", "--session-id", session_id)
+            assert r2.ok
 
-        r1 = run_eli("run", "Say apple", "--session-id", session_id)
-        assert r1.ok
-        r2 = run_eli("run", "Say orange", "--session-id", session_id)
-        assert r2.ok
-
-        events = read_tape_events(session_id)
-        run_events = find_events_by_name(events, "agent.run")
-        assert len(run_events) >= 2, (
-            f"Expected >= 2 agent.run events, got {len(run_events)}"
-        )
+            events = read_tape_events(session_id)
+            run_events = find_events_by_name(events, "agent.run")
+            assert len(run_events) == 2, (
+                f"Expected exactly 2 agent.run events, got {len(run_events)}"
+            )
+        finally:
+            remove_tape(session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +201,7 @@ class TestDispatchOutbound:
 
     def test_cli_output_appears(self):
         """Model output should appear in stdout via dispatch_outbound hook."""
-        switch_profile("openai")
+        require_profile("openai")
         r = run_eli("run", "Reply with exactly: dispatch_test_ok")
         assert r.ok, f"Failed: {r.stderr}"
         # Output should contain the model response (via hook, not manual print)
@@ -191,7 +209,7 @@ class TestDispatchOutbound:
 
     def test_usage_on_stderr(self):
         """Token usage should appear on stderr (separate from dispatch)."""
-        switch_profile("openai")
+        require_profile("openai")
         r = run_eli("run", "Reply with one word: test")
         assert r.ok
         assert "tokens:" in r.stderr, (
@@ -202,6 +220,6 @@ class TestDispatchOutbound:
         """Empty/whitespace model output should not produce stdout lines."""
         # This is hard to trigger intentionally with a real LLM,
         # so we just verify the run doesn't crash.
-        switch_profile("openai")
+        require_profile("openai")
         r = run_eli("run", "Reply with one word: ok")
         assert r.ok

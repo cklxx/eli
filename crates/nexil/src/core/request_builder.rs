@@ -25,11 +25,8 @@ fn convert_message_to_responses_items(message: &Value) -> Vec<Value> {
 }
 
 fn convert_user_or_assistant_items(message: &Value, role: &str) -> Vec<Value> {
-    let content_item = message
-        .get("content")
-        .and_then(|c| c.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| serde_json::json!({"role": role, "content": s, "type": "message"}));
+    let content_item = responses_message_content(message, role)
+        .map(|content| serde_json::json!({"role": role, "content": content, "type": "message"}));
 
     let tool_items = (role == "assistant")
         .then(|| message.get("tool_calls").and_then(|tc| tc.as_array()))
@@ -43,6 +40,57 @@ fn convert_user_or_assistant_items(message: &Value, role: &str) -> Vec<Value> {
         });
 
     content_item.into_iter().chain(tool_items).collect()
+}
+
+fn responses_message_content(message: &Value, role: &str) -> Option<Value> {
+    match message.get("content") {
+        Some(Value::String(text)) if !text.is_empty() => Some(Value::String(text.clone())),
+        Some(Value::Array(parts)) => {
+            let normalized: Vec<Value> = parts
+                .iter()
+                .filter_map(|part| normalize_responses_content_part(part, role))
+                .collect();
+            (!normalized.is_empty()).then_some(Value::Array(normalized))
+        }
+        _ => None,
+    }
+}
+
+fn normalize_responses_content_part(part: &Value, role: &str) -> Option<Value> {
+    match part.get("type").and_then(|v| v.as_str()) {
+        Some("text") => normalize_responses_text_part(part, role),
+        Some("image_url") => normalize_responses_image_url_part(part),
+        Some("image_base64") => normalize_responses_base64_image_part(part),
+        _ => Some(part.clone()),
+    }
+}
+
+fn normalize_responses_text_part(part: &Value, role: &str) -> Option<Value> {
+    let text = part.get("text").and_then(|v| v.as_str())?;
+    let part_type = if role == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    };
+    Some(serde_json::json!({"type": part_type, "text": text}))
+}
+
+fn normalize_responses_image_url_part(part: &Value) -> Option<Value> {
+    let image_url = part.get("image_url")?;
+    let url = image_url
+        .as_str()
+        .or_else(|| image_url.get("url").and_then(|value| value.as_str()))?;
+    Some(serde_json::json!({"type": "input_image", "image_url": url}))
+}
+
+fn normalize_responses_base64_image_part(part: &Value) -> Option<Value> {
+    let data = part.get("data").and_then(|v| v.as_str())?;
+    let mime = part
+        .get("mime_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("image/jpeg");
+    let url = format!("data:{mime};base64,{data}");
+    Some(serde_json::json!({"type": "input_image", "image_url": url}))
 }
 
 fn tool_call_to_function_call(tc: &Value, index: usize) -> Option<Value> {

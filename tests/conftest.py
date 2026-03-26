@@ -7,6 +7,7 @@ import base64
 import struct
 import zlib
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,6 +53,14 @@ class CliResult:
                 continue
             # Log lines start with timestamp or [cli:...]
             if stripped.startswith("\x1b[") or stripped.startswith("[cli:"):
+                continue
+            if (
+                len(stripped) > 20
+                and stripped[:4].isdigit()
+                and stripped[4] == "-"
+                and stripped[7] == "-"
+                and stripped[10] == "T"
+            ):
                 continue
             lines.append(stripped)
         return "\n".join(lines)
@@ -108,7 +117,6 @@ def get_profiles() -> dict:
     """Parse eli status output to get available profiles."""
     result = run_eli("status")
     profiles = {}
-    active = None
     in_profiles = False
     for line in result.stdout.splitlines():
         line = line.strip()
@@ -121,8 +129,6 @@ def get_profiles() -> dict:
             # e.g. "openai * (provider: openai, model: openai:gpt-5.4)"
             is_active = " * " in line or line.endswith(" *")
             name = line.split("(")[0].replace("*", "").strip()
-            if is_active:
-                active = name
             profiles[name] = {"active": is_active}
     return profiles
 
@@ -130,6 +136,23 @@ def get_profiles() -> dict:
 def switch_profile(name: str) -> CliResult:
     """Switch eli to a different provider profile."""
     return run_eli("use", name)
+
+
+def require_profile(name: str) -> CliResult:
+    """Switch to a known profile and verify the CLI reports it as active."""
+    result = switch_profile(name)
+    assert result.ok, f"failed to switch to profile '{name}': {result.stderr}"
+    profiles = get_profiles()
+    assert profiles.get(name, {}).get("active"), (
+        f"profile '{name}' is not active after switch; status output was:\n"
+        f"{run_eli('status').stdout}"
+    )
+    return result
+
+
+def unique_name(prefix: str) -> str:
+    """Return a stable-ish unique identifier for test sessions/chats/files."""
+    return f"{prefix}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
 
 
 # ---------------------------------------------------------------------------

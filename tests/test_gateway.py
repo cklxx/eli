@@ -10,14 +10,15 @@ Architecture:
   Python test ← GET /test/responses ← sidecar mock plugin captures response
 
 Requires:
-  1. eli gateway running (ELI_WEBHOOK_PORT=3100)
-  2. test sidecar running (bun sidecar/test/start-test.ts)
+  1. eli CLI available on PATH
+  2. bun available on PATH
 """
 
 import base64
 import json
 import os
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -28,25 +29,30 @@ import pytest
 import requests
 
 from conftest import (
-    RED_PNG, BLUE_PNG,
-    RED_KEYWORDS, BLUE_KEYWORDS,
+    BLUE_KEYWORDS,
+    BLUE_PNG,
+    ELI_BIN,
     MAX_VISION_RETRIES,
-    assert_response_contains, assert_nonempty,
-    switch_profile,
+    RED_KEYWORDS,
+    RED_PNG,
+    assert_nonempty,
+    assert_response_contains,
+    require_profile,
+    unique_name,
 )
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
-WEBHOOK_PORT = int(os.environ.get("ELI_WEBHOOK_PORT", "3100"))
-SIDECAR_PORT = int(os.environ.get("SIDECAR_PORT", "3201"))
-TEST_PORT = int(os.environ.get("TEST_PORT", "3211"))
+WEBHOOK_PORT = 0
+SIDECAR_PORT = 0
+TEST_PORT = 0
 
-TEST_INBOUND_URL = f"http://127.0.0.1:{TEST_PORT}/test/inbound"
-TEST_RESPONSES_URL = f"http://127.0.0.1:{TEST_PORT}/test/responses"
-TEST_CLEAR_URL = f"http://127.0.0.1:{TEST_PORT}/test/clear"
-TEST_HEALTH_URL = f"http://127.0.0.1:{TEST_PORT}/test/health"
+TEST_INBOUND_URL = ""
+TEST_RESPONSES_URL = ""
+TEST_CLEAR_URL = ""
+TEST_HEALTH_URL = ""
 
 STARTUP_TIMEOUT = 15
 LLM_TIMEOUT = 60
@@ -56,11 +62,32 @@ POLL_INTERVAL = 0.5
 RESULTS_DIR = Path("test-results")
 
 
+def configured_port(env_name: str) -> int:
+    value = os.environ.get(env_name)
+    if value:
+        return int(value)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def configure_ports(webhook_port: int, sidecar_port: int, test_port: int):
+    global WEBHOOK_PORT, SIDECAR_PORT, TEST_PORT
+    global TEST_INBOUND_URL, TEST_RESPONSES_URL, TEST_CLEAR_URL, TEST_HEALTH_URL
+    WEBHOOK_PORT = webhook_port
+    SIDECAR_PORT = sidecar_port
+    TEST_PORT = test_port
+    TEST_INBOUND_URL = f"http://127.0.0.1:{TEST_PORT}/test/inbound"
+    TEST_RESPONSES_URL = f"http://127.0.0.1:{TEST_PORT}/test/responses"
+    TEST_CLEAR_URL = f"http://127.0.0.1:{TEST_PORT}/test/clear"
+    TEST_HEALTH_URL = f"http://127.0.0.1:{TEST_PORT}/test/health"
+
+
 # ---------------------------------------------------------------------------
 # Structured trace logging
 # ---------------------------------------------------------------------------
 
-class TestTrace:
+class GatewayTrace:
     """Structured trace for a single test execution."""
 
     def __init__(self, test_name: str, provider: str):
@@ -115,104 +142,124 @@ class TestTrace:
 # Fixtures — service lifecycle
 # ---------------------------------------------------------------------------
 
+def start_logged_process(
+    cmd: list[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    log_name: str,
+) -> tuple[subprocess.Popen[str], object, Path]:
+    RESULTS_DIR.mkdir(exist_ok=True)
+    log_path = RESULTS_DIR / log_name
+    log_file = open(log_path, "w")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return proc, log_file, log_path
+
+
+def wait_for_sidecar_ready():
+    deadline = time.time() + STARTUP_TIMEOUT
+    while time.time() < deadline:
+        try:
+            r = requests.get(TEST_HEALTH_URL, timeout=1)
+            if r.ok and "test" in r.json().get("channels", []):
+                return
+        except requests.ConnectionError:
+            pass
+        time.sleep(0.3)
+    raise RuntimeError("Test sidecar failed to start")
+
+
+def wait_for_gateway_ready():
+    deadline = time.time() + STARTUP_TIMEOUT
+    while time.time() < deadline:
+        try:
+            r = requests.get(TEST_HEALTH_URL, timeout=1)
+            if r.ok and r.json().get("gateway") is True:
+                return
+        except requests.ConnectionError:
+            pass
+        time.sleep(0.3)
+    raise RuntimeError("Gateway failed to start")
+
+
+def stop_process(proc: subprocess.Popen[str]):
+    if proc.poll() is not None:
+        return
+    proc.send_signal(signal.SIGINT)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=3)
+
+
 @pytest.fixture(scope="module")
 def services():
-    """Start test sidecar + eli gateway, yield when both are ready, tear down after.
-
-    Order: sidecar first (needs to own :3201), then gateway (webhook :3100).
-    Gateway's built-in sidecar is disabled by temporarily hiding the sidecar/ dir.
-    """
-    procs = []
-    sidecar_dir = Path("sidecar")
-    sidecar_bak = Path("sidecar.bak")
-    moved = False
+    """Start test sidecar + eli gateway, yield when both are ready, tear down after."""
+    procs: list[subprocess.Popen[str]] = []
+    logs = []
+    gateway_dir = tempfile.TemporaryDirectory(prefix="eli-gateway-e2e-")
+    gateway_cwd = Path(gateway_dir.name)
 
     try:
-        # 1. Start test sidecar
+        configure_ports(
+            configured_port("ELI_WEBHOOK_PORT"),
+            configured_port("SIDECAR_PORT"),
+            configured_port("TEST_PORT"),
+        )
         sidecar_env = {
             **os.environ,
             "SIDECAR_ELI_URL": f"http://127.0.0.1:{WEBHOOK_PORT}",
+            "ELI_WEBHOOK_PORT": str(WEBHOOK_PORT),
             "SIDECAR_PORT": str(SIDECAR_PORT),
             "TEST_PORT": str(TEST_PORT),
         }
-        services = subprocess.Popen(
+        sidecar_proc, sidecar_log, sidecar_log_path = start_logged_process(
             ["bun", "sidecar/test/start-test.ts"],
             env=sidecar_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            cwd=Path.cwd(),
+            log_name="gateway-sidecar.log",
         )
-        procs.append(services)
+        procs.append(sidecar_proc)
+        logs.append(sidecar_log)
+        wait_for_sidecar_ready()
 
-        # Wait for sidecar test endpoints
-        deadline = time.time() + STARTUP_TIMEOUT
-        while time.time() < deadline:
-            try:
-                r = requests.get(TEST_HEALTH_URL, timeout=1)
-                if r.ok and "test" in r.json().get("channels", []):
-                    break
-            except requests.ConnectionError:
-                pass
-            time.sleep(0.3)
-        else:
-            raise RuntimeError("Test sidecar failed to start")
-
-        # 2. Hide sidecar dir so gateway doesn't start its own
-        if sidecar_dir.exists():
-            sidecar_dir.rename(sidecar_bak)
-            moved = True
-
-        # 3. Start gateway with webhook pointing to our test sidecar
-        gw_env = {
+        gateway_env = {
             **os.environ,
             "ELI_WEBHOOK_PORT": str(WEBHOOK_PORT),
             "ELI_WEBHOOK_CALLBACK_URL": f"http://127.0.0.1:{SIDECAR_PORT}/outbound",
             "ELI_TELEGRAM_TOKEN": "",
+            "ELI_SIDECAR_DIR": str(gateway_cwd / "missing-sidecar"),
         }
-        gw_proc = subprocess.Popen(
-            ["eli", "gateway"],
-            env=gw_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        gw_proc, gw_log, gw_log_path = start_logged_process(
+            [ELI_BIN, "gateway"],
+            env=gateway_env,
+            cwd=gateway_cwd,
+            log_name="gateway-eli.log",
         )
         procs.append(gw_proc)
+        logs.append(gw_log)
+        wait_for_gateway_ready()
 
-        # Restore sidecar dir immediately after gateway starts
-        if moved:
-            sidecar_bak.rename(sidecar_dir)
-            moved = False
-
-        # Wait for gateway webhook
-        deadline = time.time() + STARTUP_TIMEOUT
-        while time.time() < deadline:
-            try:
-                requests.post(
-                    f"http://127.0.0.1:{WEBHOOK_PORT}/inbound",
-                    json={"session_id": "probe", "channel": "test", "content": "",
-                          "chat_id": "probe", "is_active": False, "kind": "normal",
-                          "context": {}, "output_channel": ""},
-                    timeout=1,
-                )
-                break
-            except requests.ConnectionError:
-                time.sleep(0.3)
-        else:
-            raise RuntimeError("Gateway failed to start")
-
-        yield {"gateway": gw_proc, "sidecar": services}
-
+        yield {
+            "gateway": gw_proc,
+            "gateway_log": gw_log_path,
+            "sidecar": sidecar_proc,
+            "sidecar_log": sidecar_log_path,
+        }
     finally:
-        # Restore sidecar dir if still moved
-        if moved and sidecar_bak.exists():
-            sidecar_bak.rename(sidecar_dir)
-
-        # Kill all procs
         for proc in reversed(procs):
-            proc.send_signal(signal.SIGINT)
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=3)
+            stop_process(proc)
+        for log in logs:
+            log.close()
+        gateway_dir.cleanup()
 
 
 @pytest.fixture(autouse=True)
@@ -229,8 +276,6 @@ def _clear_responses(services):
 # Helpers
 # ---------------------------------------------------------------------------
 
-_msg_counter = 0
-
 def send_envelope(
     text: str,
     channel: str = "test",
@@ -243,10 +288,8 @@ def send_envelope(
     **extra,
 ) -> dict:
     """Send an InboundEnvelope to the test sidecar."""
-    global _msg_counter
-    _msg_counter += 1
     if chat_id is None:
-        chat_id = f"test_{_msg_counter}_{int(time.time())}"
+        chat_id = unique_name("gateway_chat")
 
     envelope = {
         "channel": channel,
@@ -267,8 +310,13 @@ def send_envelope(
     return envelope
 
 
-def wait_for_response(timeout: float = LLM_TIMEOUT) -> dict | None:
-    """Poll /test/responses until a response appears."""
+def wait_for_response(
+    expected_to: str,
+    *,
+    sent_after_ms: int,
+    timeout: float = LLM_TIMEOUT,
+) -> dict | None:
+    """Poll /test/responses until the expected response appears."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -276,20 +324,31 @@ def wait_for_response(timeout: float = LLM_TIMEOUT) -> dict | None:
             if r.ok:
                 data = r.json()
                 responses = data.get("responses", [])
-                if responses:
-                    return responses[-1]
+                matches = [
+                    response
+                    for response in responses
+                    if response.get("to") == expected_to
+                    and response.get("timestamp", 0) >= sent_after_ms
+                ]
+                if matches:
+                    return matches[-1]
         except requests.ConnectionError:
             pass
         time.sleep(POLL_INTERVAL)
     return None
 
 
-def send_and_wait(text: str, timeout: float = LLM_TIMEOUT, **kwargs) -> str:
-    """Send envelope and wait for response. Returns response text."""
+def send_and_wait(text: str, timeout: float = LLM_TIMEOUT, **kwargs) -> tuple[dict, dict]:
+    """Send envelope and wait for the correlated response."""
+    sent_after_ms = int(time.time() * 1000)
     envelope = send_envelope(text, **kwargs)
-    msg = wait_for_response(timeout=timeout)
+    msg = wait_for_response(
+        envelope["chatId"],
+        sent_after_ms=sent_after_ms,
+        timeout=timeout,
+    )
     assert msg is not None, f"No response within {timeout}s for: {text[:80]}"
-    return msg.get("text", "")
+    return envelope, msg
 
 
 def write_temp_image(b64_data: str) -> str:
@@ -308,10 +367,13 @@ class TestGatewayText:
     """Text messages through the complete sidecar → eli → sidecar pipeline."""
 
     def test_openai_text_e2e(self, services):
-        trace = TestTrace("test_openai_text_e2e", "openai")
-        switch_profile("openai")
+        trace = GatewayTrace("test_openai_text_e2e", "openai")
+        require_profile("openai")
         try:
-            response = send_and_wait("Reply with exactly: hello_e2e")
+            envelope, msg = send_and_wait("Reply with exactly: hello_e2e")
+            response = msg.get("text", "")
+            trace.inbound_envelope = envelope
+            trace.outbound_response = msg
             assert_nonempty(response, "gateway openai text")
             assert "hello" in response.lower() or "e2e" in response.lower()
             trace.finish("PASS")
@@ -320,10 +382,13 @@ class TestGatewayText:
             raise
 
     def test_anthropic_text_e2e(self, services):
-        trace = TestTrace("test_anthropic_text_e2e", "anthropic")
-        switch_profile("anthropic")
+        trace = GatewayTrace("test_anthropic_text_e2e", "anthropic")
+        require_profile("anthropic")
         try:
-            response = send_and_wait("What is 3+3? Reply with just the number.")
+            envelope, msg = send_and_wait("What is 3+3? Reply with just the number.")
+            response = msg.get("text", "")
+            trace.inbound_envelope = envelope
+            trace.outbound_response = msg
             assert_nonempty(response, "gateway anthropic text")
             assert "6" in response
             trace.finish("PASS")
@@ -332,10 +397,13 @@ class TestGatewayText:
             raise
 
     def test_unicode_content(self, services):
-        trace = TestTrace("test_unicode_content", "openai")
-        switch_profile("openai")
+        trace = GatewayTrace("test_unicode_content", "openai")
+        require_profile("openai")
         try:
-            response = send_and_wait("用中文说：你好")
+            envelope, msg = send_and_wait("用中文说：你好")
+            response = msg.get("text", "")
+            trace.inbound_envelope = envelope
+            trace.outbound_response = msg
             assert_nonempty(response, "gateway unicode")
             trace.finish("PASS")
         except Exception as e:
@@ -344,18 +412,21 @@ class TestGatewayText:
 
     def test_envelope_fields_preserved(self, services):
         """Verify sender/chat metadata survives the pipeline."""
-        trace = TestTrace("test_envelope_fields_preserved", "openai")
-        switch_profile("openai")
+        trace = GatewayTrace("test_envelope_fields_preserved", "openai")
+        require_profile("openai")
         try:
-            send_envelope(
+            sent_after_ms = int(time.time() * 1000)
+            envelope = send_envelope(
                 "Reply with: ok",
                 sender_id="user_42",
                 sender_name="Alice",
                 chat_type="group",
                 chat_id="group_chat_1",
             )
-            msg = wait_for_response()
+            trace.inbound_envelope = envelope
+            msg = wait_for_response("group_chat_1", sent_after_ms=sent_after_ms)
             assert msg is not None, "No response"
+            trace.outbound_response = msg
             # The response should be routed back to the mock plugin
             assert msg.get("to") is not None, f"Missing 'to' in response: {msg}"
             trace.finish("PASS")
@@ -376,16 +447,19 @@ class TestGatewayVision:
     """
 
     def test_openai_image_e2e(self, services):
-        trace = TestTrace("test_openai_image_e2e", "openai")
-        switch_profile("openai")
+        trace = GatewayTrace("test_openai_image_e2e", "openai")
+        require_profile("openai")
         img = write_temp_image(RED_PNG)
         try:
             last_response = ""
             for attempt in range(MAX_VISION_RETRIES + 1):
-                last_response = send_and_wait(
+                envelope, msg = send_and_wait(
                     "What color is this solid-color image? Reply with one color word only.",
                     media_paths=[img],
                 )
+                last_response = msg.get("text", "")
+                trace.inbound_envelope = envelope
+                trace.outbound_response = msg
                 if any(kw in last_response.lower() for kw in RED_KEYWORDS):
                     break
             assert_nonempty(last_response, "gateway openai vision")
@@ -398,14 +472,17 @@ class TestGatewayVision:
             os.unlink(img)
 
     def test_anthropic_image_e2e(self, services):
-        trace = TestTrace("test_anthropic_image_e2e", "anthropic")
-        switch_profile("anthropic")
+        trace = GatewayTrace("test_anthropic_image_e2e", "anthropic")
+        require_profile("anthropic")
         img = write_temp_image(BLUE_PNG)
         try:
-            response = send_and_wait(
+            envelope, msg = send_and_wait(
                 "What color is this image? One word.",
                 media_paths=[img],
             )
+            response = msg.get("text", "")
+            trace.inbound_envelope = envelope
+            trace.outbound_response = msg
             assert_nonempty(response, "gateway anthropic vision")
             assert_response_contains(response, BLUE_KEYWORDS, "gateway anthropic blue")
             trace.finish("PASS")
@@ -416,17 +493,20 @@ class TestGatewayVision:
             os.unlink(img)
 
     def test_multi_image_e2e(self, services):
-        trace = TestTrace("test_multi_image_e2e", "openai")
-        switch_profile("openai")
+        trace = GatewayTrace("test_multi_image_e2e", "openai")
+        require_profile("openai")
         red = write_temp_image(RED_PNG)
         blue = write_temp_image(BLUE_PNG)
         try:
             last_response = ""
             for attempt in range(MAX_VISION_RETRIES + 1):
-                last_response = send_and_wait(
+                envelope, msg = send_and_wait(
                     "These are two solid-color images. Name the two colors. Reply briefly.",
                     media_paths=[red, blue],
                 )
+                last_response = msg.get("text", "")
+                trace.inbound_envelope = envelope
+                trace.outbound_response = msg
                 if (any(kw in last_response.lower() for kw in RED_KEYWORDS)
                         and any(kw in last_response.lower() for kw in BLUE_KEYWORDS)):
                     break
@@ -443,13 +523,16 @@ class TestGatewayVision:
 
     def test_nonexistent_media_path(self, services):
         """Bad media path should not crash the pipeline."""
-        trace = TestTrace("test_nonexistent_media_path", "openai")
-        switch_profile("openai")
+        trace = GatewayTrace("test_nonexistent_media_path", "openai")
+        require_profile("openai")
         try:
-            response = send_and_wait(
+            envelope, msg = send_and_wait(
                 "Hello, just checking.",
                 media_paths=["/tmp/nonexistent_xyz.png"],
             )
+            response = msg.get("text", "")
+            trace.inbound_envelope = envelope
+            trace.outbound_response = msg
             assert_nonempty(response, "gateway bad media")
             trace.finish("PASS")
         except Exception as e:
@@ -458,11 +541,14 @@ class TestGatewayVision:
 
     def test_empty_content_with_image(self, services):
         """Image with no text — model should still respond."""
-        trace = TestTrace("test_empty_content_with_image", "openai")
-        switch_profile("openai")
+        trace = GatewayTrace("test_empty_content_with_image", "openai")
+        require_profile("openai")
         img = write_temp_image(BLUE_PNG)
         try:
-            response = send_and_wait("", media_paths=[img])
+            envelope, msg = send_and_wait("", media_paths=[img])
+            response = msg.get("text", "")
+            trace.inbound_envelope = envelope
+            trace.outbound_response = msg
             # May or may not produce output — at least shouldn't crash
             if response.strip():
                 lower = response.lower()

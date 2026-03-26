@@ -1,7 +1,6 @@
 """Basic CLI integration tests — text chat across providers."""
 
-import pytest
-from conftest import run_eli, switch_profile, get_profiles, assert_nonempty
+from conftest import assert_nonempty, require_profile, run_eli, switch_profile
 
 
 # ---------------------------------------------------------------------------
@@ -34,14 +33,14 @@ class TestTextChat:
     """Basic text chat: send a prompt, verify we get a meaningful response."""
 
     def test_openai_text(self):
-        switch_profile("openai")
+        require_profile("openai")
         r = run_eli("run", "Reply with exactly one word: pineapple")
         assert r.ok, f"Failed: {r.stderr}"
         assert_nonempty(r.full_output, "openai text")
         assert "pineapple" in r.full_output.lower(), f"Expected 'pineapple', got: {r.full_output}"
 
     def test_anthropic_text(self):
-        switch_profile("anthropic")
+        require_profile("anthropic")
         r = run_eli("run", "Reply with exactly one word: mango")
         assert r.ok, f"Failed: {r.stderr}"
         assert_nonempty(r.full_output, "anthropic text")
@@ -49,14 +48,14 @@ class TestTextChat:
 
     def test_system_prompt_followed(self):
         """Model follows the system prompt configured in the framework."""
-        switch_profile("openai")
+        require_profile("openai")
         r = run_eli("run", "What is 2+2? Reply with just the number.")
         assert r.ok, f"Failed: {r.stderr}"
         assert "4" in r.full_output, f"Expected '4' in response: {r.full_output}"
 
     def test_long_prompt(self):
         """Handles a reasonably long prompt without truncation."""
-        switch_profile("openai")
+        require_profile("openai")
         long_msg = "The quick brown fox jumps over the lazy dog. " * 50
         long_msg += "What animal jumped? Reply in one word."
         r = run_eli("run", long_msg)
@@ -66,7 +65,7 @@ class TestTextChat:
 
     def test_unicode_prompt(self):
         """Handles CJK and emoji in prompts."""
-        switch_profile("openai")
+        require_profile("openai")
         r = run_eli("run", "用一个词回答：1+1等于几？")
         assert r.ok, f"Failed: {r.stderr}"
         assert_nonempty(r.full_output, "unicode")
@@ -85,11 +84,11 @@ class TestTextChat:
 
 class TestProviderSwitch:
     def test_switch_to_openai(self):
-        r = switch_profile("openai")
+        r = require_profile("openai")
         assert r.ok, f"switch failed: {r.stderr}"
 
     def test_switch_to_anthropic(self):
-        r = switch_profile("anthropic")
+        r = require_profile("anthropic")
         assert r.ok, f"switch failed: {r.stderr}"
 
     def test_switch_to_nonexistent(self):
@@ -98,11 +97,11 @@ class TestProviderSwitch:
 
     def test_roundtrip_switch(self):
         """Switch away and back, verify the model changes."""
-        switch_profile("anthropic")
+        require_profile("anthropic")
         r1 = run_eli("status")
         assert "anthropic" in r1.stdout
 
-        switch_profile("openai")
+        require_profile("openai")
         r2 = run_eli("status")
         assert "openai" in r2.stdout
 
