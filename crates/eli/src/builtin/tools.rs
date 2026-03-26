@@ -1877,6 +1877,7 @@ fn tool_message_send() -> Tool {
                 let image_path = args
                     .get("image_path")
                     .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
                     .map(|s| s.to_owned());
                 if text.trim().is_empty() && image_path.is_none() {
                     return ok_val("skipped: empty message");
