@@ -6,6 +6,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [0.4.1] — 2026-03-26
+
+### Added
+- **Channel join greeting** — configurable static greeting on new session or bot added to group
+  - Telegram: detects `ChatMemberUpdated` when bot is added to a group
+  - Webhook/Discord: accepts `Join` message kind from sidecar plugins
+  - CLI: prints greeting after welcome banner
+  - Framework: dispatches greeting on first message in a new session (empty tape)
+- **Greeting config** — `[greeting]` section in `config.toml` with built-in default; env override via `ELI_GREETING_MESSAGE`
+- **Discord channel** via `@openclaw/discord` sidecar plugin
+- **Subagent tool descriptions** enriched with scenario triggers
+
+### Changed
+- System prompt and personality prompt polished for clarity
+- Tool parameter descriptions shortened for token efficiency
+- `browser-use` skill replaced with `opencli`
+
+### Fixed
+- OpenClaw exports patched for Discord plugin compatibility
+- Empty `image_path` treated as `None` in `message.send`
+- Useful system prompt directives restored after polish pass
+
+---
+
 ## [0.4.0] — 2026-03-26
 
 eli 0.4.0 · nexil 0.7.0
