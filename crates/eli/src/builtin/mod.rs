@@ -325,6 +325,12 @@ impl EliHookSpec for BuiltinImpl {
             }
         }
 
+        // Preserve the full inbound context so downstream tools (e.g. subagent)
+        // can forward routing fields in injected messages.
+        if let Some(ctx) = message.get("context").cloned() {
+            state.insert("_inbound_context".to_owned(), ctx);
+        }
+
         // Detect new session: tape has no entries yet.
         let workspace = std::env::current_dir().unwrap_or_default();
         let tape_name = TapeService::session_tape_name(session_id, &workspace);

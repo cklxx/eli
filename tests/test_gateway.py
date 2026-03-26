@@ -220,6 +220,10 @@ def services():
             "ELI_WEBHOOK_PORT": str(WEBHOOK_PORT),
             "SIDECAR_PORT": str(SIDECAR_PORT),
             "TEST_PORT": str(TEST_PORT),
+            # Suppress built-in Telegram plugin in test sidecar to avoid
+            # polling conflicts with a real bot instance.
+            "ELI_TELEGRAM_TOKEN": "",
+            "SIDECAR_TELEGRAM_TOKEN": "",
         }
         sidecar_proc, sidecar_log, sidecar_log_path = start_logged_process(
             ["bun", "sidecar/test/start-test.ts"],

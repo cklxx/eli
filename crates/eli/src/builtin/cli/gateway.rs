@@ -187,6 +187,23 @@ fn spawn_sidecar_process(
         .stderr(std::process::Stdio::inherit())
         .process_group(0);
 
+    // Forward Telegram token to sidecar so the built-in telegram plugin
+    // picks it up (backward compat with ELI_TELEGRAM_TOKEN).
+    if let Ok(token) = std::env::var("ELI_TELEGRAM_TOKEN")
+        && !token.is_empty()
+    {
+        cmd.env("SIDECAR_TELEGRAM_TOKEN", &token);
+    }
+    // Also forward access control env vars.
+    for var in [
+        "ELI_TELEGRAM_ALLOW_USERS",
+        "ELI_TELEGRAM_ALLOW_CHATS",
+    ] {
+        if let Ok(val) = std::env::var(var) {
+            cmd.env(var, &val);
+        }
+    }
+
     match cmd.spawn() {
         Ok(child) => {
             println!("Sidecar started (pid={})", child.id());
@@ -317,13 +334,11 @@ fn channel_message_from_envelope(envelope: &Value) -> ChannelMessage {
     }
 }
 
-/// Start channel listeners (Telegram, Webhook/Sidecar).
+/// Start channel listeners (Webhook/Sidecar). Telegram now runs through sidecar.
 pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     use std::collections::HashMap;
 
     use crate::channels::base::Channel;
-    #[cfg(feature = "telegram")]
-    use crate::channels::telegram::{TelegramChannel, TelegramSettings};
     #[cfg(feature = "gateway")]
     use crate::channels::webhook::{WebhookChannel, WebhookSettings};
     use tokio_util::sync::CancellationToken;
@@ -362,29 +377,20 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         }
     });
 
-    #[cfg(feature = "telegram")]
-    {
-        let tg_settings = TelegramSettings::from_env();
-        if !tg_settings.token.is_empty() {
-            let tg = Arc::new(TelegramChannel::new(ingress_tx.clone(), tg_settings));
-            println!("Starting Telegram channel...");
-            let ch = tg.clone();
-            let c = cancel.clone();
-            tasks.spawn(async move {
-                if let Err(e) = Channel::start(&*ch, c).await {
-                    eprintln!("Telegram channel error: {e}");
-                }
-            });
-            channels.insert("telegram".to_owned(), tg);
-        }
-    }
+    // Telegram is now handled by the sidecar's built-in telegram plugin.
+    // The ELI_TELEGRAM_TOKEN is forwarded to the sidecar process as
+    // SIDECAR_TELEGRAM_TOKEN (see spawn_sidecar_process).
 
     #[cfg(feature = "gateway")]
     let mut sidecar_child: Option<std::process::Child> = None;
     #[cfg(feature = "gateway")]
     {
         let wh_settings = WebhookSettings::from_env();
-        if find_sidecar_dir().is_some() || wh_settings.is_configured() {
+        // Start sidecar if: sidecar dir exists, webhook is configured, OR
+        // Telegram token is set (telegram now runs through sidecar).
+        let telegram_configured =
+            std::env::var("ELI_TELEGRAM_TOKEN").is_ok_and(|t| !t.is_empty());
+        if find_sidecar_dir().is_some() || wh_settings.is_configured() || telegram_configured {
             sidecar_child = start_sidecar(&wh_settings);
 
             let wh = Arc::new(WebhookChannel::new(ingress_tx.clone(), wh_settings));

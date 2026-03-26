@@ -460,6 +460,28 @@ function buildPluginRuntime(config: SidecarConfig) {
 }
 
 /**
+ * Register built-in channel plugins when their config/env vars are present.
+ */
+function loadBuiltinPlugins(config: SidecarConfig): void {
+  // Telegram: register if token is available via config or env.
+  const tgToken =
+    config.channels?.telegram?.token ??
+    config.channels?.telegram?.accounts?.default?.token ??
+    process.env.SIDECAR_TELEGRAM_TOKEN ??
+    process.env.ELI_TELEGRAM_TOKEN ??
+    "";
+  if (tgToken && !registry.channels.has("telegram")) {
+    try {
+      const { telegramPlugin } = require("../plugins/telegram.js");
+      registry.registerChannel(telegramPlugin);
+      log.info("builtin telegram plugin registered");
+    } catch (err: any) {
+      log.error("failed to load builtin telegram plugin", { err: err.message });
+    }
+  }
+}
+
+/**
  * Discover and load all plugins listed in the config.
  * Each plugin's `register()` is called with a SidecarPluginApi instance.
  *
@@ -468,6 +490,7 @@ function buildPluginRuntime(config: SidecarConfig) {
  * same module cache. No monkey-patching needed.
  */
 export async function loadPlugins(config: SidecarConfig): Promise<void> {
+  loadBuiltinPlugins(config);
   const pluginRuntime = buildPluginRuntime(config);
 
   for (const pluginName of config.plugins) {

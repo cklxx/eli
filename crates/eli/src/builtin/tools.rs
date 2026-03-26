@@ -1360,7 +1360,14 @@ fn tool_tape_reset() -> Tool {
 fn tool_tape_handoff() -> Tool {
     Tool::with_context(
         "tape.handoff",
-        "Save a named checkpoint (anchor) to the tape with a summary.\n\nExamples: mark a phase as complete, create a resumption point before switching tasks, record state before handing off to another agent.",
+        "Save a named checkpoint (anchor) to the tape with a summary.\n\n\
+         Examples: mark a phase as complete, create a resumption point before switching tasks, record state before handing off to another agent.\n\n\
+         Compact instructions — when writing the summary, preserve in priority order:\n\
+         1. Architecture decisions (NEVER summarize)\n\
+         2. Modified files and their key changes\n\
+         3. Current verification status (pass/fail)\n\
+         4. Open TODOs and rollback notes\n\
+         5. Tool outputs (can delete, keep pass/fail only)",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -1755,6 +1762,11 @@ fn tool_subagent() -> Tool {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_owned();
+                let inbound_context = state
+                    .get("_inbound_context")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .unwrap_or_default();
 
                 let monitor_agent_id = agent_id.clone();
                 let monitor_cli_name = cli_name.clone();
@@ -1782,17 +1794,24 @@ fn tool_subagent() -> Tool {
                     );
 
                     if let Some(inject) = inject_fn {
+                        // Start with the original inbound context (carries
+                        // source_channel, account_id, channel_target, etc.
+                        // needed for outbound routing through the sidecar).
+                        let mut ctx = inbound_context;
+                        ctx.insert("source".to_owned(), serde_json::json!("subagent"));
+                        ctx.insert(
+                            "agent_id".to_owned(),
+                            serde_json::json!(monitor_agent_id),
+                        );
+                        ctx.insert("exit_code".to_owned(), serde_json::json!(exit_code));
+
                         inject(serde_json::json!({
                             "session_id": session_id,
                             "channel": "subagent",
                             "chat_id": chat_id,
                             "content": message,
                             "output_channel": output_channel,
-                            "context": {
-                                "source": "subagent",
-                                "agent_id": monitor_agent_id,
-                                "exit_code": exit_code,
-                            }
+                            "context": ctx
                         }))
                         .await;
                     } else {
