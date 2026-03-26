@@ -54,11 +54,15 @@ eli gateway                 # multi-channel listener
 - **Hook-based pipeline** — 12 hook points, last-registered-wins. Builtins register first, your plugins override
 - **Multi-channel** — CLI REPL, Telegram bot, Feishu/WeChat/DingTalk/Discord/Slack via OpenClaw sidecar
 - **Provider-agnostic LLM** — OpenAI, Anthropic Claude, GitHub Copilot, DeepSeek, Ollama, custom endpoints
-- **21 builtin tools** — shell, filesystem, web fetch, subagent, tape operations, decisions
+- **20 builtin tools** — shell, filesystem, web fetch, subagent, mid-turn messaging, tape operations, decisions
+- **Parallel tool execution** — independent tool calls run concurrently with schema caching
+- **Lazy context** — large results spill to disk, images stripped from tape to keep context lean
+- **Universal media pipeline** — skills can send images to any channel (CLI, Telegram, etc.)
 - **Skills** — Markdown-defined capabilities (`SKILL.md`) with project/global precedence
 - **Tape system** — Append-only conversation history with anchors, search, and forking
 - **MCP server mode** — Expose sidecar tools over stdio for Claude Code / Cursor integration
 - **Auto-handoff** — Context-aware tape branching when approaching token limits
+- **Security hardening** — subagent sandboxing, sensitive field redaction, OOM protection
 
 ## Commands
 
@@ -101,8 +105,8 @@ The sidecar launches a Node.js bridge that loads any OpenClaw channel plugin. Fi
 
 | Crate | Version | Role |
 |-------|---------|------|
-| **nexil** | 0.6.2 | Provider-agnostic LLM toolkit — streaming, tool calls, tape storage, embeddings, OAuth |
-| **eli** | 0.3.2 | Hook-first agent framework — pipeline, channels, tools, skills, decisions |
+| **nexil** | 0.7.0 | Provider-agnostic LLM toolkit — streaming, tool calls, tape storage, embeddings, OAuth |
+| **eli** | 0.4.0 | Hook-first agent framework — pipeline, channels, tools, skills, decisions |
 | **eli-sidecar** | 0.2.0 | Node.js bridge — loads OpenClaw plugins, exposes channels + tools over HTTP or MCP |
 
 ## Configuration
