@@ -1650,11 +1650,30 @@ fn tool_web_fetch() -> Tool {
 fn tool_subagent() -> Tool {
     Tool::with_context(
         "subagent",
-        "Spawn an async coding sub-agent using an external CLI (claude, codex, kimi).\n\nThe sub-agent runs in the background. When it finishes, its output and a git diff of changes are injected back as an inbound message so you can review the result. Returns immediately with an agent ID.\n\nExamples: delegate a focused coding subtask, parallelize independent work across repos, run a long refactor without blocking the main conversation.",
+        "Spawn an async coding sub-agent that runs in the background via an external CLI (claude, codex, kimi).\n\n\
+         Returns immediately with an agent ID. When the sub-agent finishes, its full output and a git diff of any file changes are injected back as an inbound message for you to review.\n\n\
+         WHEN TO USE:\n\
+         - Task is independent: the subtask doesn't need your current conversation context or intermediate results from other work.\n\
+         - Task is well-scoped: you can describe it fully in a single prompt (the sub-agent starts fresh with no shared memory).\n\
+         - Parallelizable work: you have 2+ independent coding tasks and want them done concurrently instead of sequentially.\n\
+         - Long-running changes: a refactor, migration, or large code generation that would block the main conversation.\n\
+         - Cross-repo work: you need changes in a different directory or repository while continuing work here.\n\
+         - Research + implement split: spawn a sub-agent to research/explore while you implement something else.\n\
+         - Review delegation: ask a sub-agent to review code, run tests, or audit a module while you keep building.\n\n\
+         WHEN NOT TO USE:\n\
+         - The task depends on results from your current work — do it yourself instead.\n\
+         - The task is trivial (< 30 seconds) — overhead of spawning isn't worth it.\n\
+         - The task needs interactive back-and-forth with the user — sub-agents can't ask questions.\n\n\
+         EXAMPLES:\n\
+         - \"Write unit tests for the auth module in crates/eli/src/builtin/auth.rs\"\n\
+         - \"Refactor all error handling in crates/nexil/ to use thiserror instead of manual impls\"\n\
+         - \"Search the codebase for all uses of unwrap() and assess which ones could panic in production\"\n\
+         - \"Add OpenAPI doc comments to every public function in crates/eli/src/builtin/tools.rs\"\n\
+         - \"Run cargo clippy --workspace and fix all warnings\"",
         serde_json::json!({
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "description": "Task description for the sub-agent. Should be self-contained — the CLI starts fresh in the workspace."},
+                "prompt": {"type": "string", "description": "Self-contained task description. The sub-agent starts fresh with no conversation history, so include all necessary context: what to do, which files/modules to focus on, acceptance criteria, and any constraints. Be specific — vague prompts produce vague results."},
                 "cwd": {"type": "string", "description": "Absolute working directory for the sub-agent. Defaults to the current workspace."},
                 "cli": {"type": "string", "description": "Force a specific CLI binary (e.g. 'claude', 'codex', 'kimi'). Auto-detected if omitted."}
             },
