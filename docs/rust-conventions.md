@@ -1073,3 +1073,436 @@ Similar problems get similar solutions. After reading one module, you should be 
 | Fixed-size containers | Const generics | 7.6 |
 | Compile-time unit/tag safety | Phantom types | 7.7 |
 | Boilerplate elimination | Proc macros | 7.8 |
+
+---
+
+## 9. Anti-Patterns — Common Mistakes with Concrete Cases
+
+Real-world bad patterns that cost performance, safety, or readability. Each entry shows the bad code, why it's bad, and the fix.
+
+### 9.1 Performance Anti-Patterns
+
+#### 9.1.1 Vec Without Pre-Allocation
+
+```rust
+// ❌ Resizes 10+ times for 1000 elements (each resize = alloc + copy)
+let mut results = Vec::new();
+for item in source {
+    results.push(transform(item));
+}
+
+// ✅ Single allocation
+let mut results = Vec::with_capacity(source.len());
+for item in source {
+    results.push(transform(item));
+}
+
+// ✅✅ Even better — iterator does the allocation math for you
+let results: Vec<_> = source.iter().map(transform).collect();
+```
+
+**Why**: Each resize doubles capacity and copies all existing elements. For known-size collections, `with_capacity` is free performance.
+
+#### 9.1.2 Unnecessary Intermediate Collect
+
+```rust
+// ❌ Allocates intermediate Vec just to iterate again
+let names: Vec<String> = users.iter().map(|u| u.name.clone()).collect();
+let admins: Vec<&String> = names.iter().filter(|n| n.starts_with("admin_")).collect();
+
+// ✅ Single pass, zero intermediate allocation
+let admins: Vec<String> = users.iter()
+    .map(|u| &u.name)
+    .filter(|n| n.starts_with("admin_"))
+    .cloned()
+    .collect();
+```
+
+**Why**: `.collect()` materializes the entire iterator into a heap allocation. Chain iterators lazily; collect only at the end.
+
+#### 9.1.3 Unbuffered I/O
+
+```rust
+// ❌ Each write() is a syscall — catastrophic for many small writes
+use std::fs::File;
+use std::io::Write;
+let mut f = File::create("out.txt")?;
+for line in data {
+    writeln!(f, "{line}")?;  // syscall per line
+}
+
+// ✅ BufWriter batches writes into 8KB chunks
+use std::io::BufWriter;
+let mut f = BufWriter::new(File::create("out.txt")?);
+for line in data {
+    writeln!(f, "{line}")?;  // writes to buffer, flushes when full
+}
+```
+
+**Why**: Unbuffered file I/O can be 10-100x slower. Same applies to `BufReader` for reads.
+
+#### 9.1.4 format! for Static Strings
+
+```rust
+// ❌ Heap-allocates a String every call for a compile-time-known value
+fn default_name() -> String {
+    format!("unnamed")
+}
+
+// ✅ Zero-cost
+fn default_name() -> &'static str {
+    "unnamed"
+}
+
+// ✅ When you need String for API compat
+fn default_name() -> String {
+    "unnamed".to_owned()  // at least no format machinery
+}
+```
+
+#### 9.1.5 Cow — Avoid Cloning When Input Might Already Be Owned
+
+```rust
+use std::borrow::Cow;
+
+// ❌ Always clones, even when input needs no modification
+fn normalize(s: &str) -> String {
+    if s.contains('\t') {
+        s.replace('\t', "    ")
+    } else {
+        s.to_owned()  // unnecessary allocation when no change needed
+    }
+}
+
+// ✅ Zero-copy when no modification needed
+fn normalize(s: &str) -> Cow<'_, str> {
+    if s.contains('\t') {
+        Cow::Owned(s.replace('\t', "    "))
+    } else {
+        Cow::Borrowed(s)  // no allocation
+    }
+}
+```
+
+**Use `Cow`** when: function sometimes modifies input, sometimes returns it unchanged. Common in parsers, normalizers, escaping functions.
+
+#### 9.1.6 clone_from Is Cheaper Than Clone + Assign
+
+```rust
+// ❌ Drops old allocation, creates new one
+let mut buffer = String::with_capacity(1024);
+// ... later in a loop:
+buffer = new_value.clone();  // old capacity lost, new allocation
+
+// ✅ Reuses existing allocation if capacity suffices
+buffer.clone_from(&new_value);  // truncates + copies, keeps capacity
+```
+
+**Why**: `clone_from` reuses the heap buffer. Significant in hot loops with String/Vec.
+
+### 9.2 Ownership / Borrowing Anti-Patterns
+
+#### 9.2.1 Clone to Silence the Borrow Checker
+
+```rust
+// ❌ Clone to avoid borrow conflict — hides a design problem
+fn process(data: &mut Vec<String>) {
+    let first = data[0].clone();  // clone just to stop compiler complaining
+    data.push(format!("derived from {first}"));
+}
+
+// ✅ Restructure: read first, then mutate
+fn process(data: &mut Vec<String>) {
+    let derived = format!("derived from {}", data[0]);  // borrow ends here
+    data.push(derived);  // safe to mutate now
+}
+```
+
+**Rule**: If you're cloning only to satisfy the borrow checker, restructure the code so the borrow ends before the mutation begins. Clone is a symptom, not a fix.
+
+#### 9.2.2 Arc<Mutex<T>> When Simpler Ownership Works
+
+```rust
+// ❌ Arc<Mutex<>> for data that doesn't leave the current task
+let config = Arc::new(Mutex::new(load_config()?));
+let c = config.lock().unwrap();
+do_something(&c);
+
+// ✅ Just own it or borrow it
+let config = load_config()?;
+do_something(&config);
+```
+
+**Rule**: `Arc<Mutex<T>>` is for shared mutable state across threads/tasks. If only one owner exists, plain ownership or `&mut` suffices. Reach for `Arc` only when `spawn()` demands `'static`.
+
+#### 9.2.3 Accepting &String / &Vec Instead of &str / &[T]
+
+```rust
+// ❌ Forces caller to own a String / Vec
+fn search(haystack: &String, needle: &String) -> bool {
+    haystack.contains(needle.as_str())
+}
+
+// ✅ Accepts &str, &String, String slices, literals — anything
+fn search(haystack: &str, needle: &str) -> bool {
+    haystack.contains(needle)
+}
+
+// Same for Vec:
+// ❌ fn sum(nums: &Vec<i32>) -> i32
+// ✅ fn sum(nums: &[i32]) -> i32
+```
+
+**Why**: `&String` auto-derefs to `&str`, but requiring `&String` prevents passing string literals, `Cow<str>`, or subslices. Clippy lint: `ptr_arg`.
+
+### 9.3 Async Anti-Patterns
+
+#### 9.3.1 Blocking I/O in Async Context
+
+```rust
+// ❌ Blocks the tokio runtime thread — starves other tasks
+async fn read_config() -> Result<Config> {
+    let content = std::fs::read_to_string("config.toml")?;  // BLOCKING
+    Ok(toml::from_str(&content)?)
+}
+
+// ✅ Use tokio's async fs, or spawn_blocking for heavy work
+async fn read_config() -> Result<Config> {
+    let content = tokio::fs::read_to_string("config.toml").await?;
+    Ok(toml::from_str(&content)?)
+}
+
+// ✅ For CPU-heavy parsing
+async fn parse_large_file(path: PathBuf) -> Result<Data> {
+    tokio::task::spawn_blocking(move || {
+        let content = std::fs::read_to_string(path)?;
+        expensive_parse(&content)
+    }).await?
+}
+```
+
+**Why**: Tokio's runtime uses a small thread pool. One blocking call stalls all tasks on that thread. Use `tokio::fs` for file I/O, `spawn_blocking` for CPU work, and never `std::thread::sleep` — use `tokio::time::sleep`.
+
+#### 9.3.2 std::thread::sleep in Async
+
+```rust
+// ❌ Freezes the entire runtime thread
+async fn retry_with_delay() {
+    loop {
+        if try_connect().await.is_ok() { break; }
+        std::thread::sleep(Duration::from_secs(1));  // BLOCKS RUNTIME
+    }
+}
+
+// ✅ Cooperative sleep
+async fn retry_with_delay() {
+    loop {
+        if try_connect().await.is_ok() { break; }
+        tokio::time::sleep(Duration::from_secs(1)).await;  // yields to runtime
+    }
+}
+```
+
+#### 9.3.3 CPU-Bound Work on the Async Runtime
+
+```rust
+// ❌ Hogs the runtime thread — all other tasks starve
+async fn handle_request(data: &[u8]) -> Vec<u8> {
+    compress(data)  // 50ms of CPU, no await points
+}
+
+// ✅ Offload to blocking thread pool
+async fn handle_request(data: Vec<u8>) -> Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || compress(&data)).await?
+}
+```
+
+**Rule**: If work takes >1ms of CPU without an `.await`, use `spawn_blocking`. The async runtime is for I/O multiplexing, not computation.
+
+### 9.4 Unsafe Anti-Patterns
+
+#### 9.4.1 Creating Multiple &mut References
+
+```rust
+// ❌ INSTANT UB — two mutable references to same data
+unsafe {
+    let ptr = &mut data as *mut Vec<i32>;
+    let ref1 = &mut *ptr;
+    let ref2 = &mut *ptr;  // UB: aliasing mutable references
+    ref1.push(1);
+    ref2.push(2);
+}
+
+// ✅ If you need split mutable access, use safe APIs
+let (left, right) = data.split_at_mut(mid);
+```
+
+#### 9.4.2 Unsafe When Safe Alternative Exists
+
+```rust
+// ❌ Unnecessary unsafe for string indexing
+unsafe {
+    let byte = s.as_bytes().get_unchecked(i);
+}
+
+// ✅ Bounds check is nearly free — branch predictor handles it
+let byte = s.as_bytes().get(i).ok_or(Error::OutOfBounds)?;
+
+// ❌ Unsafe transmute for type conversion
+let n: u32 = unsafe { std::mem::transmute(bytes) };
+
+// ✅ Safe conversion
+let n = u32::from_ne_bytes(bytes);
+```
+
+**Rule**: Every `unsafe` block needs a `// SAFETY:` comment explaining why the invariants hold. If you can't write the comment, you can't write the unsafe.
+
+### 9.5 Common Clippy Warnings People Ignore
+
+These lints catch real bugs, not just style nits.
+
+```rust
+// 1. needless_return — obscures control flow
+fn bad() -> i32 { return 42; }           // ❌
+fn good() -> i32 { 42 }                  // ✅
+
+// 2. redundant_clone — allocates for nothing
+let s = get_string();
+let t = s.clone();  // ❌ if s is never used after this
+let t = s;          // ✅ move, zero-cost
+
+// 3. needless_collect — intermediate Vec nobody needs
+let v: Vec<_> = iter.collect();  // ❌
+v.into_iter().for_each(process);
+iter.for_each(process);          // ✅
+
+// 4. manual_map — reinventing Option::map
+match opt {                                  // ❌
+    Some(x) => Some(x + 1),
+    None => None,
+}
+opt.map(|x| x + 1)                          // ✅
+
+// 5. box_collection — double indirection
+let data: Box<Vec<u8>> = Box::new(vec![]);   // ❌ Vec already heap-allocs
+let data: Vec<u8> = vec![];                  // ✅
+
+// 6. from_over_into — implement From, not Into
+impl Into<String> for MyType { /* ... */ }       // ❌
+impl From<MyType> for String { /* ... */ }       // ✅ gives you Into for free
+
+// 7. cast_lossless — silent truncation
+let x = small_value as u64;                     // ❌ may hide truncation
+let x = u64::from(small_value);                 // ✅ compile error if lossy
+
+// 8. wildcard_imports — hides where names come from
+use some_crate::*;                               // ❌
+use some_crate::{Foo, Bar, Baz};                 // ✅
+```
+
+### 9.6 Testing Anti-Patterns
+
+#### 9.6.1 Tests That Depend on Each Other
+
+```rust
+// ❌ test_b relies on side effect from test_a — test order isn't guaranteed
+static mut COUNTER: i32 = 0;
+
+#[test]
+fn test_a() { unsafe { COUNTER = 1; } }
+
+#[test]
+fn test_b() { unsafe { assert_eq!(COUNTER, 1); } }  // flaky: may run before test_a
+
+// ✅ Each test sets up its own state
+#[test]
+fn test_b() {
+    let counter = 1;  // own setup
+    assert_eq!(counter, 1);
+}
+```
+
+#### 9.6.2 Not Testing Error Paths
+
+```rust
+// ❌ Only tests the happy path
+#[test]
+fn test_parse() {
+    assert_eq!(parse("42"), Ok(42));
+}
+
+// ✅ Test the error paths too — they're where bugs hide
+#[test]
+fn test_parse_valid() {
+    assert_eq!(parse("42"), Ok(42));
+}
+
+#[test]
+fn test_parse_empty() {
+    assert!(parse("").is_err());
+}
+
+#[test]
+fn test_parse_overflow() {
+    assert!(parse("99999999999999999999").is_err());
+}
+
+#[test]
+fn test_parse_not_a_number() {
+    assert!(parse("abc").is_err());
+}
+```
+
+#### 9.6.3 Assertions Without Context
+
+```rust
+// ❌ Failure message: "assertion failed: result.is_ok()"
+assert!(result.is_ok());
+
+// ✅ Failure message tells you what actually happened
+assert!(result.is_ok(), "expected Ok, got: {result:?}");
+
+// ✅✅ Even better for Result — unwrap in tests with the error displayed
+let value = result.expect("parse should succeed for valid input");
+```
+
+### 9.7 Cargo / Dependency Anti-Patterns
+
+#### 9.7.1 Wildcard Dependencies
+
+```toml
+# ❌ Any version — builds break when a breaking change is published
+serde = "*"
+
+# ❌ Too loose — allows breaking minor bumps for pre-1.0 crates
+some-lib = "0"
+
+# ✅ Specify minimum version with semver range
+serde = "1.0"
+tokio = { version = "1.36", features = ["full"] }
+```
+
+#### 9.7.2 Enabling Unnecessary Default Features
+
+```toml
+# ❌ Pulls in everything — slow compile, large binary
+tokio = { version = "1", features = ["full"] }
+
+# ✅ Only what you actually use
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+```
+
+**Why**: `features = ["full"]` enables every optional feature, including things like `io-std`, `signal`, `process` you may never use. Each feature adds compile time and binary size. Audit with `cargo tree -e features`.
+
+#### 9.7.3 Duplicate Dependency Versions
+
+```bash
+# Check for duplicates
+cargo tree -d
+
+# If you see:
+# serde v1.0.180
+# serde v1.0.197  ← two versions linked into binary
+```
+
+**Fix**: Align versions across workspace members. Use `[workspace.dependencies]` in the root `Cargo.toml` to centralize versions.

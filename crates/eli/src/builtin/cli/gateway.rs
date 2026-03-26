@@ -271,6 +271,52 @@ async fn drain_processing_tasks(tasks: &mut tokio::task::JoinSet<()>) {
     drain_gateway_tasks(tasks).await;
 }
 
+/// Build a [`ChannelMessage`] from a framework envelope (serde_json::Value).
+fn channel_message_from_envelope(envelope: &Value) -> ChannelMessage {
+    let session_id = envelope
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let channel = envelope
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("subagent")
+        .to_owned();
+    let content = envelope
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let chat_id = envelope
+        .get("chat_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .to_owned();
+    let output_channel = envelope
+        .get("output_channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&channel)
+        .to_owned();
+    let context = envelope
+        .get("context")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    ChannelMessage {
+        session_id,
+        channel,
+        content,
+        chat_id,
+        is_active: false,
+        kind: crate::channels::message::MessageKind::Normal,
+        context,
+        media: Vec::new(),
+        output_channel,
+    }
+}
+
 /// Start channel listeners (Telegram, Webhook/Sidecar).
 pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     use std::collections::HashMap;
@@ -390,6 +436,18 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     let (framework, builtin) = super::builtin_framework().await;
     builtin.set_channels(channels.clone());
 
+    // Wire inbound injector so subagent results flow back into the pipeline.
+    {
+        let itx = ingress_tx.clone();
+        crate::control_plane::set_inbound_injector(Arc::new(move |envelope| {
+            let tx = itx.clone();
+            Box::pin(async move {
+                let msg = channel_message_from_envelope(&envelope);
+                let _ = tx.send(msg);
+            })
+        }));
+    }
+
     loop {
         tokio::select! {
             Some(result) = workers.join_next(), if !workers.is_empty() => {
@@ -481,19 +539,39 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
 }
 
 fn reconstruct_context_media(msg: &ChannelMessage) -> Vec<MediaItem> {
+    let mut items: Vec<(String, String)> = Vec::new();
+
+    if let Some(outbound) = msg.context.get("outbound_media").and_then(|v| v.as_array()) {
+        for item in outbound {
+            let Some(path) = item.get("path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let media_type = item
+                .get("media_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("image");
+            items.push((path.to_owned(), media_type.to_owned()));
+        }
+    }
+
     let paths = context_string_array(&msg.context, "media_paths");
     let types = context_string_array(&msg.context, "media_types");
     tracing::debug!(
         session = %msg.session_id,
+        outbound = items.len(),
         paths = paths.len(),
         types = types.len(),
         "reconstructing media from context"
     );
-    paths
+    for (i, path) in paths.into_iter().enumerate() {
+        let media_type = types.get(i).map(|s| s.as_str()).unwrap_or("image");
+        items.push((path, media_type.to_owned()));
+    }
+
+    items
         .into_iter()
-        .enumerate()
-        .filter(|(i, _)| types.get(*i).map(|s| s.as_str()).unwrap_or("image") == "image")
-        .map(|(_, path)| {
+        .filter(|(_, media_type)| media_type == "image")
+        .map(|(path, _)| {
             let mime = mime_from_path(&path);
             let path_clone = path.clone();
             let fetcher: crate::channels::message::DataFetcher = Arc::new(move || {

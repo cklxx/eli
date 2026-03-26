@@ -395,6 +395,12 @@ mod tests {
         assert!(drain_outbound_media().is_empty());
     }
 
+    #[tokio::test]
+    async fn inject_inbound_noop_without_injector() {
+        // Should not panic when no injector is registered.
+        inject_inbound(serde_json::json!({"content": "test"})).await;
+    }
+
     #[test]
     fn mime_from_extension_known_types() {
         assert_eq!(

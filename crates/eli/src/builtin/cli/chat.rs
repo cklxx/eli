@@ -8,6 +8,19 @@ pub(crate) async fn chat_command(
     let session = session_id.unwrap_or_else(|| format!("cli:{chat_id}"));
     let (framework, _builtin) = super::builtin_framework().await;
 
+    // Wire inbound injector so subagent results trigger new turns.
+    {
+        let fw = framework.clone();
+        crate::control_plane::set_inbound_injector(std::sync::Arc::new(move |envelope| {
+            let fw = fw.clone();
+            Box::pin(async move {
+                if let Err(e) = fw.process_inbound(envelope).await {
+                    tracing::error!(error = %e, "inject_inbound failed in chat mode");
+                }
+            })
+        }));
+    }
+
     println!("Eli chat session started. Type /quit to exit.");
 
     let stdin = tokio::io::stdin();

@@ -21,6 +21,7 @@ use crate::tools::{REGISTRY, shorten_text};
 const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10MB
+const DEFAULT_READ_LINE_LIMIT: usize = 500;
 
 static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(reqwest::Client::new);
@@ -301,7 +302,7 @@ fn builtin_tools() -> Vec<Tool> {
 fn resolve_path(state: &HashMap<String, Value>, raw_path: &str) -> Result<PathBuf, ConduitError> {
     let path = PathBuf::from(shellexpand::tilde(raw_path).as_ref());
     if path.is_absolute() {
-        return Ok(path);
+        return sanitize_path(&path);
     }
     let workspace = state
         .get("_runtime_workspace")
@@ -312,7 +313,26 @@ fn resolve_path(state: &HashMap<String, Value>, raw_path: &str) -> Result<PathBu
                 format!("relative path '{raw_path}' is not allowed without a workspace"),
             )
         })?;
-    Ok(PathBuf::from(workspace).join(&path))
+    let joined = PathBuf::from(workspace).join(&path);
+    sanitize_path(&joined)
+}
+
+/// Reject paths containing `..` components after normalization to prevent
+/// directory traversal attacks (e.g. `../../etc/passwd`).
+fn sanitize_path(path: &Path) -> Result<PathBuf, ConduitError> {
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(ConduitError::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "path '{}' contains '..' traversal and is not allowed. \
+                     Use absolute path or workspace-relative path without '..'.",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(path.to_path_buf())
 }
 
 fn read_err(error: impl std::fmt::Display) -> ConduitError {
@@ -349,18 +369,21 @@ fn read_text_window(
     path: &Path,
     offset: usize,
     limit: Option<usize>,
-) -> Result<String, ConduitError> {
+) -> Result<(String, bool), ConduitError> {
+    use std::fmt::Write;
     let mut line = String::new();
     let mut index = 0;
     let mut output = String::new();
     let mut reader = open_text_reader(path)?;
     while !line_limit_reached(index, offset, limit) && read_next_line(&mut reader, &mut line)? {
         if index >= offset {
-            output.push_str(&line);
+            let _ = write!(output, "{:>6}\t{}", index + 1, &line);
         }
         index += 1;
     }
-    Ok(output)
+    // Check if there are more lines beyond the window.
+    let truncated = read_next_line(&mut reader, &mut line)?;
+    Ok((output, truncated))
 }
 
 fn create_parent_dir(path: &Path) -> Result<(), ConduitError> {
@@ -429,9 +452,15 @@ fn write_text_file(path: &Path, content: &str) -> Result<(), ConduitError> {
 }
 
 fn invalid_edit(path: &Path, old: &str, start: usize) -> ConduitError {
+    let preview: String = old.chars().take(80).collect();
+    let ellipsis = if old.len() > 80 { "..." } else { "" };
     ConduitError::new(
         ErrorKind::InvalidInput,
-        format!("'{old}' not found in {} from line {start}", path.display()),
+        format!(
+            "'{preview}{ellipsis}' not found in {} from line {start}. \
+             Read the file with fs.read first, then copy exact text into 'old'.",
+            path.display()
+        ),
     )
 }
 
@@ -710,7 +739,10 @@ fn render_search_entry(entry: &TapeEntry) -> String {
 fn tool_bash() -> Tool {
     Tool::with_context(
         "bash",
-        "Run a shell command and return its output.\n\nExamples: `cargo build`, `git diff`, `grep -rn TODO src/`, `npm test`, `docker ps`, `ls -la`.\nLong-running processes (servers, watchers, log tails): set background=true, then poll with bash.output.\nFile I/O: prefer fs.read / fs.write over cat / echo redirects.",
+        "Run a shell command and return its output.\n\n\
+         Prefer fs.read/fs.write/fs.edit for file I/O — faster and more token-efficient than cat/sed/echo redirects.\n\
+         Long-running: set background=true, then poll with bash.output.\n\
+         Exceeding timeout_seconds kills the command and returns an error.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -770,7 +802,10 @@ fn tool_bash() -> Tool {
                             let body = if body.is_empty() { "(no output)" } else { body };
                             return Err(ConduitError::new(
                                 ErrorKind::Tool,
-                                format!("command exited with code {code}\noutput:\n{body}"),
+                                format!(
+                                    "command exited with code {code}\noutput:\n{body}\n\n\
+                                     [Tip: read the error above to diagnose.]"
+                                ),
                             ));
                         }
                         let trimmed = output.trim();
@@ -783,8 +818,13 @@ fn tool_bash() -> Tool {
                     Ok(Err(e)) => Err(ConduitError::new(ErrorKind::Tool, format!("{e}"))),
                     Err(_) => {
                         let _ = mgr.terminate(&shell_id).await;
-                        ok_val(format!(
-                            "command timed out after {timeout_secs} seconds and was terminated"
+                        Err(ConduitError::new(
+                            ErrorKind::Tool,
+                            format!(
+                                "command timed out after {timeout_secs}s and was killed. \
+                                 Increase timeout_seconds, use background=true, \
+                                 or simplify the command."
+                            ),
                         ))
                     }
                 }
@@ -960,7 +1000,16 @@ async fn run_fs_read(args: Value, ctx: Option<ToolContext>) -> ToolResult {
     maybe_send_user_facing_notice("fs.read", ctx.as_ref(), &args).await;
     let request = fs_read_request(&args)?;
     let path = resolve_tool_path(ctx, &request.raw_path)?;
-    ok_val(read_text_window(&path, request.offset, request.limit)?)
+    let effective_limit = request.limit.or(Some(DEFAULT_READ_LINE_LIMIT));
+    let (mut text, truncated) = read_text_window(&path, request.offset, effective_limit)?;
+    if truncated && request.limit.is_none() {
+        let next = request.offset + DEFAULT_READ_LINE_LIMIT;
+        text.push_str(&format!(
+            "\n[... truncated at {DEFAULT_READ_LINE_LIMIT} lines. \
+             Use offset={next} limit={DEFAULT_READ_LINE_LIMIT} to continue.]"
+        ));
+    }
+    ok_val(text)
 }
 
 async fn run_fs_write(args: Value, ctx: Option<ToolContext>) -> ToolResult {
@@ -971,18 +1020,58 @@ async fn run_fs_write(args: Value, ctx: Option<ToolContext>) -> ToolResult {
     ok_val(format!("wrote: {}", path.display()))
 }
 
+/// Best-effort syntax check after an edit.  Returns `Some(errors)` when the
+/// checker reports a problem, `None` when the file looks OK or no checker is
+/// available for the file type.
+fn syntax_check(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?;
+    let (cmd, args): (&str, Vec<&str>) = match ext {
+        "rs" => ("rustfmt", vec!["--check", "--edition", "2021"]),
+        "py" => ("python3", vec!["-m", "py_compile"]),
+        "js" | "mjs" => ("node", vec!["--check"]),
+        "json" => ("python3", vec!["-m", "json.tool"]),
+        _ => return None,
+    };
+    let output = std::process::Command::new(cmd)
+        .args(&args)
+        .arg(path)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        None
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let combined = if stderr.is_empty() { stdout } else { stderr };
+        if combined.is_empty() {
+            None
+        } else {
+            Some(combined)
+        }
+    }
+}
+
 async fn run_fs_edit(args: Value, ctx: Option<ToolContext>) -> ToolResult {
     maybe_send_user_facing_notice("fs.edit", ctx.as_ref(), &args).await;
     let request = fs_edit_request(&args)?;
     let path = resolve_tool_path(ctx, &request.raw_path)?;
     edit_text_file(&path, &request.old, &request.new, request.start)?;
-    ok_val(format!("edited: {}", path.display()))
+    let mut msg = format!("edited: {}", path.display());
+    if let Some(errors) = syntax_check(&path) {
+        msg.push_str(&format!(
+            "\n\n⚠ syntax check failed:\n{errors}\n\
+             Fix the syntax error with another fs.edit call."
+        ));
+    }
+    ok_val(msg)
 }
 
 fn tool_fs_read() -> Tool {
     Tool::with_context(
         "fs.read",
-        "Read exact text from a file.\n\nExamples: inspect source code, check a config file, view build logs, examine generated output. Use offset/limit to paginate large files and keep token usage low. Returns the original line endings so fs.edit can reuse snippets exactly.",
+        "Read a text file with line numbers (1-based, like `cat -n`).\n\n\
+         Default limit: 500 lines. Use offset/limit to paginate large files.\n\
+         Line numbers are for reference only — do NOT include them in fs.edit 'old' parameter.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -1027,7 +1116,10 @@ fn tool_fs_write() -> Tool {
 fn tool_fs_edit() -> Tool {
     Tool::with_context(
         "fs.edit",
-        "Find-and-replace exact text in a file (first match only).\n\nExamples: rename a variable, fix a typo, update an import path, change a config value. Read the smallest matching window with fs.read, then pass that exact snippet here. Uses a streaming rewrite so large files do not need full reads.",
+        "Find-and-replace exact text in a file (first match only).\n\n\
+         IMPORTANT: fs.read the target range first, then copy the exact file content \
+         (without line numbers) into 'old'. Mismatched text is the #1 cause of failures.\n\
+         Runs syntax check after edit and warns if errors are detected.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -1464,7 +1556,21 @@ fn tool_web_fetch() -> Tool {
                 request = request.header("accept", "text/markdown");
 
                 if let Some(Value::Object(headers)) = args.get("headers") {
+                    /// Headers that must not be set by LLM-controlled input to
+                    /// prevent request smuggling and protocol-level attacks.
+                    const BLOCKED_HEADERS: &[&str] = &[
+                        "host",
+                        "content-length",
+                        "transfer-encoding",
+                        "connection",
+                        "upgrade",
+                        "proxy-authorization",
+                        "te",
+                    ];
                     for (k, v) in headers {
+                        if BLOCKED_HEADERS.contains(&k.to_ascii_lowercase().as_str()) {
+                            continue;
+                        }
                         if let Some(val) = v.as_str() {
                             request = request.header(k.as_str(), val);
                         }
@@ -1478,7 +1584,10 @@ fn tool_web_fetch() -> Tool {
                 if !status.is_success() {
                     return Err(ConduitError::new(
                         ErrorKind::Tool,
-                        format!("HTTP {status} for {url}"),
+                        format!(
+                            "HTTP {status} for {url}. \
+                             For 404: check URL. For 401/403: set headers."
+                        ),
                     ));
                 }
                 let bytes = response.bytes().await.map_err(|e| {
@@ -1823,6 +1932,16 @@ fn tool_sidecar() -> Tool {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
 
+                // Validate tool_name to prevent path injection / SSRF.
+                if !tool_name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+                {
+                    return Err(ConduitError::new(
+                        ErrorKind::InvalidInput,
+                        format!("invalid sidecar tool name: {tool_name}"),
+                    ));
+                }
                 let tool_url = format!("{url}/tools/{tool_name}");
                 let payload =
                     build_sidecar_request_payload(params, description.as_deref(), session_id);
@@ -1997,7 +2116,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(value.as_str().unwrap(), "second\r\n");
+        assert_eq!(value.as_str().unwrap(), "     2\tsecond\r\n");
     }
 
     #[tokio::test]
@@ -2099,15 +2218,27 @@ mod tests {
 
     #[test]
     fn test_auto_notice_generates_semantic_descriptions() {
-        assert_eq!(auto_notice("fs.read", &json!({"path": "src/main.rs"})), "读 src/main.rs");
-        assert_eq!(auto_notice("fs.write", &json!({"path": "out.txt"})), "写 out.txt");
-        assert_eq!(auto_notice("fs.edit", &json!({"path": "lib.rs"})), "编辑 lib.rs");
+        assert_eq!(
+            auto_notice("fs.read", &json!({"path": "src/main.rs"})),
+            "读 src/main.rs"
+        );
+        assert_eq!(
+            auto_notice("fs.write", &json!({"path": "out.txt"})),
+            "写 out.txt"
+        );
+        assert_eq!(
+            auto_notice("fs.edit", &json!({"path": "lib.rs"})),
+            "编辑 lib.rs"
+        );
         assert_eq!(
             auto_notice("web.fetch", &json!({"url": "https://example.com"})),
             "获取 https://example.com"
         );
         assert_eq!(
-            auto_notice("bash", &json!({"cmd": "cargo build", "description": "编译项目"})),
+            auto_notice(
+                "bash",
+                &json!({"cmd": "cargo build", "description": "编译项目"})
+            ),
             "编译项目"
         );
         assert_eq!(
@@ -2261,5 +2392,155 @@ mod tests {
         let head = snapshot_git_head(dir);
         let result = collect_artifacts(dir, head.as_deref()).await;
         assert_eq!(result, "(no changes)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Tool polish: new coverage
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_fs_read_line_numbers_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lines.txt");
+        std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+        let value = tool_fs_read()
+            .run(
+                json!({"path": path.to_string_lossy()}),
+                Some(ToolContext::new("test-run")),
+            )
+            .await
+            .unwrap();
+        let text = value.as_str().unwrap();
+        assert!(text.starts_with("     1\talpha\n"));
+        assert!(text.contains("     2\tbeta\n"));
+        assert!(text.contains("     3\tgamma\n"));
+    }
+
+    #[tokio::test]
+    async fn test_fs_read_default_limit_truncates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("big.txt");
+        let content: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&path, &content).unwrap();
+        let value = tool_fs_read()
+            .run(
+                json!({"path": path.to_string_lossy()}),
+                Some(ToolContext::new("test-run")),
+            )
+            .await
+            .unwrap();
+        let text = value.as_str().unwrap();
+        assert!(text.contains("truncated at 500 lines"));
+        assert!(text.contains("offset=500"));
+        assert!(text.contains("   500\t"));
+        assert!(!text.contains("   501\t"));
+    }
+
+    #[tokio::test]
+    async fn test_fs_read_explicit_limit_no_truncation_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("big.txt");
+        let content: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&path, &content).unwrap();
+        let value = tool_fs_read()
+            .run(
+                json!({"path": path.to_string_lossy(), "limit": 10}),
+                Some(ToolContext::new("test-run")),
+            )
+            .await
+            .unwrap();
+        let text = value.as_str().unwrap();
+        assert!(!text.contains("truncated"));
+    }
+
+    #[tokio::test]
+    async fn test_fs_edit_invalid_old_shows_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("note.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let result = tool_fs_edit()
+            .run(
+                json!({"path": path.to_string_lossy(), "old": "not here", "new": "x"}),
+                Some(ToolContext::new("test-run")),
+            )
+            .await;
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("fs.read"),
+            "error should suggest fs.read: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fs_edit_syntax_check_warns_on_bad_python() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad.py");
+        std::fs::write(&path, "def foo():\n    pass\n").unwrap();
+        let value = tool_fs_edit()
+            .run(
+                json!({
+                    "path": path.to_string_lossy().as_ref(),
+                    "old": "def foo():\n    pass",
+                    "new": "def foo(\n    pass"
+                }),
+                Some(ToolContext::new("test-run")),
+            )
+            .await
+            .unwrap();
+        let text = value.as_str().unwrap();
+        assert!(
+            text.contains("syntax check failed"),
+            "should warn about syntax: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fs_edit_syntax_check_silent_on_valid_python() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("good.py");
+        std::fs::write(&path, "x = 1\n").unwrap();
+        let value = tool_fs_edit()
+            .run(
+                json!({"path": path.to_string_lossy().as_ref(), "old": "x = 1", "new": "x = 2"}),
+                Some(ToolContext::new("test-run")),
+            )
+            .await
+            .unwrap();
+        let text = value.as_str().unwrap();
+        assert!(
+            !text.contains("syntax check"),
+            "valid edit should not warn: {text}"
+        );
+    }
+
+    #[test]
+    fn test_invalid_edit_truncates_long_old_text() {
+        let long_old = "a".repeat(200);
+        let err = invalid_edit(Path::new("test.rs"), &long_old, 0);
+        assert!(
+            err.message.contains("..."),
+            "long old text should be truncated: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("fs.read"),
+            "should suggest fs.read: {}",
+            err.message
+        );
     }
 }

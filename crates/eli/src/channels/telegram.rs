@@ -24,7 +24,7 @@ use super::message::{ChannelMessage, DataFetcher, MediaItem, MediaType};
 
 /// Settings for the Telegram channel, loaded from env vars prefixed
 /// `ELI_TELEGRAM_`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TelegramSettings {
     /// Bot token.
     pub token: String,
@@ -34,6 +34,17 @@ pub struct TelegramSettings {
     pub allow_chats: HashSet<String>,
     /// Optional HTTP/SOCKS5 proxy URL.
     pub proxy: Option<String>,
+}
+
+impl std::fmt::Debug for TelegramSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramSettings")
+            .field("token", &"[REDACTED]")
+            .field("allow_users", &self.allow_users)
+            .field("allow_chats", &self.allow_chats)
+            .field("proxy", &self.proxy)
+            .finish()
+    }
 }
 
 impl TelegramSettings {
@@ -694,6 +705,15 @@ impl Channel for TelegramChannel {
                 let Some(path) = item.get("path").and_then(|v| v.as_str()) else {
                     continue;
                 };
+                // Reject paths with traversal components to prevent sending
+                // arbitrary system files via Telegram.
+                if std::path::Path::new(path)
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    warn!(path, "outbound_media: path traversal rejected");
+                    continue;
+                }
                 if !std::path::Path::new(path).exists() {
                     warn!(path, "outbound_media: file not found, skipping");
                     continue;
