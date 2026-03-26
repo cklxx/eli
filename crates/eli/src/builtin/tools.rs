@@ -226,11 +226,11 @@ fn build_completion_message(
     let status = match exit_code {
         Some(0) => "success (exit 0)".to_owned(),
         Some(code) => format!("failed (exit {code})"),
-        None => "unknown".to_owned(),
+        None => "running (no exit code yet)".to_owned(),
     };
 
     let output_section = if output.trim().is_empty() {
-        "(no output)".to_owned()
+        "(sub-agent produced no output)".to_owned()
     } else if output.len() > SUBAGENT_OUTPUT_TAIL {
         let tail_start = output.len() - SUBAGENT_OUTPUT_TAIL;
         let boundary = output.ceil_char_boundary(tail_start);
@@ -784,7 +784,10 @@ fn tool_bash() -> Tool {
                 })?;
 
                 if background {
-                    return ok_val(format!("started: {shell_id}"));
+                    return ok_val(format!(
+                        "started: {shell_id} — poll with bash.output(shell_id=\"{shell_id}\"), \
+                         stop with bash.kill(shell_id=\"{shell_id}\")"
+                    ));
                 }
 
                 let result = tokio::time::timeout(
@@ -799,7 +802,11 @@ fn tool_bash() -> Tool {
                             && code != 0
                         {
                             let body = output.trim();
-                            let body = if body.is_empty() { "(no output)" } else { body };
+                            let body = if body.is_empty() {
+                                "(command failed with no output — check if the command exists or try adding 2>&1)"
+                            } else {
+                                body
+                            };
                             return Err(ConduitError::new(
                                 ErrorKind::Tool,
                                 format!(
@@ -810,7 +817,7 @@ fn tool_bash() -> Tool {
                         }
                         let trimmed = output.trim();
                         ok_val(if trimmed.is_empty() {
-                            "(no output)"
+                            "(command succeeded, no output)"
                         } else {
                             trimmed
                         })
@@ -881,7 +888,11 @@ fn tool_bash_output() -> Tool {
                     None => "null".to_owned(),
                 };
                 let body = if chunk.is_empty() {
-                    "(no output)"
+                    if returncode.is_some() {
+                        "(process exited, no output)"
+                    } else {
+                        "(no new output since this offset)"
+                    }
                 } else {
                     chunk
                 };
@@ -1016,8 +1027,13 @@ async fn run_fs_write(args: Value, ctx: Option<ToolContext>) -> ToolResult {
     maybe_send_user_facing_notice("fs.write", ctx.as_ref(), &args).await;
     let request = fs_write_request(&args)?;
     let path = resolve_tool_path(ctx, &request.raw_path)?;
+    let line_count = request.content.lines().count();
+    let byte_count = request.content.len();
     write_text_file(&path, &request.content)?;
-    ok_val(format!("wrote: {}", path.display()))
+    ok_val(format!(
+        "wrote: {} ({line_count} lines, {byte_count} bytes)",
+        path.display()
+    ))
 }
 
 /// Best-effort syntax check after an edit.  Returns `Some(errors)` when the
@@ -1055,8 +1071,13 @@ async fn run_fs_edit(args: Value, ctx: Option<ToolContext>) -> ToolResult {
     maybe_send_user_facing_notice("fs.edit", ctx.as_ref(), &args).await;
     let request = fs_edit_request(&args)?;
     let path = resolve_tool_path(ctx, &request.raw_path)?;
+    let old_len = request.old.lines().count();
+    let new_len = request.new.lines().count();
     edit_text_file(&path, &request.old, &request.new, request.start)?;
-    let mut msg = format!("edited: {}", path.display());
+    let mut msg = format!(
+        "edited: {} ({old_len} lines → {new_len} lines)",
+        path.display()
+    );
     if let Some(errors) = syntax_check(&path) {
         msg.push_str(&format!(
             "\n\n⚠ syntax check failed:\n{errors}\n\
@@ -1354,13 +1375,18 @@ fn tool_tape_handoff() -> Tool {
                 let summary = args.get_str_field("summary").unwrap_or("").to_owned();
                 let tape_name = tape_name_from_context(ctx.as_ref())?;
                 let service = current_tape_service()?;
+                // Capture entries since last anchor before creating the new one.
+                let info = service.info(&tape_name).await?;
+                let captured = info.entries_since_last_anchor;
                 let state = if summary.is_empty() {
                     None
                 } else {
                     Some(serde_json::json!({"summary": summary}))
                 };
                 service.handoff(&tape_name, &name, state).await?;
-                ok_val(format!("anchor added: {name}"))
+                ok_val(format!(
+                    "anchor added: {name} (captured {captured} entries since last anchor)"
+                ))
             })
         },
     )
@@ -1434,8 +1460,12 @@ fn tool_decision_set() -> Tool {
                 let meta = serde_json::json!({});
                 let entry = TapeEntry::decision(&text, meta);
                 service.store().append(&tape_name, &entry).await?;
+                // Count active decisions after this append.
+                let query = TapeQuery::new(&tape_name);
+                let entries = service.store().fetch_all(&query).await?;
+                let total = nexil::collect_active_decisions(&entries).len();
                 tracing::info!(decision = %text, tape = %tape_name, "decision.set");
-                ok_val(format!("Decision recorded: {text}"))
+                ok_val(format!("Decision recorded: {text} ({total} active)"))
             })
         },
     )
@@ -1506,11 +1536,12 @@ fn tool_decision_remove() -> Tool {
                     ));
                 }
                 let text = &decisions[index - 1];
+                let remaining = decisions.len() - 1;
                 let meta = serde_json::json!({});
                 let tombstone = TapeEntry::decision_revoked(text, meta);
                 service.store().append(&tape_name, &tombstone).await?;
                 tracing::info!(decision = %text, tape = %tape_name, "decision.remove");
-                ok_val(format!("Removed decision: {text}"))
+                ok_val(format!("Removed decision: {text} ({remaining} remaining)"))
             })
         },
     )
@@ -1597,7 +1628,9 @@ fn tool_web_fetch() -> Tool {
                     return Err(ConduitError::new(
                         ErrorKind::Tool,
                         format!(
-                            "response too large ({} bytes, limit {})",
+                            "response too large ({} bytes, limit {}). \
+                             Try a more specific endpoint, add query params to narrow results, \
+                             or use bash with curl piped through head/jq.",
                             bytes.len(),
                             MAX_RESPONSE_BYTES
                         ),
@@ -1751,7 +1784,11 @@ fn tool_subagent() -> Tool {
                     }
                 });
 
-                ok_val(format!("{agent_id} spawned ({cli_name})"))
+                ok_val(format!(
+                    "{agent_id} spawned ({cli_name}). \
+                     Its output and file changes will arrive as an inbound message when it completes — \
+                     continue with other work."
+                ))
             })
         },
     )
@@ -2357,7 +2394,7 @@ mod tests {
     #[test]
     fn test_build_completion_message_empty_output() {
         let msg = build_completion_message("agent-empty", "claude", Some(0), "", "(clean)");
-        assert!(msg.contains("(no output)"));
+        assert!(msg.contains("(sub-agent produced no output)"));
     }
 
     #[test]
