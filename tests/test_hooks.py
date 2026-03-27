@@ -27,8 +27,8 @@ def tape_name_for(session_id: str) -> str:
     workspace = os.getcwd()
     # Match Rust's canonicalize behavior
     workspace = os.path.realpath(workspace)
-    wh = hashlib.md5(workspace.encode()).hexdigest()[:16]
-    sh = hashlib.md5(session_id.encode()).hexdigest()[:16]
+    wh = hashlib.md5(workspace.encode(), usedforsecurity=False).hexdigest()[:16]
+    sh = hashlib.md5(session_id.encode(), usedforsecurity=False).hexdigest()[:16]
     return f"{wh}__{sh}"
 
 

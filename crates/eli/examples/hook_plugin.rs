@@ -79,6 +79,6 @@ async fn main() {
         .await
         .expect("process_inbound failed");
 
-    println!("session: {}", result.session_id);
-    println!("output:  {}", result.model_output);
+    println!("done:   processed 1 turn");
+    println!("output: {}", result.model_output);
 }

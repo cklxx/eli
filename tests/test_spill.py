@@ -30,8 +30,8 @@ def session_id(chat_id: str) -> str:
 
 def tape_name(chat_id: str) -> str:
     workspace = os.path.realpath(os.getcwd())
-    wh = hashlib.md5(workspace.encode()).hexdigest()[:16]
-    sh = hashlib.md5(session_id(chat_id).encode()).hexdigest()[:16]
+    wh = hashlib.md5(workspace.encode(), usedforsecurity=False).hexdigest()[:16]
+    sh = hashlib.md5(session_id(chat_id).encode(), usedforsecurity=False).hexdigest()[:16]
     return f"{wh}__{sh}"
 
 
