@@ -12,7 +12,6 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use base64::Engine;
-use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -20,6 +19,7 @@ use tracing::{error, info, warn};
 
 use super::base::Channel;
 use super::message::{ChannelMessage, DataFetcher, MediaItem, MediaType};
+use crate::sidecar_contract::{SidecarChannelMessage, SidecarMediaPayload};
 
 // ---------------------------------------------------------------------------
 // WebhookSettings
@@ -94,45 +94,14 @@ struct AppState {
     tx: mpsc::UnboundedSender<ChannelMessage>,
 }
 
-#[derive(Debug, Deserialize)]
-struct InboundWebhookMessage {
-    #[serde(flatten)]
-    message: ChannelMessage,
-    #[serde(default)]
-    media: Vec<InboundMediaPayload>,
-}
-
-#[derive(Debug, Deserialize)]
-struct InboundMediaPayload {
-    #[serde(default)]
-    media_type: String,
-    #[serde(default)]
-    mime_type: String,
-    #[serde(default)]
-    filename: Option<String>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    data_base64: Option<String>,
-}
-
-impl InboundWebhookMessage {
-    fn into_message(self) -> ChannelMessage {
-        let mut message = self.message;
-        message.media = restore_inbound_media(self.media);
-        apply_inbound_defaults(&mut message);
-        message
-    }
-}
-
-fn restore_inbound_media(media: Vec<InboundMediaPayload>) -> Vec<MediaItem> {
+fn restore_inbound_media(media: Vec<SidecarMediaPayload>) -> Vec<MediaItem> {
     media
         .into_iter()
         .filter_map(restore_inbound_media_item)
         .collect()
 }
 
-fn restore_inbound_media_item(item: InboundMediaPayload) -> Option<MediaItem> {
+fn restore_inbound_media_item(item: SidecarMediaPayload) -> Option<MediaItem> {
     let media_type = parse_media_type(&item.media_type)?;
     let data_fetcher = build_inbound_fetcher(&item)?;
     Some(MediaItem {
@@ -143,7 +112,7 @@ fn restore_inbound_media_item(item: InboundMediaPayload) -> Option<MediaItem> {
     })
 }
 
-fn build_inbound_fetcher(item: &InboundMediaPayload) -> Option<DataFetcher> {
+fn build_inbound_fetcher(item: &SidecarMediaPayload) -> Option<DataFetcher> {
     item.data_base64
         .as_deref()
         .filter(|data| !data.is_empty())
@@ -199,7 +168,7 @@ fn unsupported_media_type(value: &str) -> Option<MediaType> {
     None
 }
 
-fn inbound_mime_type(item: &InboundMediaPayload, media_type: MediaType) -> String {
+fn inbound_mime_type(item: &SidecarMediaPayload, media_type: MediaType) -> String {
     if !item.mime_type.is_empty() {
         return item.mime_type.clone();
     }
@@ -240,11 +209,23 @@ fn enqueue_inbound(
     }
 }
 
+fn inbound_channel_message(payload: SidecarChannelMessage) -> ChannelMessage {
+    let media = restore_inbound_media(payload.media.clone());
+    let mut message = payload.into_channel_message();
+    message.media = media;
+    apply_inbound_defaults(&mut message);
+    message
+}
+
 async fn handle_inbound(
     State(state): State<AppState>,
-    Json(payload): Json<InboundWebhookMessage>,
+    Json(payload): Json<SidecarChannelMessage>,
 ) -> StatusCode {
-    enqueue_inbound(&state.tx, payload.into_message())
+    if !payload.has_supported_contract_version() {
+        warn!(version = %payload.contract_version, "webhook: unsupported contract version");
+        return StatusCode::BAD_REQUEST;
+    }
+    enqueue_inbound(&state.tx, inbound_channel_message(payload))
 }
 
 // ---------------------------------------------------------------------------
@@ -253,43 +234,7 @@ async fn handle_inbound(
 
 #[cfg(test)]
 pub(crate) fn build_webhook_payload(message: &ChannelMessage) -> serde_json::Value {
-    let mut payload = serde_json::json!({
-        "session_id": message.session_id,
-        "channel": message.channel,
-        "content": message.content,
-        "chat_id": message.chat_id,
-        "is_active": message.is_active,
-        "kind": message.kind,
-        "context": message.context,
-        "output_channel": message.output_channel,
-    });
-
-    let mut media_json = Vec::new();
-
-    for item in &message.media {
-        if let Some(path) = item.filename.as_ref() {
-            media_json.push(serde_json::json!({
-                "path": path,
-                "media_type": item.media_type,
-                "mime_type": item.mime_type,
-            }));
-        }
-    }
-
-    if media_json.is_empty()
-        && let Some(outbound) = message
-            .context
-            .get("outbound_media")
-            .and_then(|v| v.as_array())
-    {
-        media_json = outbound.clone();
-    }
-
-    if !media_json.is_empty() {
-        payload["media"] = serde_json::Value::Array(media_json);
-    }
-
-    payload
+    serde_json::to_value(outbound_contract_message(message)).unwrap_or_default()
 }
 
 #[async_trait]
@@ -343,16 +288,10 @@ impl Channel for WebhookChannel {
     }
 
     async fn send(&self, message: ChannelMessage) -> anyhow::Result<()> {
-        let media = webhook_media_payload(&message);
-        let mut payload = serde_json::to_value(&message)?;
-        if let Some(media) = media {
-            payload["media"] = media;
-        }
-
         let mut req = self
             .http_client
             .post(&self.settings.callback_url)
-            .json(&payload);
+            .json(&outbound_contract_message(&message));
         if let Ok(token) = std::env::var("ELI_SIDECAR_TOKEN") {
             req = req.bearer_auth(&token);
         }
@@ -374,55 +313,71 @@ impl Channel for WebhookChannel {
     }
 }
 
-fn webhook_media_payload(message: &ChannelMessage) -> Option<serde_json::Value> {
-    let mut items = Vec::new();
+fn outbound_contract_message(message: &ChannelMessage) -> SidecarChannelMessage {
+    SidecarChannelMessage::from_channel_message(message, outbound_media_items(message))
+}
 
-    if let Some(outbound) = message
+fn outbound_media_items(message: &ChannelMessage) -> Vec<SidecarMediaPayload> {
+    let from_message = message
+        .media
+        .iter()
+        .filter_map(media_payload_from_item)
+        .collect::<Vec<_>>();
+    if from_message.is_empty() {
+        outbound_context_media(message)
+    } else {
+        from_message
+    }
+}
+
+fn media_payload_from_item(item: &MediaItem) -> Option<SidecarMediaPayload> {
+    let path = item.filename.clone()?;
+    Some(SidecarMediaPayload {
+        media_type: media_type_label(item.media_type).to_owned(),
+        mime_type: item.mime_type.clone(),
+        filename: std::path::Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned),
+        path: Some(path),
+        data_base64: None,
+    })
+}
+
+fn media_type_label(media_type: MediaType) -> &'static str {
+    match media_type {
+        MediaType::Image => "image",
+        MediaType::Audio => "audio",
+        MediaType::Video => "video",
+        MediaType::Document => "document",
+    }
+}
+
+fn outbound_context_media(message: &ChannelMessage) -> Vec<SidecarMediaPayload> {
+    message
         .context
         .get("outbound_media")
         .and_then(|v| v.as_array())
-    {
-        for item in outbound {
-            let Some(path) = item.get("path").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let Some(filename) = std::path::Path::new(path)
-                .file_name()
-                .and_then(|v| v.to_str())
-            else {
-                continue;
-            };
-            let media_type = item
-                .get("media_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("document");
-            let mime_type = item
-                .get("mime_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("application/octet-stream");
-            items.push(serde_json::json!({
-                "path": path,
-                "filename": filename,
-                "media_type": media_type,
-                "mime_type": mime_type,
-            }));
-        }
-    }
+        .into_iter()
+        .flatten()
+        .filter_map(media_payload_from_value)
+        .collect()
+}
 
-    if items.is_empty() {
-        None
-    } else {
-        Some(serde_json::Value::Array(items))
-    }
+fn media_payload_from_value(value: &serde_json::Value) -> Option<SidecarMediaPayload> {
+    serde_json::from_value(value.clone()).ok()
 }
 
 #[cfg(test)]
 mod webhook_payload_tests {
+    use std::fs;
+
     use base64::Engine;
     use serde_json::json;
 
-    use super::{InboundWebhookMessage, build_webhook_payload};
+    use super::{build_webhook_payload, inbound_channel_message};
     use crate::channels::message::{ChannelMessage, MediaItem, MediaType};
+    use crate::sidecar_contract::{SIDECAR_CONTRACT_VERSION, SidecarChannelMessage};
 
     #[test]
     fn webhook_payload_includes_context_outbound_media_as_media() {
@@ -437,6 +392,7 @@ mod webhook_payload_tests {
         );
 
         let payload = build_webhook_payload(&msg);
+        assert_eq!(payload["contract_version"], SIDECAR_CONTRACT_VERSION);
         assert_eq!(payload["media"][0]["path"], "/tmp/a.png");
         assert_eq!(payload["media"][0]["media_type"], "image");
         assert_eq!(payload["media"][0]["mime_type"], "image/png");
@@ -453,19 +409,19 @@ mod webhook_payload_tests {
         }]);
 
         let payload = build_webhook_payload(&msg);
+        assert_eq!(payload["contract_version"], SIDECAR_CONTRACT_VERSION);
         assert_eq!(payload["media"][0]["path"], "/tmp/b.jpg");
         assert_eq!(payload["media"][0]["media_type"], "image");
         assert_eq!(payload["media"][0]["mime_type"], "image/jpeg");
     }
 
     fn parse_inbound_payload(payload: serde_json::Value) -> ChannelMessage {
-        serde_json::from_value::<InboundWebhookMessage>(payload)
-            .unwrap()
-            .into_message()
+        inbound_channel_message(serde_json::from_value::<SidecarChannelMessage>(payload).unwrap())
     }
 
     fn inbound_message_payload(media: serde_json::Value) -> serde_json::Value {
         json!({
+            "contract_version": SIDECAR_CONTRACT_VERSION,
             "session_id": "s1",
             "channel": "webhook",
             "content": "hello",
@@ -480,6 +436,7 @@ mod webhook_payload_tests {
 
     fn defaulted_message_payload(media: serde_json::Value) -> serde_json::Value {
         json!({
+            "contract_version": SIDECAR_CONTRACT_VERSION,
             "session_id": "s1",
             "channel": "",
             "content": "hello",
@@ -513,6 +470,13 @@ mod webhook_payload_tests {
         message.media[index].data_fetcher.as_ref().unwrap()().await
     }
 
+    fn contract_fixture(name: &str) -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sidecar/contracts/v1")
+            .join(name);
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
     #[tokio::test]
     async fn test_restore_inbound_media_builds_base64_and_path_fetchers() {
         let tmp = tempfile::NamedTempFile::with_suffix(".png").unwrap();
@@ -544,5 +508,88 @@ mod webhook_payload_tests {
         assert!(message.is_active);
         assert_eq!(message.media.len(), 1);
         assert_eq!(message.media[0].media_type, MediaType::Document);
+    }
+
+    #[test]
+    fn test_webhook_payload_matches_shared_outbound_fixture() {
+        let mut context = serde_json::Map::new();
+        context.insert("source_channel".into(), json!("mock-channel"));
+        context.insert("account_id".into(), json!("default"));
+        context.insert("sender_id".into(), json!("user_1"));
+        context.insert("sender_name".into(), json!("Bob"));
+        context.insert("chat_type".into(), json!("direct"));
+        context.insert("group_label".into(), json!(""));
+        context.insert("reply_to_id".into(), json!(""));
+        context.insert("channel_target".into(), json!("user:user_1"));
+        context.insert("custom_flag".into(), json!("fixture"));
+        context.insert(
+            "outbound_media".into(),
+            json!([{
+                "path": "/tmp/fallback.png",
+                "media_type": "image",
+                "mime_type": "image/png",
+                "filename": "fallback.png"
+            }]),
+        );
+
+        let message = ChannelMessage::new(
+            "mock-channel:default:user_1",
+            "webhook",
+            "hello from fixture",
+        )
+        .with_chat_id("user_1")
+        .with_is_active(true)
+        .with_context(context)
+        .with_media(vec![MediaItem {
+            media_type: MediaType::Image,
+            mime_type: "image/png".into(),
+            filename: Some("/tmp/fixture.png".into()),
+            data_fetcher: None,
+        }])
+        .finalize();
+
+        assert_eq!(
+            build_webhook_payload(&message),
+            contract_fixture("channel-message.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inbound_fixture_restores_context_and_base64_media() {
+        let message = parse_inbound_payload(contract_fixture("inbound-message.json"));
+
+        assert_eq!(message.session_id, "mock-channel:default:user_fixture");
+        assert_eq!(
+            message
+                .context
+                .get("source_channel")
+                .and_then(|value| value.as_str()),
+            Some("mock-channel")
+        );
+        assert_eq!(
+            message
+                .context
+                .get("group_label")
+                .and_then(|value| value.as_str()),
+            Some("")
+        );
+        assert_eq!(
+            message
+                .context
+                .get("reply_to_id")
+                .and_then(|value| value.as_str()),
+            Some("")
+        );
+        assert_eq!(fetch_media_bytes(&message, 0).await, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_parse_inbound_payload_accepts_missing_contract_version() {
+        let mut payload = contract_fixture("inbound-message.json");
+        payload.as_object_mut().unwrap().remove("contract_version");
+
+        let message = parse_inbound_payload(payload);
+
+        assert_eq!(message.session_id, "mock-channel:default:user_fixture");
     }
 }

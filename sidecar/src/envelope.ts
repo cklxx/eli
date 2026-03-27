@@ -1,7 +1,14 @@
-import type { InboundEnvelope, EliChannelMessage, InboundMediaItem } from "./types.js";
+import { withBridgeContract } from "./contract.js";
+import type {
+  EliBridgeMediaItem,
+  EliBridgeContext,
+  EliChannelMessage,
+  InboundEnvelope,
+  InboundMediaItem,
+} from "./types.js";
 
-function mediaToPayload(item: InboundMediaItem): Record<string, any> {
-  const payload: Record<string, any> = { media_type: item.media_type };
+function mediaToPayload(item: InboundMediaItem): EliBridgeMediaItem {
+  const payload: EliBridgeMediaItem = { media_type: item.media_type };
   if (item.mime_type) payload.mime_type = item.mime_type;
   if (item.filename) payload.filename = item.filename;
   if (item.path) payload.path = item.path;
@@ -17,7 +24,7 @@ export function envelopeToEliMessage(env: InboundEnvelope): EliChannelMessage {
   const chatId = env.chatId ?? env.senderId;
   const sessionId = `${env.channel}:${env.accountId}:${chatId}`;
 
-  const context: Record<string, any> = {
+  const context: EliBridgeContext = {
     source_channel: env.channel,
     account_id: env.accountId,
     sender_id: env.senderId,
@@ -34,7 +41,7 @@ export function envelopeToEliMessage(env: InboundEnvelope): EliChannelMessage {
     context.media_types = env.media_types ?? [];
   }
 
-  return {
+  return withBridgeContract({
     session_id: sessionId,
     channel: "webhook",
     content: typeof env.text === "string" ? env.text : JSON.stringify(env.text),
@@ -44,7 +51,7 @@ export function envelopeToEliMessage(env: InboundEnvelope): EliChannelMessage {
     media: env.media?.map(mediaToPayload) ?? [],
     context,
     output_channel: "webhook",
-  };
+  });
 }
 
 /**

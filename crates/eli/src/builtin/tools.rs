@@ -15,6 +15,7 @@ use tempfile::NamedTempFile;
 use crate::builtin::shell_manager::shell_manager;
 use crate::builtin::tape::TapeService;
 use crate::envelope::ValueExt;
+use crate::sidecar_contract::{SidecarNoticeRequest, SidecarToolRequest, contract_version};
 use crate::skills::discover_skills;
 use crate::tools::{REGISTRY, shorten_text};
 
@@ -657,10 +658,11 @@ fn extract_notice_params(
 }
 
 async fn send_notice(url: &str, session_id: &str, description: &str) {
-    let payload = serde_json::json!({
-        "session_id": session_id,
-        "text": description,
-    });
+    let payload = SidecarNoticeRequest {
+        contract_version: contract_version(),
+        session_id: session_id.to_owned(),
+        text: description.to_owned(),
+    };
     let notify_url = format!("{url}/notify");
     let mut req = HTTP_CLIENT
         .post(&notify_url)
@@ -2057,14 +2059,29 @@ fn build_sidecar_request_payload(
     description: Option<&str>,
     session_id: &str,
 ) -> Value {
-    let mut payload = serde_json::json!({ "params": params });
-    if let Some(description) = description.map(str::trim).filter(|s| !s.is_empty()) {
-        payload["description"] = Value::String(description.to_owned());
+    serde_json::to_value(SidecarToolRequest {
+        contract_version: contract_version(),
+        params,
+        description: normalized_description(description),
+        session_id: normalized_session_id(session_id),
+    })
+    .unwrap_or_default()
+}
+
+fn normalized_description(description: Option<&str>) -> Option<String> {
+    description
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn normalized_session_id(session_id: &str) -> Option<String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        None
+    } else {
+        Some(session_id.to_owned())
     }
-    if !session_id.is_empty() {
-        payload["session_id"] = Value::String(session_id.to_owned());
-    }
-    payload
 }
 
 #[cfg(test)]
@@ -2154,6 +2171,7 @@ mod tests {
             "session-1",
         );
 
+        assert_eq!(payload["contract_version"], json!("eli.sidecar.v1"));
         assert_eq!(payload["description"], json!("同步飞书日程"));
         assert_eq!(payload["session_id"], json!("session-1"));
         assert_eq!(

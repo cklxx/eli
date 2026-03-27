@@ -7,9 +7,13 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import express from "express";
+import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { registry } from "../src/registry.js";
 import { initBridge, sendToEli, startOutboundServer } from "../src/bridge.js";
+import { ELI_BRIDGE_CONTRACT_VERSION } from "../src/contract.js";
 import { envelopeToEliMessage, parseOutboundTarget } from "../src/envelope.js";
 import { beginPendingTyping, pendingTyping, sessionContexts } from "../src/runtime.js";
 import type { ChannelPlugin, InboundEnvelope, EliChannelMessage } from "../src/types.js";
@@ -22,6 +26,23 @@ let sidecarServer: Server | undefined;
 let capturedInbound: any[] = [];
 let sentMessages: Array<{ text: string; chatId: string; accountId: string }> = [];
 let cleanupCalls: Array<{ typingState: any; accountId: string }> = [];
+
+function fixture(name: string): any {
+  const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../contracts/v1");
+  return JSON.parse(readFileSync(path.join(dir, name), "utf8"));
+}
+
+function contractMessage(
+  message: Omit<EliChannelMessage, "contract_version">,
+): EliChannelMessage {
+  return { contract_version: ELI_BRIDGE_CONTRACT_VERSION, ...message };
+}
+
+function contractPayload<T extends Record<string, unknown>>(
+  payload: T,
+): T & { contract_version: string } {
+  return { contract_version: ELI_BRIDGE_CONTRACT_VERSION, ...payload };
+}
 
 function connectionRefusedError(): Error {
   const cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:3100"), {
@@ -122,6 +143,7 @@ describe("inbound: sendToEli", () => {
     expect(capturedInbound).toHaveLength(1);
     const msg = capturedInbound[0];
     expect(msg.session_id).toBe("mock-channel:default:sender_1");
+    expect(msg.contract_version).toBe(ELI_BRIDGE_CONTRACT_VERSION);
     expect(msg.channel).toBe("webhook");
     expect(msg.content).toBe("Hello from mock");
     expect(msg.chat_id).toBe("sender_1");
@@ -165,7 +187,7 @@ describe("outbound: eli callback", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractMessage({
         session_id: "mock-channel:default:user_1",
         channel: "webhook",
         content: "Hello from eli",
@@ -177,7 +199,7 @@ describe("outbound: eli callback", () => {
           sender_id: "user_1",
         },
         output_channel: "webhook",
-      }),
+      })),
     });
 
     expect(resp.status).toBe(200);
@@ -197,7 +219,7 @@ describe("outbound: eli callback", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractMessage({
         session_id: "mock-channel:default:user_cleanup",
         channel: "webhook",
         content: "",
@@ -209,7 +231,7 @@ describe("outbound: eli callback", () => {
           _eli_cleanup_only: true,
         },
         output_channel: "webhook",
-      }),
+      })),
     });
 
     const body = (await resp.json()) as any;
@@ -221,6 +243,21 @@ describe("outbound: eli callback", () => {
     expect(cleanupCalls[0].typingState).toEqual({ reaction: "thinking" });
     expect(cleanupCalls[0].accountId).toBe("default");
     expect(pendingTyping.has("mock-channel:default:user_cleanup")).toBe(false);
+  });
+
+  it("rejects unsupported contract_version", async () => {
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...fixture("channel-message.json"),
+        contract_version: "eli.sidecar.v9",
+      }),
+    });
+
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as any;
+    expect(body.error).toContain("unsupported contract_version");
   });
 
   it("queues typing cleanup when outbound arrives before typing setup completes", async () => {
@@ -250,7 +287,7 @@ describe("outbound: eli callback", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractMessage({
         session_id: "mock-channel:default:user_race",
         channel: "webhook",
         content: "Hello from eli",
@@ -262,7 +299,7 @@ describe("outbound: eli callback", () => {
           sender_id: "user_race",
         },
         output_channel: "webhook",
-      }),
+      })),
     });
 
     expect(resp.status).toBe(200);
@@ -307,7 +344,7 @@ describe("outbound: eli callback", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractMessage({
         session_id: "no-lifecycle:default:user_legacy",
         channel: "webhook",
         content: "reply",
@@ -317,7 +354,7 @@ describe("outbound: eli callback", () => {
           account_id: "default",
         },
         output_channel: "webhook",
-      }),
+      })),
     });
 
     expect(resp.status).toBe(200);
@@ -356,7 +393,7 @@ describe("outbound: eli callback", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractMessage({
         session_id: "no-lifecycle:default:user_fallback",
         channel: "webhook",
         content: "reply",
@@ -366,7 +403,7 @@ describe("outbound: eli callback", () => {
           chat_id: "user_fallback",
         },
         output_channel: "webhook",
-      }),
+      })),
     });
 
     expect(resp.status).toBe(200);
@@ -379,14 +416,14 @@ describe("outbound: eli callback", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractMessage({
         session_id: "x",
         channel: "webhook",
         content: "Hello",
         chat_id: "u",
         context: { source_channel: "nonexistent" },
         output_channel: "webhook",
-      }),
+      })),
     });
     expect(resp.status).toBe(404);
   });
@@ -395,14 +432,14 @@ describe("outbound: eli callback", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractMessage({
         session_id: "x",
         channel: "webhook",
         content: "Hello",
         chat_id: "u",
         context: {},
         output_channel: "webhook",
-      }),
+      })),
     });
     expect(resp.status).toBe(400);
   });
@@ -435,13 +472,13 @@ describe("tool execution", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/tools/bash`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractPayload({
         session_id: "mock-channel:default:user_1",
         description: "查看当前工作目录",
         params: {
           cmd: "pwd",
         },
-      }),
+      })),
     });
 
     expect(resp.status).toBe(200);
@@ -484,10 +521,10 @@ describe("tool execution", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/tools/custom_tool`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractPayload({
         session_id: "mock-channel:default:user_2",
         params: { value: 1 },
-      }),
+      })),
     });
 
     expect(resp.status).toBe(200);
@@ -519,10 +556,10 @@ describe("tool execution", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/notify`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractPayload({
         session_id: "mock-channel:default:user_3",
         text: "正在读取文件",
-      }),
+      })),
     });
 
     const body = (await resp.json()) as any;
@@ -568,7 +605,7 @@ describe("outbound media", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractMessage({
         session_id: "media-channel:default:user_m",
         channel: "webhook",
         content: "Here is the image",
@@ -581,7 +618,7 @@ describe("outbound media", () => {
           ],
         },
         output_channel: "webhook",
-      }),
+      })),
     });
 
     expect(resp.status).toBe(200);
@@ -596,11 +633,43 @@ describe("outbound media", () => {
     expect(mediaCalls[0].mediaType).toBe("image");
   });
 
+  it("prefers top-level media when contract payload includes it", async () => {
+    let mediaCalls: Array<{ mediaPath: string; mediaType: string }> = [];
+    const mediaChannel: ChannelPlugin = {
+      meta: { id: "mock-channel", label: "Media Channel" },
+      config: { listAccountIds: () => ["default"], resolveAccount: () => ({}) },
+      capabilities: { chatTypes: ["direct"] },
+      outbound: {
+        deliveryMode: "direct",
+        sendText: async ({ text, to, accountId }: any) => {
+          sentMessages.push({ text, chatId: to, accountId });
+          return { ok: true };
+        },
+        sendMedia: async (params: any) => {
+          mediaCalls.push({ mediaPath: params.mediaPath, mediaType: params.mediaType });
+          return { ok: true };
+        },
+      },
+    };
+    registry.channels.clear();
+    registry.registerChannel(mediaChannel);
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(fixture("channel-message.json")),
+    });
+
+    expect(resp.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mediaCalls).toEqual([{ mediaPath: "/tmp/fixture.png", mediaType: "image" }]);
+  });
+
   it("sends text even when no outbound_media present (backward compatible)", async () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractMessage({
         session_id: "mock-channel:default:user_compat",
         channel: "webhook",
         content: "Normal text reply",
@@ -610,7 +679,7 @@ describe("outbound media", () => {
           account_id: "default",
         },
         output_channel: "webhook",
-      }),
+      })),
     });
 
     expect(resp.status).toBe(200);
@@ -634,7 +703,7 @@ describe("outbound media", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractMessage({
         session_id: "fail-channel:default:user_err",
         channel: "webhook",
         content: "Will fail",
@@ -644,7 +713,7 @@ describe("outbound media", () => {
           account_id: "default",
         },
         output_channel: "webhook",
-      }),
+      })),
     });
 
     expect(resp.status).toBe(500);
@@ -676,7 +745,7 @@ describe("outbound media", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractMessage({
         session_id: "mixed-channel:default:user_mix",
         channel: "webhook",
         content: "Text should still arrive",
@@ -689,7 +758,7 @@ describe("outbound media", () => {
           ],
         },
         output_channel: "webhook",
-      }),
+      })),
     });
 
     // Text must succeed with 200.
@@ -710,7 +779,7 @@ describe("outbound media", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractMessage({
         session_id: "mock-channel:default:user_nosm",
         channel: "webhook",
         content: "Text with media in context",
@@ -723,7 +792,7 @@ describe("outbound media", () => {
           ],
         },
         output_channel: "webhook",
-      }),
+      })),
     });
 
     // Must still succeed — media is just ignored.
@@ -756,7 +825,7 @@ describe("outbound media", () => {
     const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(contractMessage({
         session_id: "openclaw-lark:default:user_fs",
         channel: "webhook",
         content: "Feishu reply with image",
@@ -769,7 +838,7 @@ describe("outbound media", () => {
           ],
         },
         output_channel: "webhook",
-      }),
+      })),
     });
 
     expect(resp.status).toBe(200);
@@ -800,6 +869,7 @@ describe("envelope conversion", () => {
     });
 
     expect(msg.session_id).toBe("lark:bot1:group_789");
+    expect(msg.contract_version).toBe(ELI_BRIDGE_CONTRACT_VERSION);
     expect(msg.channel).toBe("webhook");
     expect(msg.chat_id).toBe("group_789");
     expect(msg.content).toBe("Hi team");
@@ -810,6 +880,7 @@ describe("envelope conversion", () => {
 
   it("parseOutboundTarget extracts routing fields", () => {
     const target = parseOutboundTarget({
+      contract_version: ELI_BRIDGE_CONTRACT_VERSION,
       session_id: "lark:default:u1",
       channel: "webhook",
       content: "resp",
@@ -823,6 +894,29 @@ describe("envelope conversion", () => {
     expect(target.accountId).toBe("default");
     expect(target.chatId).toBe("u1");
     expect(target.chatType).toBe("direct");
+  });
+
+  it("matches the shared inbound fixture", () => {
+    const env: InboundEnvelope = {
+      channel: "mock-channel",
+      accountId: "default",
+      senderId: "sender_fixture",
+      senderName: "Fixture User",
+      chatType: "direct",
+      chatId: "user_fixture",
+      text: "Hello from fixture",
+      media: [
+        {
+          media_type: "image",
+          mime_type: "image/png",
+          filename: "fixture.png",
+          data_base64: "AQID",
+        },
+      ],
+      channel_target: "route:user_fixture",
+    };
+
+    expect(envelopeToEliMessage(env)).toEqual(fixture("inbound-message.json"));
   });
 });
 

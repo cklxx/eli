@@ -173,12 +173,28 @@ export interface ChannelLifecycleHooks {
 // Inbound envelope — normalized message from any channel.
 // ---------------------------------------------------------------------------
 
-export interface InboundMediaItem {
-  media_type: "image" | "file" | "audio" | "video" | "sticker";
+export interface EliBridgeMediaItem {
+  media_type: "image" | "file" | "audio" | "video" | "sticker" | "document";
   mime_type?: string;
   filename?: string;
   path?: string;
   data_base64?: string;
+}
+
+export interface InboundMediaItem extends EliBridgeMediaItem {}
+
+export interface EliBridgeContext {
+  source_channel?: string;
+  account_id?: string;
+  sender_id?: string;
+  sender_name?: string;
+  chat_type?: "direct" | "group" | "p2p" | string;
+  group_label?: string;
+  reply_to_id?: string;
+  channel_target?: string;
+  outbound_media?: EliBridgeMediaItem[];
+  _eli_cleanup_only?: boolean;
+  [key: string]: any;
 }
 
 export interface InboundEnvelope {
@@ -286,12 +302,14 @@ export interface PluginLogger {
 // ---------------------------------------------------------------------------
 
 export interface EliChannelMessage {
+  contract_version: string;
   session_id: string;
   channel: string;
   content: string;
   chat_id: string;
   is_active: boolean;
   kind?: "normal" | "error" | "command";
-  context: Record<string, any>;
+  context: EliBridgeContext;
   output_channel: string;
+  media?: EliBridgeMediaItem[];
 }
