@@ -94,9 +94,9 @@ The sidecar launches a Node.js bridge that loads any OpenClaw channel plugin. Fi
 
 ## Architecture
 
-<video src="https://github.com/cklxx/eli/raw/main/site/assets/architecture.mp4" width="100%" autoplay loop muted playsinline></video>
+[![Architecture](site/assets/architecture.png)](https://cklxx.github.io/eli/#architecture)
 
-> Click any module on the [interactive diagram](https://cklxx.github.io/eli/#architecture) to explore.
+> [**Interactive diagram**](https://cklxx.github.io/eli/#architecture) — click any module to explore &nbsp;|&nbsp; [**Video walkthrough**](https://github.com/cklxx/eli/raw/main/site/assets/architecture.mp4)
 
 | Crate | Version | Role |
 |-------|---------|------|
