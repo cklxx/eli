@@ -171,6 +171,12 @@ impl EliFramework {
             let prompt = Self::build_prompt(&rt, &inbound, &session_id, &state).await;
             let state = Self::state_with_system_prompt(&rt, &prompt, state);
             let model_output = Self::run_model(&rt, &prompt, &session_id, &state, &inbound).await;
+            tracing::info!(
+                session_id = %session_id,
+                output_len = model_output.len(),
+                output_blank = model_output.trim().is_empty(),
+                "run_model completed"
+            );
 
             rt.call_save_state(&session_id, &state, &inbound, &model_output)
                 .await;
@@ -178,6 +184,11 @@ impl EliFramework {
             let outbounds = self
                 .collect_outbounds(&rt, &inbound, &session_id, &state, &model_output)
                 .await;
+            tracing::info!(
+                session_id = %session_id,
+                outbound_count = outbounds.len(),
+                "collect_outbounds completed"
+            );
             for outbound in &outbounds {
                 rt.call_dispatch_outbound(outbound).await;
             }

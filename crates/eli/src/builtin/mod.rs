@@ -485,30 +485,46 @@ impl EliHookSpec for BuiltinImpl {
             .and_then(|v| v.get("outbound_media"))
             .and_then(|v| v.as_array())
             .is_some_and(|a| !a.is_empty());
+        let session_id = envelope_str(message, "session_id", "").to_owned();
         if content.trim().is_empty() && !cleanup_only && !has_media {
+            tracing::warn!(
+                session_id = %session_id,
+                channel = %channel_field,
+                output_channel = %out_ch,
+                "dispatch_outbound skipped empty message"
+            );
             return Some(false);
         }
 
         let chat_id = envelope_str(message, "chat_id", "").to_owned();
         if chat_id.is_empty() {
+            tracing::warn!(
+                session_id = %session_id,
+                channel = %channel_field,
+                "dispatch_outbound skipped missing chat_id"
+            );
             return Some(false);
         }
 
-        let Some(ch) = maybe_channel else {
-            return Some(false);
-        };
-
-        let session_id = envelope_str(message, "session_id", "").to_owned();
-        let reply_context = message
-            .get("context")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
         let target_ch = if !out_ch.is_empty() {
             &out_ch
         } else {
             &channel_field
         };
+        let Some(ch) = maybe_channel else {
+            tracing::warn!(
+                session_id = %session_id,
+                channel = %target_ch,
+                "dispatch_outbound skipped missing channel"
+            );
+            return Some(false);
+        };
+
+        let reply_context = message
+            .get("context")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
         let reply = ChannelMessage::new(&session_id, target_ch, &content)
             .with_chat_id(&chat_id)
             .with_context(reply_context)

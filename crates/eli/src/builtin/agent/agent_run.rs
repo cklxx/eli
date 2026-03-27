@@ -437,12 +437,27 @@ async fn process_agent_result(
     settings: &AgentSettings,
 ) -> Result<String, ConduitError> {
     match result {
-        Err(e) => {
+        Err(ref e) => {
+            tracing::warn!(
+                tape = tape_name,
+                elapsed_ms,
+                error = %e.message,
+                "agent.run finished with error"
+            );
             record_run_event(elapsed_ms, "error", Some(&e.message), &[]);
-            Err(e)
+            Err(e.clone())
         }
         Ok(ref output) if output.kind == ToolAutoResultKind::Text => {
             let text = output.text.clone().unwrap_or_default();
+            tracing::info!(
+                tape = tape_name,
+                elapsed_ms,
+                text_len = text.len(),
+                text_blank = text.trim().is_empty(),
+                tool_calls = output.tool_calls.len(),
+                tool_results = output.tool_results.len(),
+                "agent.run finished"
+            );
             extract_outbound_media(&output.tool_results);
             record_run_event(elapsed_ms, "ok", None, &output.usage);
             maybe_auto_handoff(tapes, tape_name, output, &text, settings).await;
@@ -454,6 +469,13 @@ async fn process_agent_result(
                 .as_ref()
                 .map(|e| format!("{}: {}", e.kind.as_str(), e.message))
                 .unwrap_or_else(|| "tool_auto_error: unknown".to_owned());
+            tracing::warn!(
+                tape = tape_name,
+                elapsed_ms,
+                error = %error_msg,
+                kind = ?output.kind,
+                "agent.run finished with non-text result"
+            );
             record_run_event(elapsed_ms, "error", Some(&error_msg), &output.usage);
             Err(ConduitError::new(ErrorKind::Unknown, error_msg))
         }

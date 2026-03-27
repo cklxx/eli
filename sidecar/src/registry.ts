@@ -19,7 +19,7 @@ class Registry {
       log.warn("channel already registered, overwriting", { id });
     }
     this.channels.set(id, plugin);
-    log.info("channel registered", { id });
+    log.debug("channel registered", { id });
   }
 
   registerTool(tool: ToolDefinition): void {
@@ -27,12 +27,12 @@ class Registry {
       log.warn("tool already registered, overwriting", { name: tool.name });
     }
     this.tools.set(tool.name, tool);
-    log.info("tool registered", { name: tool.name });
+    log.debug("tool registered", { name: tool.name });
   }
 
   registerHook(handler: HookHandler, options: HookOptions = {}): void {
     this.hooks.push({ handler, options });
-    log.info("hook registered", { event: options.eventType ?? "any" });
+    log.debug("hook registered", { event: options.eventType ?? "any" });
   }
 }
 

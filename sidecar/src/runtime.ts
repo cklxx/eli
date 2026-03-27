@@ -342,7 +342,7 @@ function buildPluginRuntime(config: SidecarConfig) {
         channels: config.channels,
       }),
     },
-    log: (...args: any[]) => log.info(args.map(String).join(" ")),
+    log: (...args: any[]) => log.debug(args.map(String).join(" ")),
     error: (...args: any[]) => log.error(args.map(String).join(" ")),
     logging: {
       shouldLogVerbose: () => false,
@@ -377,7 +377,7 @@ function buildPluginRuntime(config: SidecarConfig) {
           // Extract chatId from the "To" field (format: "channel:accountId:chatId" or just chatId)
           const chatId = to.includes(":") ? to.split(":").pop()! : to;
 
-          log.info("intercepted dispatchReplyFromConfig", { session: sessionKey, to, sender: senderName, body: String(textBody).substring(0, 100) });
+          log.debug("dispatch", { session: sessionKey, sender: senderName });
 
           // Save session context for tool execution.
           const messageId = ctx.MessageSid ?? ctx.MessageId ?? ctx.messageId ?? "";
@@ -482,7 +482,7 @@ function buildPluginRuntime(config: SidecarConfig) {
           const channel = ctx.Channel ?? ctx.channel ?? "unknown";
           const accountId = ctx.AccountId ?? ctx.accountId ?? "default";
 
-          log.info("intercepted system command", { body });
+          log.debug("system command", { body });
 
           const envelope: InboundEnvelope = {
             channel,
@@ -576,7 +576,7 @@ export async function loadPlugins(config: SidecarConfig): Promise<void> {
   const pluginRuntime = buildPluginRuntime(config);
 
   for (const pluginName of config.plugins) {
-    log.info("loading plugin", { plugin: pluginName });
+    log.debug("loading plugin", { plugin: pluginName });
     try {
       const mod = require(pluginName);
       const plugin: OpenClawPluginDefinition = mod.default ?? mod;
@@ -590,7 +590,6 @@ export async function loadPlugins(config: SidecarConfig): Promise<void> {
       if (plugin.lifecycle?.initRuntime) {
         try {
           plugin.lifecycle.initRuntime(pluginRuntime, pluginName);
-          log.info("lifecycle.initRuntime called", { plugin: pluginName });
         } catch (e: any) {
           log.warn("lifecycle.initRuntime failed", { plugin: pluginName, err: e.message });
         }
@@ -600,7 +599,6 @@ export async function loadPlugins(config: SidecarConfig): Promise<void> {
           const pluginDir = require("path").dirname(require.resolve(pluginName));
           const { LarkClient } = require(pluginDir + "/src/core/lark-client.js");
           LarkClient.setRuntime(pluginRuntime);
-          log.info("injected runtime", { plugin: pluginName });
 
           // Override the static getter permanently so even if a new class copy
           // appears, calls to LarkClient.runtime still work.
@@ -628,7 +626,7 @@ export async function loadPlugins(config: SidecarConfig): Promise<void> {
 
       const api = new SidecarPluginApi(plugin.id ?? pluginName, config, pluginRuntime);
       plugin.register(api);
-      log.info("plugin loaded", { plugin: plugin.id ?? pluginName });
+      log.info("loaded plugin", { plugin: plugin.id ?? pluginName });
 
       // Discover SKILL.md files from the plugin's skills/ directory.
       installPluginSkills(pluginName);
@@ -815,7 +813,7 @@ function buildGatewayContext(
 
     // Status callback — log and ignore.
     setStatus: (status: any) => {
-      logger(`${channelId}.${accountId}`).info("status", { status: JSON.stringify(status) });
+      logger(`${channelId}.${accountId}`).debug("status", { status: JSON.stringify(status) });
     },
 
     // Abort signal for graceful shutdown.
@@ -836,7 +834,7 @@ function buildGatewayContext(
 export async function startChannels(config: SidecarConfig): Promise<void> {
   for (const [channelId, plugin] of registry.channels) {
     if (!plugin.gateway) {
-      log.info("channel has no gateway adapter, outbound only", { channel: channelId });
+      log.debug("channel has no gateway, outbound only", { channel: channelId });
       continue;
     }
 
@@ -932,7 +930,7 @@ export async function startChannels(config: SidecarConfig): Promise<void> {
       }
       // Fire-and-forget: gateways run in the background (some block forever).
       void startFn.call(plugin.gateway, ctx)
-        .then(() => log.info("channel gateway returned", { channel: channelId, account: accountId }))
+        .then(() => log.debug("channel gateway returned", { channel: channelId, account: accountId }))
         .catch((err: any) => log.error("failed to start channel", { channel: channelId, account: accountId, err: String(err) }));
     }
   }
@@ -967,7 +965,7 @@ export async function stopChannels(config: SidecarConfig): Promise<void> {
 
     for (const accountId of accountIds) {
       if (!allowRemoteShutdown) {
-        log.info("skipping remote-affecting channel stop hook by default", { channel: channelId, account: accountId });
+        log.debug("skipping remote stop hook (allow_remote_shutdown=false)", { channel: channelId });
         continue;
       }
 

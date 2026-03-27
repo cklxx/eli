@@ -284,10 +284,12 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
 
         const mediaItems = outboundMediaItems(msg);
 
-        log.info("outbound", {
-          channel: sourceChannel, to, account_id: accountId,
-          text_len: msg.content?.length, media_count: mediaItems.length,
-          cleanup_only: cleanupOnly,
+        log.debug("outbound", {
+          channel: sourceChannel,
+          to,
+          text_len: msg.content?.length,
+          media: mediaItems.length,
+          cleanup: cleanupOnly,
         });
 
         // Remove typing indicator if one was set for this session.
