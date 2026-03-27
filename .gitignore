@@ -24,6 +24,7 @@ backup/
 .gstack/
 .openmax/
 .openmax-worktrees/
+.wrangler/
 test-results/
 
 autoresearch-results.tsv
