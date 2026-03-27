@@ -18,20 +18,15 @@
 
 ---
 
-I needed an AI agent that could live in my team's group chat — not a chatbot, a teammate. Everything in the space was Python, couldn't deploy as a single binary, and fell apart the moment you needed real concurrency. So I built eli in Rust.
+I needed an AI agent in my team's group chat — not a chatbot, a teammate. Everything out there was Python, couldn't ship as a single binary, and broke under real concurrency. So I built eli in Rust.
 
 ```
 $ eli chat
-eli> summarize this repo in one paragraph
+eli> summarize this repo
 
-Eli is a hook-first AI agent framework written in Rust. It runs a 7-stage
-turn pipeline where every stage is a hook point that plugins can override.
-It ships with 22 builtin tools, tape-based conversation history, and works
-across CLI, Telegram, and any channel via an OpenClaw sidecar. The LLM
-layer (nexil) is provider-agnostic — switch between OpenAI, Claude, Copilot,
-DeepSeek, or Ollama with one env var.
-
-eli> /quit
+Eli is a hook-first AI agent framework in Rust. 7-stage turn pipeline,
+22 builtin tools, tape-based history, provider-agnostic LLM layer (nexil).
+Works across CLI, Telegram, and any channel via OpenClaw sidecar.
 ```
 
 ## Why Eli?
@@ -39,13 +34,13 @@ eli> /quit
 |   | Eli | LangChain | CrewAI | AutoGen |
 |---|-----|-----------|--------|---------|
 | **Language** | Rust | Python | Python | Python |
-| **Deploy** | Single static binary | pip + deps | pip + deps | pip + deps |
+| **Deploy** | Single binary | pip + deps | pip + deps | pip + deps |
 | **Architecture** | Hook pipeline (12 points) | Chain / graph | Role-based crew | Multi-agent chat |
-| **Channels** | CLI, Telegram, WeChat, Feishu, Slack, Discord | None (library) | None (library) | None (library) |
-| **Memory** | Tape (append-only, forkable) | Various classes | Shared memory | Chat history |
+| **Channels** | CLI, Telegram, WeChat, Feishu, Slack, Discord | — | — | — |
+| **Memory** | Tape (append-only, forkable) | Various | Shared | Chat history |
 | **Extensibility** | Last-registered-wins hooks | Callbacks + chains | Custom agents | Custom agents |
 
-Eli is smaller and younger. You get Rust's performance, type safety, and single-binary deploys. If you want a mature ecosystem with hundreds of integrations, use LangChain. If you want a fast, self-contained agent that deploys anywhere and handles real concurrency, try eli.
+Rust performance + type safety + single-binary deploys. Smaller ecosystem, zero dependency hell.
 
 ## Quick Start
 
@@ -57,85 +52,83 @@ cp env.example .env    # add your API key
 
 ```bash
 eli chat                    # interactive REPL
-eli run "summarize this"    # one-shot execution
-eli gateway                 # multi-channel listener
+eli run "summarize this"    # one-shot
+eli gateway                 # channel listener (Telegram, Webhook, Sidecar)
 ```
 
 ## Features
 
-- **Drop into any group chat** — WeChat, Feishu, Telegram, Slack, Discord, DingTalk — one command to connect, reads context, calls tools, replies in-thread
-- **Parallel tool execution** — multiple tools run concurrently, complex tasks finish faster
-- **Auto-compacting history** — conversations that grow too long get trimmed automatically, key info preserved
-- **Progress streaming** — reports progress mid-task instead of going silent until done
-- **Image support** — sends images on any channel, CLI and group chat alike
-- **Hot-swap models** — OpenAI, Claude, Copilot, DeepSeek, Gemini, Ollama — switch with one command
-- **Skill system** — define capabilities in Markdown, override at project or global level
-- **Single binary** — `cargo install` or Docker, no dependency hell
-- **MCP server** — plug into Claude Code / Cursor as a tool provider
-- **Auto context branching** — approaching token limit? Auto-forks the conversation, no interruption
+| Feature | Detail |
+|---------|--------|
+| **Group chat native** | WeChat, Feishu, Telegram, Slack, Discord, DingTalk — one command |
+| **Parallel tools** | Concurrent execution, faster complex tasks |
+| **Auto-compact history** | Long conversations trimmed, key info preserved |
+| **Progress streaming** | Reports mid-task, no silent waits |
+| **Image support** | Any channel, CLI included |
+| **Hot-swap models** | OpenAI, Claude, Copilot, DeepSeek, Gemini, Ollama |
+| **Skill system** | Markdown-defined, project/global override |
+| **MCP server** | Plug into Claude Code / Cursor |
+| **Auto context fork** | Token limit → auto-branch, no interruption |
 
 ## Commands
 
-| Command | Description |
+| Command | What it does |
 |---------|-------------|
-| `eli chat` | Interactive REPL with streaming |
+| `eli chat` | Interactive REPL |
 | `eli run "prompt"` | One-shot execution |
-| `eli gateway` | Start channel listeners (Telegram, Webhook, Sidecar) |
-| `eli login` | Authenticate with a provider (OpenAI, Claude, Copilot) |
-| `eli model` | Switch model or list available models |
-| `eli use` / `eli profile` | Switch provider profile |
-| `eli status` | Show auth and config status |
-| `eli tape` | Open tape viewer web UI |
+| `eli gateway` | Start channel listeners |
+| `eli login` | Auth with OpenAI / Claude / Copilot |
+| `eli model` | Switch or list models |
+| `eli use` | Switch provider profile |
+| `eli status` | Auth and config overview |
+| `eli tape` | Tape viewer web UI |
 | `eli decisions` | Manage persistent decisions |
 
 ## Gateway & Channels
 
 ```bash
-# Telegram — native channel
-ELI_TELEGRAM_TOKEN=xxx eli gateway
-
-# Feishu / WeChat / DingTalk / Discord — via OpenClaw sidecar (auto-starts)
-eli gateway
+ELI_TELEGRAM_TOKEN=xxx eli gateway          # Telegram (native)
+eli gateway                                  # Feishu / WeChat / DingTalk / Discord (OpenClaw sidecar, auto-starts)
 ```
 
-The sidecar launches a Node.js bridge that loads any OpenClaw channel plugin. First run prompts for credentials interactively.
+Sidecar = Node.js bridge loading OpenClaw channel plugins. First run prompts for credentials.
 
 ## Architecture
 
 ![Architecture](site/assets/architecture.png)
 
-> [**Interactive diagram**](https://cklxx.github.io/eli/#architecture) — click any module to explore &nbsp;|&nbsp; [**Video walkthrough**](https://github.com/cklxx/eli/blob/main/site/assets/architecture.mp4)
+> [**Interactive diagram**](https://cklxx.github.io/eli/#architecture) &nbsp;|&nbsp; [**Video walkthrough**](https://github.com/cklxx/eli/blob/main/site/assets/architecture.mp4)
 
 | Crate | Version | Role |
 |-------|---------|------|
-| **nexil** | 0.7.0 | Provider-agnostic LLM toolkit — streaming, tool calls, tape storage, embeddings, OAuth |
-| **eli** | 0.4.2 | Hook-first agent framework — pipeline, channels, tools, skills, decisions |
-| **eli-sidecar** | 0.2.0 | Node.js bridge — loads OpenClaw plugins, exposes channels + tools over HTTP or MCP |
+| **nexil** | 0.7.0 | Provider-agnostic LLM — streaming, tool calls, tape, embeddings, OAuth |
+| **eli** | 0.4.2 | Hook-first agent — pipeline, channels, tools, skills, decisions |
+| **eli-sidecar** | 0.2.0 | Node.js bridge — OpenClaw plugins over HTTP / MCP |
 
 ## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ELI_MODEL` | `openai:gpt-4o-mini` | Model identifier (`provider:model`) |
+| `ELI_MODEL` | `openai:gpt-4o-mini` | `provider:model` identifier |
 | `ELI_API_KEY` | — | Provider API key |
-| `ELI_API_BASE` | — | Custom API endpoint |
-| `ELI_MAX_STEPS` | `50` | Max tool-use iterations per turn |
+| `ELI_API_BASE` | — | Custom endpoint |
+| `ELI_MAX_STEPS` | `50` | Max tool iterations per turn |
 | `ELI_TELEGRAM_TOKEN` | — | Telegram bot token |
-| `ELI_TELEGRAM_ALLOW_USERS` | — | Comma-separated user ID allowlist |
-| `ELI_TELEGRAM_ALLOW_CHATS` | — | Comma-separated chat ID allowlist |
-| `ELI_WEBHOOK_PORT` | `3100` | Webhook listener port |
-| `ELI_HOME` | `~/.eli` | Config and data directory |
-| `ELI_TRACE` | — | Enable structured trace logging (`1` / `true`) |
+| `ELI_TELEGRAM_ALLOW_USERS` | — | User ID allowlist (comma-separated) |
+| `ELI_TELEGRAM_ALLOW_CHATS` | — | Chat ID allowlist (comma-separated) |
+| `ELI_WEBHOOK_PORT` | `3100` | Webhook port |
+| `ELI_HOME` | `~/.eli` | Config / data directory |
+| `ELI_TRACE` | — | Trace logging (`1` / `true`) |
 
-Profiles: `~/.eli/config.toml` — per-provider API keys and defaults.
+Profiles: `~/.eli/config.toml`
 
 ## Skills
 
-Skills are Markdown files with YAML frontmatter, discovered from:
+Markdown + YAML frontmatter. Discovery order:
 
-1. `.agents/skills/<name>/SKILL.md` (project — highest priority)
-2. `~/.eli/skills/<name>/SKILL.md` (global)
-3. Sidecar-synthesized skills (from plugin tool groups)
+1. `.agents/skills/<name>/SKILL.md` — project (highest)
+2. `~/.eli/skills/<name>/SKILL.md` — global
+3. Sidecar-synthesized (from plugin tool groups)
 
 ## License
 
