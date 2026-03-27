@@ -35,6 +35,8 @@ pub enum PromptMode {
 pub enum SectionKind {
     /// Base system prompt from SOUL.md or built-in default.
     Identity,
+    /// System instructions from SYSTEM.md (behavioral posture, tool usage).
+    System,
     /// Safety hard limits and project policies.
     Guardrails,
     /// Workspace conventions and file rules.
@@ -74,6 +76,11 @@ impl PromptBuilder {
                     truncation_priority: 255,
                 },
                 SectionConfig {
+                    kind: SectionKind::System,
+                    max_chars: Some(4_000),
+                    truncation_priority: 250,
+                },
+                SectionConfig {
                     kind: SectionKind::Guardrails,
                     max_chars: Some(1_500),
                     truncation_priority: 240,
@@ -99,6 +106,11 @@ impl PromptBuilder {
                     kind: SectionKind::Identity,
                     max_chars: None,
                     truncation_priority: 255,
+                },
+                SectionConfig {
+                    kind: SectionKind::System,
+                    max_chars: Some(4_000),
+                    truncation_priority: 250,
                 },
                 SectionConfig {
                     kind: SectionKind::Guardrails,
@@ -250,6 +262,7 @@ impl PromptBuilder {
     ) -> String {
         match sec.kind {
             SectionKind::Identity => load_system_prompt_base(settings, workspace),
+            SectionKind::System => load_system_instructions(settings, workspace),
             SectionKind::Guardrails => build_guardrails_section(),
             SectionKind::Workspace => build_workspace_section(workspace),
             SectionKind::Skills => {
@@ -279,7 +292,7 @@ fn build_guardrails_section() -> String {
 
 ## Safety
 - NEVER fabricate tool outputs, file contents, or completion claims.
-- NEVER execute irreversible actions without explicit user consent.
+- NEVER execute irreversible actions without notifying the user.
 - NEVER include secrets, API keys, or credentials in responses.
 - When blocked, escalate with concrete evidence of the blocker.
 
@@ -342,6 +355,31 @@ fn load_system_prompt_base(settings: &AgentSettings, workspace: &Path) -> String
     }
 
     default_system_prompt().to_owned()
+}
+
+/// Load system instructions from SYSTEM.md with precedence:
+/// 1. `.agents/SYSTEM.md` (project-level)
+/// 2. `~/.eli/SYSTEM.md` (global user-level)
+/// 3. Empty (no system instructions — the guardrails section covers essentials)
+///
+/// SYSTEM.md defines behavioral posture, tool usage patterns, and operational rules,
+/// separate from the persona/personality in SOUL.md.
+fn load_system_instructions(settings: &AgentSettings, workspace: &Path) -> String {
+    for path in [
+        workspace.join(".agents").join("SYSTEM.md"),
+        settings.home.join("SYSTEM.md"),
+    ] {
+        if path.is_file()
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_owned();
+            }
+        }
+    }
+
+    String::new()
 }
 
 /// Fallback system prompt used only when no SOUL.md is found in the project
