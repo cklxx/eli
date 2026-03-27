@@ -122,9 +122,17 @@ impl ClientRegistry {
             reqwest::header::HeaderValue::from_static("application/json"),
         );
 
+        // OAuth tokens force streaming with extended thinking, which can take several minutes.
+        // Use a much longer timeout to avoid cutting off long-running SSE streams.
+        let timeout_secs = if is_oauth_token {
+            self.config.timeout_secs.max(600)
+        } else {
+            self.config.timeout_secs
+        };
+
         Client::builder()
             .default_headers(headers)
-            .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
+            .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .unwrap_or_else(|err| {
                 tracing::warn!(%err, provider, "failed to build HTTP client, falling back to default");

@@ -114,6 +114,7 @@ struct MessagesAccumulator {
     current_tool: Option<serde_json::Map<String, Value>>,
     tool_args: String,
     usage: Option<Value>,
+    error: Option<String>,
 }
 
 impl MessagesAccumulator {
@@ -124,6 +125,7 @@ impl MessagesAccumulator {
             current_tool: None,
             tool_args: String::new(),
             usage: None,
+            error: None,
         }
     }
 
@@ -134,6 +136,19 @@ impl MessagesAccumulator {
             "content_block_stop" => self.handle_block_stop(),
             "message_delta" => {
                 self.usage = event.get("usage").cloned();
+            }
+            "error" => {
+                let msg = event
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("unknown error");
+                let kind = event
+                    .get("error")
+                    .and_then(|e| e.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("error");
+                self.error = Some(format!("{kind}: {msg}"));
             }
             _ => {}
         }
@@ -203,6 +218,9 @@ fn parse_messages_sse(buffer: &str) -> Result<Value, ConduitError> {
     for event in sse_events(buffer) {
         acc.process_event(&event);
     }
+    if let Some(err) = acc.error {
+        return Err(ConduitError::new(ErrorKind::Provider, err));
+    }
     Ok(acc.into_response())
 }
 
@@ -231,7 +249,14 @@ impl LLMCore {
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| {
-                ConduitError::new(ErrorKind::Provider, format!("SSE stream error: {e}"))
+                // Include the source chain so "error decoding response body" shows the underlying cause.
+                let source = std::error::Error::source(&e)
+                    .map(|s| format!(": {s}"))
+                    .unwrap_or_default();
+                ConduitError::new(
+                    ErrorKind::Temporary,
+                    format!("SSE stream error: {e}{source}"),
+                )
             })?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
         }
