@@ -94,16 +94,9 @@ The sidecar launches a Node.js bridge that loads any OpenClaw channel plugin. Fi
 
 ## Architecture
 
-```
-                    ┌──────────────────────────────────────┐
-  CLI / Telegram ──>│             eli (Rust)                │
-                    │                                      │
-                    │  resolve_session -> load_state ->    │
-  Feishu / Slack ──>│  build_prompt -> run_model ->        │<── nexil (LLM)
-  (via sidecar)     │  save_state -> render_outbound ->    │
-                    │  dispatch_outbound                   │
-                    └──────────────────────────────────────┘
-```
+<video src="https://github.com/cklxx/eli/raw/main/site/assets/architecture.mp4" width="100%" autoplay loop muted playsinline></video>
+
+> Click any module on the [interactive diagram](https://cklxx.github.io/eli/#architecture) to explore.
 
 | Crate | Version | Role |
 |-------|---------|------|
