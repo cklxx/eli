@@ -1799,10 +1799,7 @@ fn tool_subagent() -> Tool {
                         // needed for outbound routing through the sidecar).
                         let mut ctx = inbound_context;
                         ctx.insert("source".to_owned(), serde_json::json!("subagent"));
-                        ctx.insert(
-                            "agent_id".to_owned(),
-                            serde_json::json!(monitor_agent_id),
-                        );
+                        ctx.insert("agent_id".to_owned(), serde_json::json!(monitor_agent_id));
                         ctx.insert("exit_code".to_owned(), serde_json::json!(exit_code));
 
                         inject(serde_json::json!({

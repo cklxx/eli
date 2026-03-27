@@ -195,10 +195,7 @@ fn spawn_sidecar_process(
         cmd.env("SIDECAR_TELEGRAM_TOKEN", &token);
     }
     // Also forward access control env vars.
-    for var in [
-        "ELI_TELEGRAM_ALLOW_USERS",
-        "ELI_TELEGRAM_ALLOW_CHATS",
-    ] {
+    for var in ["ELI_TELEGRAM_ALLOW_USERS", "ELI_TELEGRAM_ALLOW_CHATS"] {
         if let Ok(val) = std::env::var(var) {
             cmd.env(var, &val);
         }
@@ -388,8 +385,7 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
         let wh_settings = WebhookSettings::from_env();
         // Start sidecar if: sidecar dir exists, webhook is configured, OR
         // Telegram token is set (telegram now runs through sidecar).
-        let telegram_configured =
-            std::env::var("ELI_TELEGRAM_TOKEN").is_ok_and(|t| !t.is_empty());
+        let telegram_configured = std::env::var("ELI_TELEGRAM_TOKEN").is_ok_and(|t| !t.is_empty());
         if find_sidecar_dir().is_some() || wh_settings.is_configured() || telegram_configured {
             sidecar_child = start_sidecar(&wh_settings);
 
