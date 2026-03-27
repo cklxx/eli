@@ -31,14 +31,11 @@ Works across CLI, Telegram, and any channel via OpenClaw sidecar.
 
 ## Why Eli?
 
-|   | Eli | LangChain | CrewAI | AutoGen |
-|---|-----|-----------|--------|---------|
-| **Language** | Rust | Python | Python | Python |
-| **Deploy** | Single binary | pip + deps | pip + deps | pip + deps |
-| **Architecture** | Hook pipeline (12 points) | Chain / graph | Role-based crew | Multi-agent chat |
-| **Channels** | CLI, Telegram, WeChat, Feishu, Slack, Discord | — | — | — |
-| **Memory** | Tape (append-only, forkable) | Various | Shared | Chat history |
-| **Extensibility** | Last-registered-wins hooks | Callbacks + chains | Custom agents | Custom agents |
+|   | Eli | Others (LangChain, CrewAI, AutoGen…) |
+|---|-----|---------------------------------------|
+| **Language** | Rust | Python |
+| **Deploy** | Single binary | pip + deps |
+| **Channels** | CLI, Telegram, WeChat, Feishu, Slack, Discord | — |
 
 Rust performance + type safety + single-binary deploys. Smaller ecosystem, zero dependency hell.
 
