@@ -13,7 +13,10 @@ use crate::builtin::config::EliConfig;
 use crate::control_plane::{BudgetLedger, DispatchFn, TurnContext, turn_usage, with_turn_context};
 use crate::envelope::{ValueExt, unpack_batch_vec};
 use crate::hooks::{ChannelHook, EliHookSpec, HookRuntime, TapeStoreKind};
-use crate::types::{Envelope, MessageHandler, PromptValue, State, TurnResult, TurnUsageInfo};
+use crate::types::{
+    Envelope, MessageHandler, PromptValue, RUNTIME_SYSTEM_PROMPT_KEY, State, TurnResult,
+    TurnUsageInfo,
+};
 
 // ---------------------------------------------------------------------------
 // PluginStatus
@@ -166,6 +169,7 @@ impl EliFramework {
             }
 
             let prompt = Self::build_prompt(&rt, &inbound, &session_id, &state).await;
+            let state = Self::state_with_system_prompt(&rt, &prompt, state);
             let model_output = Self::run_model(&rt, &prompt, &session_id, &state, &inbound).await;
 
             rt.call_save_state(&session_id, &state, &inbound, &model_output)
@@ -309,6 +313,17 @@ impl EliFramework {
         rt.call_build_user_prompt(inbound, session_id, state)
             .await
             .unwrap_or_else(|| PromptValue::Text(inbound.content_text()))
+    }
+
+    fn state_with_system_prompt(rt: &HookRuntime, prompt: &PromptValue, mut state: State) -> State {
+        let system_prompt = rt.call_build_system_prompt(&prompt.as_text(), &state);
+        if let Some(system_prompt) = system_prompt.filter(|text| !text.is_empty()) {
+            state.insert(
+                RUNTIME_SYSTEM_PROMPT_KEY.to_owned(),
+                Value::String(system_prompt),
+            );
+        }
+        state
     }
 
     async fn run_model(
@@ -496,6 +511,36 @@ mod tests {
         }
     }
 
+    struct SystemPromptStateModelPlugin {
+        fragment: String,
+    }
+
+    #[async_trait]
+    impl EliHookSpec for SystemPromptStateModelPlugin {
+        fn plugin_name(&self) -> &str {
+            "system-prompt-state-model-plugin"
+        }
+
+        fn build_system_prompt(&self, _prompt_text: &str, _state: &State) -> Option<String> {
+            Some(self.fragment.clone())
+        }
+
+        async fn run_model(
+            &self,
+            _prompt: &PromptValue,
+            _session_id: &str,
+            state: &State,
+        ) -> Result<Option<String>, HookError> {
+            Ok(Some(
+                state
+                    .get(RUNTIME_SYSTEM_PROMPT_KEY)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("missing")
+                    .to_owned(),
+            ))
+        }
+    }
+
     struct BlockingModelPlugin {
         started: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
@@ -628,6 +673,22 @@ mod tests {
         let msg = json!({"content": "hello", "channel": "telegram", "chat_id": "42"});
         let result = fw.process_inbound(msg).await.unwrap();
         assert_eq!(result.session_id, "telegram:42");
+    }
+
+    #[tokio::test]
+    async fn test_process_inbound_uses_hook_system_prompt_in_run_model_hot_path() {
+        let fw = EliFramework::new();
+        fw.register_plugin(
+            "model",
+            Arc::new(SystemPromptStateModelPlugin {
+                fragment: "from-hook".into(),
+            }) as Arc<dyn EliHookSpec>,
+        )
+        .await;
+
+        let msg = json!({"content": "hello", "session_id": "system-prompt"});
+        let result = fw.process_inbound(msg).await.unwrap();
+        assert_eq!(result.model_output, "from-hook");
     }
 
     #[tokio::test]

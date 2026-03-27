@@ -15,7 +15,7 @@ use crate::builtin::tools::with_tape_runtime;
 use crate::types::PromptValue;
 
 use super::agent_request::{
-    build_system_prompt, build_tool_context, create_llm, lookup_registered_tool, run_tools_once,
+    build_tool_context, create_llm, lookup_registered_tool, run_tools_once, system_prompt_for_turn,
 };
 
 // ---------------------------------------------------------------------------
@@ -394,7 +394,7 @@ pub(super) async fn agent_loop(
     let mut llm = create_llm(settings, model, tapes.store().clone())?;
     let prompt_text = initial_prompt.strict_text();
     let system_prompt =
-        build_system_prompt(settings, &prompt_text, state, allowed_skills, workspace);
+        system_prompt_for_turn(settings, &prompt_text, state, allowed_skills, workspace);
     let display_model = model.unwrap_or(&settings.model);
 
     let start = Instant::now();

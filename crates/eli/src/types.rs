@@ -13,6 +13,9 @@ pub type Envelope = Value;
 /// Session state is a string-keyed map of arbitrary JSON values.
 pub type State = HashMap<String, Value>;
 
+/// Internal state key used to carry the resolved system prompt through one turn.
+pub const RUNTIME_SYSTEM_PROMPT_KEY: &str = "_runtime_system_prompt";
+
 /// An async message handler that receives inbound envelopes.
 pub type MessageHandler =
     Arc<dyn Fn(Envelope) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;

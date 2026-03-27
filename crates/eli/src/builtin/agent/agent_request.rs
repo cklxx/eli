@@ -12,7 +12,7 @@ use crate::builtin::store::ForkTapeStore;
 use crate::prompt_builder::{PromptBuilder, PromptMode};
 
 use crate::tools::{REGISTRY, model_tools, model_tools_cached};
-use crate::types::PromptValue;
+use crate::types::{PromptValue, RUNTIME_SYSTEM_PROMPT_KEY};
 
 pub(super) fn build_tool_state(
     state: &HashMap<String, Value>,
@@ -213,6 +213,25 @@ pub(super) fn build_system_prompt(
     )
 }
 
+fn precomputed_system_prompt(state: &HashMap<String, Value>) -> Option<String> {
+    state
+        .get(RUNTIME_SYSTEM_PROMPT_KEY)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+pub(super) fn system_prompt_for_turn(
+    settings: &AgentSettings,
+    prompt_text: &str,
+    state: &HashMap<String, Value>,
+    allowed_skills: Option<&HashSet<String>>,
+    workspace: &Path,
+) -> String {
+    precomputed_system_prompt(state).unwrap_or_else(|| {
+        build_system_prompt(settings, prompt_text, state, allowed_skills, workspace)
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_tools_once(
     llm: &mut LLM,
@@ -281,4 +300,48 @@ pub(super) async fn run_tools_once(
         .await?;
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::builtin::settings::{ApiBaseConfig, ApiKeyConfig};
+    use nexil::llm::ApiFormat;
+    use serde_json::json;
+
+    fn test_settings(home: &Path) -> AgentSettings {
+        AgentSettings {
+            home: home.to_path_buf(),
+            model: "test-model".into(),
+            fallback_models: None,
+            api_key: ApiKeyConfig::None,
+            api_base: ApiBaseConfig::None,
+            api_format: ApiFormat::Auto,
+            max_steps: 5,
+            max_tokens: 256,
+            model_timeout_seconds: None,
+            verbose: 0,
+            context_window: 128_000,
+        }
+    }
+
+    #[test]
+    fn test_system_prompt_for_turn_prefers_precomputed_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(workspace.join(".agents")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(workspace.join(".agents").join("SOUL.md"), "from-builder").unwrap();
+
+        let mut state = HashMap::new();
+        state.insert(RUNTIME_SYSTEM_PROMPT_KEY.to_owned(), json!("from-state"));
+
+        let result =
+            system_prompt_for_turn(&test_settings(&home), "hello", &state, None, &workspace);
+
+        assert_eq!(result, "from-state");
+    }
 }
