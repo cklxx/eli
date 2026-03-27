@@ -678,6 +678,9 @@ impl LLM {
 
         let max_iterations: usize = 250; // Safety limit for tool-calling rounds
         let mut iteration: usize = 0;
+        let mut last_round_had_errors = false;
+        let mut recovery_nudges: u8 = 0;
+        const MAX_RECOVERY_NUDGES: u8 = 1;
 
         loop {
             iteration += 1;
@@ -723,6 +726,32 @@ impl LLM {
 
             match round.outcome {
                 ToolRoundOutcome::Text(content) => {
+                    // If the model gave up right after tool errors and we haven't
+                    // nudged yet, inject a recovery prompt and let it try again.
+                    if last_round_had_errors && recovery_nudges < MAX_RECOVERY_NUDGES {
+                        recovery_nudges += 1;
+                        last_round_had_errors = false;
+                        tracing::info!(
+                            iteration,
+                            nudge = recovery_nudges,
+                            "model returned text after tool error — injecting recovery nudge"
+                        );
+                        let nudge = serde_json::json!({
+                            "role": "user",
+                            "content": "The previous tool call failed. \
+                                Try a different approach or use alternative tools \
+                                to accomplish the task. Do not give up."
+                        });
+                        in_memory_msgs.push(nudge.clone());
+                        if let Some(tape_name) = tape {
+                            let meta = serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
+                            self.async_tape
+                                .append_entry(tape_name, &TapeEntry::message(nudge, meta))
+                                .await?;
+                        }
+                        continue;
+                    }
+
                     if let Some(tape_name) = tape {
                         let meta = serde_json::json!({ "run_id": Uuid::new_v4().to_string() });
                         let assistant_msg =
@@ -745,6 +774,7 @@ impl LLM {
                     response,
                     execution,
                 } => {
+                    last_round_had_errors = execution.error.is_some();
                     all_tool_calls.extend(execution.tool_calls.clone());
                     all_tool_results.extend(execution.tool_results.clone());
                     self._persist_round(tape, &response, &execution, &mut in_memory_msgs)
