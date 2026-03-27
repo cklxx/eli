@@ -256,22 +256,22 @@
     </div>
 
     <!-- Diagram container -->
-    <div data-anim="scale-in" id="arch-container" class="relative mt-12 overflow-hidden rounded-2xl border shadow-lg" style="border-color: #e2e8f0; background: #0f172a;">
+    <div data-anim="scale-in" id="arch-container" class="relative mt-12 overflow-hidden rounded-2xl border" style="border-color: #e2e8f0; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.06);">
       <svg id="arch-svg" width="100%" height="820" style="display:block;"></svg>
       <!-- Detail panel (slides up from bottom) -->
-      <div id="detail-panel" class="absolute bottom-0 left-0 right-0 z-20 translate-y-full transition-transform duration-300" style="background: linear-gradient(to top, rgba(15,23,42,0.98), rgba(15,23,42,0.94)); backdrop-filter: blur(12px); border-top: 1px solid rgba(99,102,241,0.25);">
+      <div id="detail-panel" class="absolute bottom-0 left-0 right-0 z-20 translate-y-full transition-transform duration-300" style="background: rgba(255,255,255,0.97); backdrop-filter: blur(12px); border-top: 2px solid #e2e8f0; box-shadow: 0 -4px 20px rgba(0,0,0,0.06);">
         <div class="mx-auto max-w-2xl px-6 py-5">
           <div class="flex items-start justify-between">
             <div>
               <div class="flex items-center gap-3">
                 <span id="detail-dot" class="inline-block h-3 w-3 rounded-full"></span>
-                <h3 id="detail-name" class="text-base font-bold" style="color: #f1f5f9;"></h3>
-                <span id="detail-crate" class="rounded-md px-2 py-0.5 text-[10px] font-semibold" style="background: rgba(99,102,241,0.15); color: #a5b4fc;"></span>
+                <h3 id="detail-name" class="text-base font-bold" style="color: #1e293b;"></h3>
+                <span id="detail-crate" class="rounded-md px-2 py-0.5 text-[10px] font-semibold" style="background: #f1f5f9; color: #6366f1;"></span>
               </div>
-              <p id="detail-desc" class="mt-2 text-sm leading-relaxed" style="color: #94a3b8;"></p>
-              <div id="detail-file" class="mt-2 font-mono text-xs" style="color: #64748b;"></div>
+              <p id="detail-desc" class="mt-2 text-sm leading-relaxed" style="color: #475569;"></p>
+              <div id="detail-file" class="mt-2 font-mono text-xs" style="color: #94a3b8;"></div>
             </div>
-            <button id="detail-close" class="ml-4 shrink-0 rounded-md p-1.5 transition-colors hover:bg-white/10" style="color: #64748b;">
+            <button id="detail-close" class="ml-4 shrink-0 rounded-md p-1.5 transition-colors hover:bg-slate-100" style="color: #94a3b8;">
               <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>
             </button>
           </div>
@@ -347,14 +347,14 @@
     const svg = document.getElementById('arch-svg');
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
 
-    /* ── Color palette ── */
+    /* ── Color palette — light theme matching reference ── */
     const C = {
-      channel:   { fill: '#818cf8', bg: 'rgba(129,140,248,0.08)', border: 'rgba(129,140,248,0.25)' },
-      framework: { fill: '#6366f1', bg: 'rgba(99,102,241,0.08)',  border: 'rgba(99,102,241,0.25)'  },
-      agent:     { fill: '#f59e0b', bg: 'rgba(245,158,11,0.08)',  border: 'rgba(245,158,11,0.25)'  },
-      llm:       { fill: '#10b981', bg: 'rgba(16,185,129,0.08)',  border: 'rgba(16,185,129,0.25)'  },
-      provider:  { fill: '#8b5cf6', bg: 'rgba(139,92,246,0.08)',  border: 'rgba(139,92,246,0.25)'  },
-      tape:      { fill: '#ec4899', bg: 'rgba(236,72,153,0.08)',  border: 'rgba(236,72,153,0.25)'  },
+      channel:   { fill: '#6366f1', bg: '#eef2ff', border: '#c7d2fe', text: '#3730a3', boxBg: '#ffffff', boxBorder: '#a5b4fc', sub: '#6366f1' },
+      framework: { fill: '#2563eb', bg: '#eff6ff', border: '#bfdbfe', text: '#1e3a8a', boxBg: '#ffffff', boxBorder: '#93c5fd', sub: '#3b82f6' },
+      agent:     { fill: '#d97706', bg: '#fffbeb', border: '#fde68a', text: '#78350f', boxBg: '#ffffff', boxBorder: '#fbbf24', sub: '#b45309' },
+      llm:       { fill: '#059669', bg: '#ecfdf5', border: '#a7f3d0', text: '#064e3b', boxBg: '#ffffff', boxBorder: '#6ee7b7', sub: '#059669' },
+      provider:  { fill: '#7c3aed', bg: '#faf5ff', border: '#ddd6fe', text: '#4c1d95', boxBg: '#ffffff', boxBorder: '#a78bfa', sub: '#7c3aed' },
+      tape:      { fill: '#db2777', bg: '#fdf2f8', border: '#fbcfe8', text: '#831843', boxBg: '#ffffff', boxBorder: '#f9a8d4', sub: '#db2777' },
     };
 
     /* ── Module definitions with FIXED positions ── */
@@ -489,51 +489,42 @@
     // Defs
     svgContent += `<defs>
       <marker id="ah" viewBox="0 -4 8 8" refX="7" refY="0" markerWidth="7" markerHeight="7" orient="auto">
-        <path d="M0,-3.5L8,0L0,3.5" fill="rgba(99,102,241,0.5)"/>
+        <path d="M0,-3.5L8,0L0,3.5" fill="#94a3b8"/>
       </marker>
       <marker id="ah-main" viewBox="0 -4 8 8" refX="7" refY="0" markerWidth="7" markerHeight="7" orient="auto">
-        <path d="M0,-3.5L8,0L0,3.5" fill="rgba(52,211,153,0.7)"/>
+        <path d="M0,-3.5L8,0L0,3.5" fill="#6366f1"/>
       </marker>
       <marker id="ah-tape" viewBox="0 -4 8 8" refX="7" refY="0" markerWidth="7" markerHeight="7" orient="auto">
-        <path d="M0,-3.5L8,0L0,3.5" fill="rgba(236,72,153,0.5)"/>
+        <path d="M0,-3.5L8,0L0,3.5" fill="#ec4899"/>
       </marker>
-      <filter id="glow"><feGaussianBlur stdDeviation="4" result="g"/>
-        <feMerge><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge>
-      </filter>
-      <linearGradient id="tape-grad" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="rgba(236,72,153,0.15)"/>
-        <stop offset="100%" stop-color="rgba(236,72,153,0.02)"/>
-      </linearGradient>
     </defs>`;
 
-    // Background grid
-    svgContent += `<g opacity="0.04">`;
-    for (let x = 0; x < W; x += 40) svgContent += `<line x1="${x}" y1="0" x2="${x}" y2="${H}" stroke="#94a3b8" stroke-width="0.5"/>`;
-    for (let y = 0; y < H; y += 40) svgContent += `<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="#94a3b8" stroke-width="0.5"/>`;
-    svgContent += `</g>`;
+    // White background
+    svgContent += `<rect width="${W}" height="${H}" fill="#ffffff"/>`;
 
-    // Layer zone backgrounds
+    // Layer zone backgrounds — soft pastels like the reference image
     const zones = [
-      { label:'CHANNELS',    y:30,  h:70,  color:C.channel.bg,   border:C.channel.border, x:140, w:740 },
-      { label:'ELI FRAMEWORK', y:130, h:265, color:C.framework.bg, border:C.framework.border, x:140, w:690 },
-      { label:'AGENT',       y:425, h:85,  color:C.agent.bg,     border:C.agent.border,   x:290, w:460 },
-      { label:'NEXIL (LLM)', y:535, h:85,  color:C.llm.bg,       border:C.llm.border,     x:240, w:430 },
-      { label:'PROVIDERS',   y:650, h:70,  color:C.provider.bg,  border:C.provider.border, x:180, w:570 },
-      { label:'TAPE SYSTEM', y:285, h:350, color:C.tape.bg,      border:C.tape.border,    x:830, w:180 },
+      { label:'Channels',       y:30,  h:70,  color:'#eef2ff', border:'#c7d2fe', textColor:'#4338ca', x:140, w:740 },
+      { label:'eli framework',  y:130, h:265, color:'#eff6ff', border:'#bfdbfe', textColor:'#1d4ed8', x:140, w:690 },
+      { label:'Agent',          y:425, h:85,  color:'#fffbeb', border:'#fde68a', textColor:'#b45309', x:290, w:460 },
+      { label:'nexil (LLM)',    y:535, h:85,  color:'#ecfdf5', border:'#a7f3d0', textColor:'#047857', x:240, w:430 },
+      { label:'Providers',      y:650, h:70,  color:'#faf5ff', border:'#ddd6fe', textColor:'#6d28d9', x:180, w:570 },
+      { label:'Tape System',    y:285, h:350, color:'#fdf2f8', border:'#fbcfe8', textColor:'#be185d', x:830, w:180 },
     ];
     zones.forEach(z => {
-      svgContent += `<rect x="${z.x}" y="${z.y}" width="${z.w}" height="${z.h}" rx="12" fill="${z.color}" stroke="${z.border}" stroke-width="1" stroke-dasharray="4 3"/>`;
-      svgContent += `<text x="${z.x+10}" y="${z.y+16}" fill="${z.border}" font-size="9" font-family="Inter,system-ui,sans-serif" font-weight="700" letter-spacing="0.1em">${z.label}</text>`;
+      svgContent += `<rect x="${z.x}" y="${z.y}" width="${z.w}" height="${z.h}" rx="14" fill="${z.color}" stroke="${z.border}" stroke-width="1.5"/>`;
+      svgContent += `<text x="${z.x+14}" y="${z.y+18}" fill="${z.textColor}" font-size="11" font-family="Inter,system-ui,sans-serif" font-weight="700">${z.label}</text>`;
     });
 
-    // Tape visual — film strip on the right
-    svgContent += `<g opacity="0.35">`;
-    for (let i = 0; i < 7; i++) {
-      const ty = 390 + i * 25;
-      svgContent += `<rect x="960" y="${ty}" width="40" height="18" rx="3" fill="none" stroke="rgba(236,72,153,0.3)" stroke-width="0.7"/>`;
-      svgContent += `<text x="980" y="${ty+12}" text-anchor="middle" fill="rgba(236,72,153,0.4)" font-size="7" font-family="JetBrains Mono,monospace">${['user','asst','user','tool','asst','user','asst'][i]}</text>`;
+    // Tape visual — append-only entries on the right
+    svgContent += `<g>`;
+    const tapeEntries = ['user', 'assistant', 'user', 'tool_call', 'tool_result', 'assistant', 'user'];
+    for (let i = 0; i < tapeEntries.length; i++) {
+      const ty = 395 + i * 24;
+      svgContent += `<rect x="955" y="${ty}" width="48" height="17" rx="4" fill="#fff1f2" stroke="#fecdd3" stroke-width="0.8"/>`;
+      svgContent += `<text x="979" y="${ty+12}" text-anchor="middle" fill="#be185d" font-size="6.5" font-family="JetBrains Mono,monospace" font-weight="500">${tapeEntries[i]}</text>`;
     }
-    svgContent += `<text x="980" y="${390+7*25+8}" text-anchor="middle" fill="rgba(236,72,153,0.3)" font-size="7" font-family="JetBrains Mono,monospace">append-only</text>`;
+    svgContent += `<text x="979" y="${395+tapeEntries.length*24+12}" text-anchor="middle" fill="#9ca3af" font-size="7.5" font-family="Inter,system-ui,sans-serif" font-style="italic">append-only</text>`;
     svgContent += `</g>`;
 
     // Edges
@@ -541,72 +532,69 @@
       const p = edgePoints(e.from, e.to);
       const isTape = e.from === 'tape_svc' || e.from === 'tape_mgr' || e.to === 'tape_svc' || e.to === 'tape_mgr' || e.to === 'tape_store';
       const marker = e.main ? 'url(#ah-main)' : (isTape ? 'url(#ah-tape)' : 'url(#ah)');
-      const color = e.main ? 'rgba(52,211,153,0.35)' : (isTape ? 'rgba(236,72,153,0.25)' : 'rgba(99,102,241,0.2)');
-      const width = e.main ? 2 : 1.2;
-      const dash = e.main ? '' : 'stroke-dasharray="5 4"';
+      const color = e.main ? '#6366f1' : (isTape ? '#f9a8d4' : '#cbd5e1');
+      const width = e.main ? 1.8 : 1.2;
 
       // Curved path
       const mx = (p.x1 + p.x2) / 2, my = (p.y1 + p.y2) / 2;
       const dx = p.x2 - p.x1, dy = p.y2 - p.y1;
-      // Slight curve offset
       const cx = mx - dy * 0.08, cy = my + dx * 0.08;
-      svgContent += `<path d="M${p.x1},${p.y1} Q${cx},${cy} ${p.x2},${p.y2}" fill="none" stroke="${color}" stroke-width="${width}" ${dash} marker-end="${marker}" class="edge" data-from="${e.from}" data-to="${e.to}"/>`;
+      svgContent += `<path d="M${p.x1},${p.y1} Q${cx},${cy} ${p.x2},${p.y2}" fill="none" stroke="${color}" stroke-width="${width}" marker-end="${marker}" class="edge" data-from="${e.from}" data-to="${e.to}" style="transition:opacity 0.2s;"/>`;
 
       // Edge label
       if (e.label) {
         const lx = mx - dy * 0.04, ly = my + dx * 0.04;
-        const labelColor = e.main ? 'rgba(52,211,153,0.55)' : (isTape ? 'rgba(236,72,153,0.45)' : 'rgba(148,163,184,0.45)');
-        svgContent += `<text x="${lx}" y="${ly - 5}" text-anchor="middle" fill="${labelColor}" font-size="8" font-family="JetBrains Mono,monospace" font-weight="500">${e.label}</text>`;
+        const labelColor = e.main ? '#4338ca' : (isTape ? '#be185d' : '#94a3b8');
+        svgContent += `<text x="${lx}" y="${ly - 6}" text-anchor="middle" fill="${labelColor}" font-size="8" font-family="JetBrains Mono,monospace" font-weight="500" opacity="0.7">${e.label}</text>`;
       }
     });
 
-    // Main flow animated path (dashed line overlay)
-    const mainEdges = edges.filter(e => e.main);
-    mainEdges.forEach(e => {
+    // Main flow animated dashes
+    edges.filter(e => e.main).forEach(e => {
       const p = edgePoints(e.from, e.to);
-      const mx = (p.x1 + p.x2) / 2, my = (p.y1 + p.y2) / 2;
-      const dx = p.x2 - p.x1, dy = p.y2 - p.y1;
-      const cx = mx - dy * 0.08, cy = my + dx * 0.08;
-      svgContent += `<path d="M${p.x1},${p.y1} Q${cx},${cy} ${p.x2},${p.y2}" fill="none" stroke="rgba(52,211,153,0.5)" stroke-width="2" stroke-dasharray="6 8" class="flow-line">
+      const mx = (p.x1+p.x2)/2, my = (p.y1+p.y2)/2;
+      const dx = p.x2-p.x1, dy = p.y2-p.y1;
+      const cx = mx - dy*0.08, cy = my + dx*0.08;
+      svgContent += `<path d="M${p.x1},${p.y1} Q${cx},${cy} ${p.x2},${p.y2}" fill="none" stroke="#818cf8" stroke-width="1.8" stroke-dasharray="6 8" opacity="0.4" class="flow-line">
         <animate attributeName="stroke-dashoffset" from="0" to="-28" dur="1.5s" repeatCount="indefinite"/>
       </path>`;
     });
 
-    // Module boxes
+    // Module boxes — white with colored left accent, like reference
     modules.forEach(m => {
       const c = C[m.group];
       svgContent += `<g class="module" data-id="${m.id}" style="cursor:pointer;">
         <rect x="${m.x}" y="${m.y}" width="${m.w}" height="${m.h}" rx="8"
-              fill="${c.bg}" stroke="${c.border}" stroke-width="1.5"
-              class="module-bg" style="transition: all 0.2s;"/>
-        <rect x="${m.x}" y="${m.y}" width="4" height="${m.h}" rx="2"
-              fill="${c.fill}" opacity="0.6"/>
+              fill="${c.boxBg}" stroke="${c.boxBorder}" stroke-width="1.5"
+              class="module-bg" style="transition: all 0.2s; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.04));"/>
+        <rect x="${m.x}" y="${m.y + 4}" width="3.5" height="${m.h - 8}" rx="2"
+              fill="${c.fill}"/>
         <text x="${m.x + 14}" y="${m.y + m.h/2 + 1}" dominant-baseline="middle"
-              fill="#e2e8f0" font-size="11" font-family="Inter,system-ui,sans-serif"
-              font-weight="600" class="module-label" style="transition: fill 0.2s;">${m.label}</text>
+              fill="${c.text}" font-size="11.5" font-family="Inter,system-ui,sans-serif"
+              font-weight="700" class="module-label" style="transition: opacity 0.2s;">${m.label}</text>
       </g>`;
     });
 
-    // Legend
-    svgContent += `<g transform="translate(20,780)">`;
+    // Legend bar at bottom
+    svgContent += `<g transform="translate(30,790)">`;
     const legendItems = [
-      { color: C.channel.fill, label: 'Channel' },
-      { color: C.framework.fill, label: 'Framework' },
-      { color: C.agent.fill, label: 'Agent' },
-      { color: C.llm.fill, label: 'LLM (nexil)' },
-      { color: C.provider.fill, label: 'Provider' },
-      { color: C.tape.fill, label: 'Tape' },
+      { color: C.channel.fill, bg: C.channel.bg, label: 'Channel' },
+      { color: C.framework.fill, bg: C.framework.bg, label: 'Framework' },
+      { color: C.agent.fill, bg: C.agent.bg, label: 'Agent' },
+      { color: C.llm.fill, bg: C.llm.bg, label: 'LLM (nexil)' },
+      { color: C.provider.fill, bg: C.provider.bg, label: 'Provider' },
+      { color: C.tape.fill, bg: C.tape.bg, label: 'Tape' },
     ];
     legendItems.forEach((item, i) => {
-      const lx = i * 110;
-      svgContent += `<circle cx="${lx + 6}" cy="4" r="4" fill="${item.color}"/>`;
-      svgContent += `<text x="${lx + 16}" y="7" fill="#64748b" font-size="10" font-family="Inter,system-ui,sans-serif" font-weight="500">${item.label}</text>`;
+      const lx = i * 120;
+      svgContent += `<rect x="${lx}" y="-6" width="10" height="10" rx="3" fill="${item.bg}" stroke="${item.color}" stroke-width="1"/>`;
+      svgContent += `<text x="${lx + 16}" y="4" fill="#64748b" font-size="10" font-family="Inter,system-ui,sans-serif" font-weight="500">${item.label}</text>`;
     });
     svgContent += `</g>`;
 
-    // Flow status label
-    svgContent += `<text x="${W-20}" y="800" text-anchor="end" fill="rgba(52,211,153,0.5)" font-size="9" font-family="JetBrains Mono,monospace">
-      <tspan fill="rgba(52,211,153,0.8)">&#9679;</tspan> main data flow animated
+    // Flow indicator
+    svgContent += `<text x="${W-30}" y="796" text-anchor="end" fill="#94a3b8" font-size="9" font-family="Inter,system-ui,sans-serif">
+      <tspan fill="#6366f1">&#8594;</tspan> main data flow
     </text>`;
 
     svg.innerHTML = svgContent;
@@ -635,7 +623,7 @@
         x1:p.x1, y1:p.y1, cx, cy, x2:p.x2, y2:p.y2,
         t: 0, speed: 0.015 + Math.random()*0.005,
         label: step.data,
-        color: step.reverse ? 'rgba(167,139,250,A)' : 'rgba(52,211,153,A)',
+        color: step.reverse ? 'rgba(124,58,237,A)' : 'rgba(99,102,241,A)',
       });
       flowStep++;
     }
@@ -680,7 +668,7 @@
         // Data label (shown near the particle)
         if (p.label && alpha > 0.3 && p.t > 0.2 && p.t < 0.8) {
           ctx.font = '500 8px "JetBrains Mono", monospace';
-          ctx.fillStyle = p.color.replace('A', (alpha*0.7).toFixed(2));
+          ctx.fillStyle = `rgba(71,85,105,${(alpha*0.6).toFixed(2)})`;
           ctx.fillText(p.label, pos.x + 8, pos.y - 6);
         }
       });
@@ -702,12 +690,10 @@
     document.querySelectorAll('.module').forEach(el => {
       el.addEventListener('mouseenter', () => {
         el.querySelector('.module-bg').setAttribute('stroke-width', '2.5');
-        el.querySelector('.module-label').setAttribute('fill', '#ffffff');
       });
       el.addEventListener('mouseleave', () => {
         if (el.dataset.id !== selectedId) {
           el.querySelector('.module-bg').setAttribute('stroke-width', '1.5');
-          el.querySelector('.module-label').setAttribute('fill', '#e2e8f0');
         }
       });
       el.addEventListener('click', (ev) => {
@@ -749,7 +735,6 @@
         el.querySelector('.module-bg').setAttribute('stroke-width', '1.5');
         el.querySelector('.module-bg').style.opacity = '1';
         el.querySelector('.module-label').style.opacity = '1';
-        el.querySelector('.module-label').setAttribute('fill', '#e2e8f0');
       });
       document.querySelectorAll('.edge').forEach(e => e.style.opacity = '1');
     }
