@@ -15,7 +15,6 @@
 //!
 //! | Flag | Default | Description |
 //! |------|---------|-------------|
-//! | `telegram` | yes | Telegram channel via teloxide |
 //! | `gateway` | yes | HTTP gateway channel via axum |
 //! | `tape-viewer` | yes | Web UI for inspecting tape history |
 //!

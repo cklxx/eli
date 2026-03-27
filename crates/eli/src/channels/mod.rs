@@ -9,8 +9,6 @@ pub mod cli;
 pub mod handler;
 pub mod manager;
 pub mod message;
-#[cfg(feature = "telegram")]
-pub mod telegram;
 #[cfg(feature = "gateway")]
 pub mod webhook;
 
@@ -19,7 +17,5 @@ pub use cli::{CliChannel, CliRenderer};
 pub use handler::BufferedMessageHandler;
 pub use manager::{ChannelManager, ChannelSettings, InboundProcessor, OutboundRouter};
 pub use message::{ChannelMessage, DataFetcher, MediaItem, MediaType, MessageKind};
-#[cfg(feature = "telegram")]
-pub use telegram::{TelegramChannel, TelegramSettings};
 #[cfg(feature = "gateway")]
 pub use webhook::{WebhookChannel, WebhookSettings};

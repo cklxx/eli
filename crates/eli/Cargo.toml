@@ -1,6 +1,6 @@
 [package]
 name = "eli"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "Ease Lives Instantly — hook-first AI agent framework with multi-channel support"
 license = "Apache-2.0"
@@ -30,7 +30,6 @@ futures = "0.3"
 tokio-util = { version = "0.7", features = ["rt"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
-teloxide = { version = "0.13", features = ["macros"], optional = true }
 md5 = "0.7"
 dirs = "6"
 dotenvy = "0.15"
@@ -47,8 +46,7 @@ axum = { version = "0.8", optional = true }
 tempfile = "3"
 
 [features]
-default = ["telegram", "gateway", "tape-viewer"]
-telegram = ["dep:teloxide"]
+default = ["gateway", "tape-viewer"]
 gateway = ["dep:axum"]
 tape-viewer = ["dep:axum"]
 
