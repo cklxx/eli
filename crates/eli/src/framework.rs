@@ -174,7 +174,7 @@ impl EliFramework {
             tracing::info!(
                 session_id = %session_id,
                 output_len = model_output.len(),
-                output_blank = model_output.trim().is_empty(),
+                output_preview = %&model_output[..model_output.len().min(120)],
                 "run_model completed"
             );
 
@@ -187,7 +187,7 @@ impl EliFramework {
             tracing::info!(
                 session_id = %session_id,
                 outbound_count = outbounds.len(),
-                "collect_outbounds completed"
+                "dispatch_outbound"
             );
             for outbound in &outbounds {
                 rt.call_dispatch_outbound(outbound).await;

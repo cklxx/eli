@@ -437,7 +437,7 @@ async fn process_agent_result(
     settings: &AgentSettings,
 ) -> Result<String, ConduitError> {
     match result {
-        Err(ref e) => {
+        Err(e) => {
             tracing::warn!(
                 tape = tape_name,
                 elapsed_ms,
@@ -445,7 +445,7 @@ async fn process_agent_result(
                 "agent.run finished with error"
             );
             record_run_event(elapsed_ms, "error", Some(&e.message), &[]);
-            Err(e.clone())
+            Err(e)
         }
         Ok(ref output) if output.kind == ToolAutoResultKind::Text => {
             let text = output.text.clone().unwrap_or_default();
@@ -453,10 +453,8 @@ async fn process_agent_result(
                 tape = tape_name,
                 elapsed_ms,
                 text_len = text.len(),
-                text_blank = text.trim().is_empty(),
                 tool_calls = output.tool_calls.len(),
-                tool_results = output.tool_results.len(),
-                "agent.run finished"
+                "agent.run finished ok"
             );
             extract_outbound_media(&output.tool_results);
             record_run_event(elapsed_ms, "ok", None, &output.usage);
