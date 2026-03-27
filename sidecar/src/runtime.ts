@@ -171,7 +171,7 @@ async function addTypingState(params: {
     );
     const state = await addTypingIndicator({ cfg, messageId, accountId });
     if (state?.messageId && !state?.reactionId) {
-      typingLog.info("indicator added without reactionId, cleanup will require fallback lookup", { messageId: state.messageId });
+      typingLog.debug("indicator added without reactionId", { messageId: state.messageId });
     }
     return state;
   } catch {
@@ -234,7 +234,7 @@ async function removeTypingState(
     );
 
     if (appTypingReactions.length === 0) {
-      typingLog.info("cleanup skipped, no app-owned Typing reactions found", { messageId });
+      typingLog.debug("cleanup skipped, no app-owned Typing reactions", { messageId });
       return;
     }
 
@@ -246,7 +246,7 @@ async function removeTypingState(
         accountId: typing.accountId,
       });
     }
-    typingLog.info("cleanup fallback removed reactions", { messageId, count: appTypingReactions.length });
+    typingLog.debug("cleanup fallback removed reactions", { messageId, count: appTypingReactions.length });
   } catch (e: any) {
     typingLog.warn("indicator removal failed", { err: e.message });
   }
@@ -342,7 +342,7 @@ function buildPluginRuntime(config: SidecarConfig) {
         channels: config.channels,
       }),
     },
-    log: (...args: any[]) => log.debug(args.map(String).join(" ")),
+    log: (...args: any[]) => log.info(args.map(String).join(" ")),
     error: (...args: any[]) => log.error(args.map(String).join(" ")),
     logging: {
       shouldLogVerbose: () => false,
@@ -576,7 +576,6 @@ export async function loadPlugins(config: SidecarConfig): Promise<void> {
   const pluginRuntime = buildPluginRuntime(config);
 
   for (const pluginName of config.plugins) {
-    log.debug("loading plugin", { plugin: pluginName });
     try {
       const mod = require(pluginName);
       const plugin: OpenClawPluginDefinition = mod.default ?? mod;
@@ -676,7 +675,7 @@ function installPluginSkills(pluginName: string): void {
 
     // Don't overwrite user's own SKILL.md files.
     if (fs.existsSync(destFile)) {
-      skillsLog.info("skipped (already exists)", { skill: entry.name });
+      skillsLog.debug("skipped (already exists)", { skill: entry.name });
       continue;
     }
 
@@ -749,7 +748,7 @@ function generateMissingSkills(destSkillsDir: string, srcSkillsDir: string): voi
       fs.mkdirSync(destDir, { recursive: true });
       fs.writeFileSync(destFile, body);
       writtenSkillDirs.push(destDir);
-      skillsLog.info("generated", { group: groupName });
+      skillsLog.debug("generated skill", { group: groupName });
     } catch {}
   }
 }

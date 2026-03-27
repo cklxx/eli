@@ -12,7 +12,6 @@ import type {
   ToolCallLifecycleEvent,
 } from "./types.js";
 import { emitPluginEvent } from "./api.js";
-import { outboundMediaItems, resolveBridgeContractVersion } from "./contract.js";
 import { envelopeToEliMessage, parseOutboundTarget } from "./envelope.js";
 import { registry } from "./registry.js";
 import { endPendingTyping, sessionContexts } from "./runtime.js";
@@ -68,18 +67,6 @@ function postToEli(url: string, msg: EliChannelMessage): Promise<Response> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(msg),
   });
-}
-
-function normalizeContractBody(body: unknown, errorMessage: string): Record<string, any> {
-  if (!body || typeof body !== "object") {
-    throw new Error(errorMessage);
-  }
-  resolveBridgeContractVersion((body as { contract_version?: unknown }).contract_version);
-  return body as Record<string, any>;
-}
-
-function normalizeOutboundMessage(body: unknown): EliChannelMessage {
-  return normalizeContractBody(body, "invalid outbound payload") as EliChannelMessage;
 }
 
 async function handleInboundResponse(url: string, resp: Response): Promise<boolean> {
@@ -226,13 +213,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
     }
 
     app.post("/outbound", async (req, res) => {
-      let msg: EliChannelMessage;
-      try {
-        msg = normalizeOutboundMessage(req.body);
-      } catch (err: any) {
-        res.status(400).json({ error: err.message ?? "invalid outbound payload" });
-        return;
-      }
+      const msg = req.body as EliChannelMessage;
       const cleanupOnly = Boolean(msg.context?._eli_cleanup_only);
       let { sourceChannel, accountId, chatId, chatType } = parseOutboundTarget(msg);
 
@@ -282,14 +263,12 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
           }
         }
 
-        const mediaItems = outboundMediaItems(msg);
+        const mediaItems: Array<{ path: string; media_type: string; mime_type: string }> =
+          Array.isArray(msg.context?.outbound_media) ? msg.context.outbound_media : [];
 
         log.debug("outbound", {
-          channel: sourceChannel,
-          to,
-          text_len: msg.content?.length,
-          media: mediaItems.length,
-          cleanup: cleanupOnly,
+          channel: sourceChannel, to, text_len: msg.content?.length,
+          media: mediaItems.length, cleanup: cleanupOnly,
         });
 
         // Remove typing indicator if one was set for this session.
@@ -358,25 +337,18 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
     // Accepts { params, context?, session_id? } where context carries session info
     // for constructing channel-specific auth context.
     app.post("/tools/:name", async (req, res) => {
-      let body: Record<string, any>;
-      try {
-        body = normalizeContractBody(req.body, "invalid tool payload");
-      } catch (err: any) {
-        res.status(400).json({ error: err.message ?? "invalid tool payload" });
-        return;
-      }
       const tool = registry.tools.get(req.params.name);
       if (!tool) {
         res.status(404).json({ error: `tool "${req.params.name}" not found` });
         return;
       }
 
-      const params = body.params ?? {};
-      const id = body.id ?? `call_${Date.now()}`;
+      const params = req.body?.params ?? req.body ?? {};
+      const id = req.body?.id ?? `call_${Date.now()}`;
 
       // Find session context: prefer explicit session_id, fall back to most recent.
       let sessionCtx: SessionContext | null = null;
-      const requestedSession = body.session_id ?? body.context?.session_id;
+      const requestedSession = req.body?.session_id ?? req.body?.context?.session_id;
       if (requestedSession) {
         sessionCtx = sessionContexts.get(requestedSession) ?? null;
       }
@@ -384,13 +356,13 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
       // auth leakage in multi-session scenarios.
 
       // Synthetic session for external agents that pass `channel` instead of session_id.
-      if (!sessionCtx && body.channel) {
-        const ch = body.channel as string;
+      if (!sessionCtx && req.body?.channel) {
+        const ch = req.body.channel as string;
         const plugin = registry.channels.get(ch);
         if (plugin) {
           sessionCtx = {
             channel: ch,
-            accountId: (body.account_id ?? "default") as string,
+            accountId: (req.body?.account_id ?? "default") as string,
             chatId: "",
             senderId: "external-agent",
             messageId: "",
@@ -401,7 +373,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
       }
 
       const channelPlugin = sessionCtx ? registry.channels.get(sessionCtx.channel) : undefined;
-      const description = extractToolDescription(body);
+      const description = extractToolDescription(req.body);
       const startedAt = Date.now();
 
       const emitToolLifecycle = async (
@@ -474,20 +446,13 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
     });
 
     app.post("/notify", async (req, res) => {
-      let body: Record<string, any>;
-      try {
-        body = normalizeContractBody(req.body, "invalid notify payload");
-      } catch (err: any) {
-        res.status(400).json({ error: err.message ?? "invalid notify payload" });
-        return;
-      }
-      const text = normalizeToolCallText(body.text);
+      const text = normalizeToolCallText(req.body?.text);
       if (!text) {
         res.status(400).json({ error: "missing text" });
         return;
       }
 
-      const requestedSession = body.session_id;
+      const requestedSession = req.body?.session_id;
       if (!requestedSession) {
         res.status(400).json({ error: "missing session_id" });
         return;
