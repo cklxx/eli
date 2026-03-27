@@ -243,7 +243,7 @@
     </div>
   </section>
 
-  <!-- Interactive Architecture Graph -->
+  <!-- Interactive Architecture Diagram -->
   <section id="architecture" class="relative z-10 mx-auto max-w-6xl px-6 py-24 sm:py-32">
     <div data-anim="fade-up" class="text-center">
       <span class="text-xs font-semibold uppercase tracking-widest" style="color: #6366f1;">Architecture</span>
@@ -251,34 +251,19 @@
         Two crates. Clean layers.
       </h2>
       <p class="mx-auto mt-4 max-w-2xl text-sm leading-relaxed" style="color: #64748b;">
-        Click any module to explore. Watch data flow through the pipeline. Drag nodes to rearrange.
+        Click any module to see details. Watch data flow through the 7-stage pipeline.
       </p>
     </div>
 
-    <!-- Graph container -->
-    <div data-anim="scale-in" class="relative mt-12 overflow-hidden rounded-2xl border shadow-lg" style="border-color: #e2e8f0; background: #0f172a; min-height: 560px;">
-      <!-- Legend -->
-      <div class="absolute left-4 top-4 z-20 flex flex-wrap gap-3 rounded-lg px-3 py-2 text-[10px] font-medium" style="background: rgba(15,23,42,0.85); backdrop-filter: blur(8px); border: 1px solid rgba(99,102,241,0.2);">
-        <span class="flex items-center gap-1.5"><span class="inline-block h-2.5 w-2.5 rounded-full" style="background: #818cf8;"></span><span style="color: #94a3b8;">Channel</span></span>
-        <span class="flex items-center gap-1.5"><span class="inline-block h-2.5 w-2.5 rounded-full" style="background: #6366f1;"></span><span style="color: #94a3b8;">Framework</span></span>
-        <span class="flex items-center gap-1.5"><span class="inline-block h-2.5 w-2.5 rounded-full" style="background: #f59e0b;"></span><span style="color: #94a3b8;">Agent</span></span>
-        <span class="flex items-center gap-1.5"><span class="inline-block h-2.5 w-2.5 rounded-full" style="background: #10b981;"></span><span style="color: #94a3b8;">LLM (nexil)</span></span>
-        <span class="flex items-center gap-1.5"><span class="inline-block h-2.5 w-2.5 rounded-full" style="background: #8b5cf6;"></span><span style="color: #94a3b8;">Provider</span></span>
-        <span class="flex items-center gap-1.5"><span class="inline-block h-2.5 w-2.5 rounded-full" style="background: #ec4899;"></span><span style="color: #94a3b8;">Storage</span></span>
-      </div>
-      <!-- Flow toggle -->
-      <button id="flow-toggle" class="absolute right-4 top-4 z-20 flex items-center gap-2 rounded-lg px-3 py-2 text-[11px] font-semibold transition-all hover:scale-105" style="background: rgba(99,102,241,0.15); border: 1px solid rgba(99,102,241,0.3); color: #a5b4fc; backdrop-filter: blur(8px);">
-        <span id="flow-icon" class="inline-block h-2 w-2 rounded-full" style="background: #34d399; box-shadow: 0 0 6px #34d399;"></span>
-        Data Flow
-      </button>
-      <!-- SVG canvas -->
-      <svg id="arch-graph" width="100%" height="560"></svg>
-      <!-- Detail panel -->
-      <div id="detail-panel" class="absolute bottom-0 left-0 right-0 z-20 translate-y-full transition-transform duration-300" style="background: linear-gradient(to top, rgba(15,23,42,0.97), rgba(15,23,42,0.92)); backdrop-filter: blur(12px); border-top: 1px solid rgba(99,102,241,0.2);">
+    <!-- Diagram container -->
+    <div data-anim="scale-in" id="arch-container" class="relative mt-12 overflow-hidden rounded-2xl border shadow-lg" style="border-color: #e2e8f0; background: #0f172a;">
+      <svg id="arch-svg" width="100%" height="820" style="display:block;"></svg>
+      <!-- Detail panel (slides up from bottom) -->
+      <div id="detail-panel" class="absolute bottom-0 left-0 right-0 z-20 translate-y-full transition-transform duration-300" style="background: linear-gradient(to top, rgba(15,23,42,0.98), rgba(15,23,42,0.94)); backdrop-filter: blur(12px); border-top: 1px solid rgba(99,102,241,0.25);">
         <div class="mx-auto max-w-2xl px-6 py-5">
           <div class="flex items-start justify-between">
             <div>
-              <div class="flex items-center gap-2">
+              <div class="flex items-center gap-3">
                 <span id="detail-dot" class="inline-block h-3 w-3 rounded-full"></span>
                 <h3 id="detail-name" class="text-base font-bold" style="color: #f1f5f9;"></h3>
                 <span id="detail-crate" class="rounded-md px-2 py-0.5 text-[10px] font-semibold" style="background: rgba(99,102,241,0.15); color: #a5b4fc;"></span>
@@ -286,11 +271,10 @@
               <p id="detail-desc" class="mt-2 text-sm leading-relaxed" style="color: #94a3b8;"></p>
               <div id="detail-file" class="mt-2 font-mono text-xs" style="color: #64748b;"></div>
             </div>
-            <button id="detail-close" class="ml-4 shrink-0 rounded-md p-1 transition-colors hover:bg-white/10" style="color: #64748b;">
+            <button id="detail-close" class="ml-4 shrink-0 rounded-md p-1.5 transition-colors hover:bg-white/10" style="color: #64748b;">
               <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>
             </button>
           </div>
-          <div id="detail-connections" class="mt-3 flex flex-wrap gap-1.5"></div>
         </div>
       </div>
     </div>
@@ -356,348 +340,424 @@
     </div>
   </footer>
 
-  <!-- D3.js for interactive graph -->
-  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <!-- Architecture diagram script (no D3 needed — pure SVG) -->
   <script>
   (function () {
-    /* ── Module data ── */
-    const nodes = [
-      { id: 'cli',           label: 'CLI',             group: 'channel',   desc: 'Interactive REPL and one-shot execution. The primary developer interface — run `eli chat` for interactive mode or `eli run "prompt"` for scripted use.', crate: 'eli', file: 'channels/cli.rs' },
-      { id: 'telegram',      label: 'Telegram',        group: 'channel',   desc: 'Telegram bot channel via teloxide. Supports text, images, documents, and inline keyboards. Feature-gated behind the `telegram` Cargo feature.', crate: 'eli', file: 'channels/telegram.rs' },
-      { id: 'webhook',       label: 'Webhook',         group: 'channel',   desc: 'HTTP webhook endpoint for the sidecar bridge. Receives inbound messages from Feishu, WeChat, Slack, Discord, and DingTalk via the Node.js sidecar process.', crate: 'eli', file: 'channels/webhook.rs' },
-      { id: 'sidecar',       label: 'Sidecar',         group: 'channel',   desc: 'Node.js/TypeScript bridge that loads OpenClaw plugins for non-native channels. Communicates with Rust via stdio/HTTP. Handles Feishu, Slack, Discord, WeChat, DingTalk.', crate: 'sidecar', file: 'sidecar/src/bridge.ts' },
-      { id: 'chan_mgr',      label: 'ChannelManager',  group: 'framework', desc: 'Routes inbound messages to the framework and outbound responses back to channels. Handles message debouncing, buffering, and multi-channel dispatch.', crate: 'eli', file: 'channels/manager.rs' },
-      { id: 'framework',     label: 'EliFramework',    group: 'framework', desc: 'The core event loop. Orchestrates the 7-stage turn pipeline: resolve_session → load_state → build_prompt → run_model → save_state → render_outbound → dispatch_outbound.', crate: 'eli', file: 'framework.rs' },
-      { id: 'hooks',         label: 'HookRuntime',     group: 'framework', desc: '12 pluggable hook points with last-registered-wins semantics. Hooks: classify_inbound, resolve_session, load_state, build_system_prompt, build_prompt, run_model, save_state, render_outbound, dispatch_outbound, on_error, wrap_tool, provide_tape_store.', crate: 'eli', file: 'hooks.rs' },
-      { id: 'builtin',       label: 'BuiltinImpl',     group: 'framework', desc: 'Default implementation of all 12 hooks. Builtins are just plugins that register first — any hook can be overridden by registering after.', crate: 'eli', file: 'builtin/mod.rs' },
-      { id: 'control',       label: 'TurnContext',      group: 'framework', desc: 'Task-local context for the current turn. Provides cancellation tokens, usage tracking, save event accumulation, mid-turn dispatch, and outbound media collection — no parameter threading needed.', crate: 'eli', file: 'control_plane.rs' },
-      { id: 'prompt',        label: 'PromptBuilder',   group: 'framework', desc: 'Builds sectioned system prompts with three modes: Full (all context), Minimal (essentials only), None (user prompt only). Injects date, skills, tool descriptions, and conversation history.', crate: 'eli', file: 'prompt_builder.rs' },
-      { id: 'router',        label: 'SmartRouter',     group: 'framework', desc: 'Pre-model command routing. Detects greetings, help requests, model switches, profile changes, and other commands before they hit the LLM — saving tokens and latency.', crate: 'eli', file: 'smart_router.rs' },
-      { id: 'skills',        label: 'Skills',          group: 'framework', desc: 'Markdown-defined capabilities with YAML frontmatter. Three precedence layers: project skills > global skills > builtin skills. Discovered from filesystem at startup.', crate: 'eli', file: 'skills.rs' },
-      { id: 'tools',         label: 'Tools (21+)',     group: 'agent',     desc: '21+ builtin tools: shell.run, fs.read/write/list/delete, http.fetch/post, tape.query/anchor/fork, subagent.ask, decisions.set/get, and more. Dot-named internally, underscores for LLM APIs.', crate: 'eli', file: 'builtin/tools.rs' },
-      { id: 'tool_mw',       label: 'ToolMiddleware',  group: 'agent',     desc: 'Wraps tools before they reach the Agent. Adds circuit breakers, execution metrics, rate limiting, and permission checks. Configured via the wrap_tool hook.', crate: 'eli', file: 'tool_middleware.rs' },
-      { id: 'agent',         label: 'Agent',           group: 'agent',     desc: 'Wraps nexil::LLM and orchestrates the tool-calling loop. Sends chat requests, receives tool call responses, executes tools, feeds results back, and loops until the model produces a final response.', crate: 'eli', file: 'builtin/agent/mod.rs' },
-      { id: 'llm',           label: 'LLM',             group: 'llm',       desc: 'High-level facade for chat completions and embeddings. LLMBuilder configures provider, model, API key, tools, and streaming. Abstracts away provider differences entirely.', crate: 'nexil', file: 'llm/mod.rs' },
-      { id: 'transport',     label: 'Transport',       group: 'llm',       desc: 'HTTP transport layer with SSE streaming support. Handles chat completions, embeddings, and text completions. Provider-specific response parsing (OpenAI SSE vs Anthropic messages).', crate: 'nexil', file: 'clients/chat.rs' },
-      { id: 'adapter',       label: 'Adapter',         group: 'llm',       desc: 'Routes requests between OpenAI-compatible and Anthropic message formats. Auto-detects provider from API base URL and applies correct request/response transformations.', crate: 'nexil', file: 'adapter.rs' },
-      { id: 'tape_svc',      label: 'TapeService',     group: 'storage',   desc: 'Session-based tape operations for the eli framework. Manages tape lifecycle, session resolution, and coordinates between the framework and nexil TapeManager.', crate: 'eli', file: 'builtin/tape.rs' },
-      { id: 'tape',          label: 'TapeManager',     group: 'storage',   desc: 'Append-only conversation history with anchors, search, forking, and context spill handling. Context is built from tape, not session accumulation. Supports in-memory and file-based backends.', crate: 'nexil', file: 'tape/manager.rs' },
-      { id: 'openai',        label: 'OpenAI',          group: 'provider',  desc: 'OpenAI provider adapter. Supports GPT-4o, GPT-4o-mini, o1, and custom endpoints. Handles function calling, streaming, and token counting in the OpenAI format.', crate: 'nexil', file: 'providers/openai.rs' },
-      { id: 'anthropic',     label: 'Anthropic',       group: 'provider',  desc: 'Anthropic provider adapter. Supports Claude 3.x, Claude 4.x via the Messages API. Handles tool use blocks, streaming events, and Anthropic-specific content types.', crate: 'nexil', file: 'providers/anthropic.rs' },
-      { id: 'copilot',       label: 'Copilot',         group: 'provider',  desc: 'GitHub Copilot provider via OAuth device flow. Authenticates through GitHub, obtains Copilot tokens, and routes requests through the Copilot API endpoint.', crate: 'nexil', file: 'auth/github_copilot.rs' },
-    ];
+    const W = 1100, H = 820;
+    const svg = document.getElementById('arch-svg');
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
 
-    const links = [
-      /* Channel → Manager */
-      { source: 'cli',       target: 'chan_mgr',  type: 'data' },
-      { source: 'telegram',  target: 'chan_mgr',  type: 'data' },
-      { source: 'webhook',   target: 'chan_mgr',  type: 'data' },
-      { source: 'sidecar',   target: 'webhook',   type: 'data' },
-      /* Manager → Framework */
-      { source: 'chan_mgr',  target: 'framework',  type: 'data' },
-      /* Framework internals */
-      { source: 'framework', target: 'hooks',      type: 'control' },
-      { source: 'framework', target: 'control',    type: 'control' },
-      { source: 'hooks',     target: 'builtin',    type: 'control' },
-      { source: 'builtin',   target: 'prompt',     type: 'control' },
-      { source: 'builtin',   target: 'router',     type: 'control' },
-      { source: 'builtin',   target: 'skills',     type: 'control' },
-      { source: 'builtin',   target: 'agent',      type: 'data' },
-      { source: 'builtin',   target: 'tape_svc',   type: 'data' },
-      /* Agent layer */
-      { source: 'agent',     target: 'tools',      type: 'data' },
-      { source: 'agent',     target: 'tool_mw',    type: 'control' },
-      { source: 'tool_mw',   target: 'tools',      type: 'control' },
-      { source: 'agent',     target: 'llm',        type: 'data' },
-      /* LLM internals */
-      { source: 'llm',       target: 'adapter',    type: 'data' },
-      { source: 'llm',       target: 'transport',  type: 'data' },
-      { source: 'adapter',   target: 'transport',  type: 'control' },
-      /* Transport → Providers */
-      { source: 'transport', target: 'openai',     type: 'data' },
-      { source: 'transport', target: 'anthropic',  type: 'data' },
-      { source: 'transport', target: 'copilot',    type: 'data' },
-      /* Storage */
-      { source: 'tape_svc',  target: 'tape',       type: 'data' },
-      { source: 'llm',       target: 'tape',       type: 'data' },
-    ];
-
-    /* Data flow path (the main request journey) */
-    const flowPath = ['cli','chan_mgr','framework','hooks','builtin','agent','llm','adapter','transport','anthropic'];
-
-    const groupColors = {
-      channel:   { fill: '#818cf8', bg: 'rgba(129,140,248,0.12)', stroke: 'rgba(129,140,248,0.4)' },
-      framework: { fill: '#6366f1', bg: 'rgba(99,102,241,0.12)',  stroke: 'rgba(99,102,241,0.4)'  },
-      agent:     { fill: '#f59e0b', bg: 'rgba(245,158,11,0.12)',  stroke: 'rgba(245,158,11,0.4)'  },
-      llm:       { fill: '#10b981', bg: 'rgba(16,185,129,0.12)',  stroke: 'rgba(16,185,129,0.4)'  },
-      provider:  { fill: '#8b5cf6', bg: 'rgba(139,92,246,0.12)',  stroke: 'rgba(139,92,246,0.4)'  },
-      storage:   { fill: '#ec4899', bg: 'rgba(236,72,153,0.12)',  stroke: 'rgba(236,72,153,0.4)'  },
+    /* ── Color palette ── */
+    const C = {
+      channel:   { fill: '#818cf8', bg: 'rgba(129,140,248,0.08)', border: 'rgba(129,140,248,0.25)' },
+      framework: { fill: '#6366f1', bg: 'rgba(99,102,241,0.08)',  border: 'rgba(99,102,241,0.25)'  },
+      agent:     { fill: '#f59e0b', bg: 'rgba(245,158,11,0.08)',  border: 'rgba(245,158,11,0.25)'  },
+      llm:       { fill: '#10b981', bg: 'rgba(16,185,129,0.08)',  border: 'rgba(16,185,129,0.25)'  },
+      provider:  { fill: '#8b5cf6', bg: 'rgba(139,92,246,0.08)',  border: 'rgba(139,92,246,0.25)'  },
+      tape:      { fill: '#ec4899', bg: 'rgba(236,72,153,0.08)',  border: 'rgba(236,72,153,0.25)'  },
     };
 
-    /* ── Graph setup ── */
-    const svg = d3.select('#arch-graph');
-    const container = svg.node().parentElement;
-    let W = container.clientWidth;
-    let H = 560;
-    svg.attr('viewBox', `0 0 ${W} ${H}`);
+    /* ── Module definitions with FIXED positions ── */
+    const modules = [
+      // Channels row (y=55)
+      { id:'cli',       x:200,  y:55,  w:100, h:36, label:'CLI',           group:'channel',   crate:'eli',    file:'channels/cli.rs',            desc:'Interactive REPL (eli chat) and one-shot execution (eli run). Renders streaming markdown, handles Ctrl+C, supports multiline input.' },
+      { id:'telegram',  x:370,  y:55,  w:100, h:36, label:'Telegram',      group:'channel',   crate:'eli',    file:'channels/telegram.rs',       desc:'Telegram bot via teloxide. Text, images, documents, inline keyboards. Feature-gated behind the telegram Cargo feature.' },
+      { id:'webhook',   x:540,  y:55,  w:100, h:36, label:'Webhook',       group:'channel',   crate:'eli',    file:'channels/webhook.rs',        desc:'HTTP webhook endpoint for the sidecar bridge. Receives inbound from Feishu, WeChat, Slack, Discord, DingTalk.' },
+      { id:'sidecar',   x:710,  y:55,  w:120, h:36, label:'Sidecar (TS)',  group:'channel',   crate:'sidecar',file:'sidecar/src/bridge.ts',      desc:'Node.js/TypeScript bridge that loads OpenClaw plugins. Communicates with Rust via stdio/HTTP. Handles non-native channels.' },
 
-    /* Defs: arrow markers + glow filter */
-    const defs = svg.append('defs');
-    defs.append('filter').attr('id','glow')
-      .append('feGaussianBlur').attr('stdDeviation','3').attr('result','blur');
+      // ChannelManager (y=155)
+      { id:'chan_mgr',  x:415, y:155,  w:160, h:40, label:'ChannelManager', group:'framework', crate:'eli',    file:'channels/manager.rs',        desc:'Routes inbound messages to the framework and outbound responses back to channels. Debouncing, buffering, multi-channel dispatch.' },
 
-    ['data','control'].forEach(type => {
-      defs.append('marker')
-        .attr('id', `arrow-${type}`)
-        .attr('viewBox','0 -4 8 8').attr('refX',8).attr('refY',0)
-        .attr('markerWidth',6).attr('markerHeight',6).attr('orient','auto')
-        .append('path').attr('d','M0,-3L8,0L0,3')
-        .attr('fill', type === 'data' ? 'rgba(99,102,241,0.5)' : 'rgba(71,85,105,0.3)');
-    });
+      // EliFramework (y=260) — the big one
+      { id:'framework', x:340, y:255,  w:310, h:44, label:'EliFramework',   group:'framework', crate:'eli',    file:'framework.rs',               desc:'Core event loop. Orchestrates the 7-stage turn pipeline: resolve_session -> load_state -> build_prompt -> run_model -> save_state -> render_outbound -> dispatch_outbound.' },
 
-    /* Radial gradient for nodes */
-    Object.entries(groupColors).forEach(([group, c]) => {
-      const grad = defs.append('radialGradient').attr('id', `grad-${group}`);
-      grad.append('stop').attr('offset','0%').attr('stop-color', c.fill).attr('stop-opacity','0.25');
-      grad.append('stop').attr('offset','100%').attr('stop-color', c.fill).attr('stop-opacity','0.05');
-    });
+      // Hook pipeline stages (y=340) — inside framework zone
+      { id:'hooks',     x:200, y:340,  w:120, h:34, label:'HookRuntime',    group:'framework', crate:'eli',    file:'hooks.rs',                   desc:'12 pluggable hook points with last-registered-wins semantics. Every stage of the pipeline is a hook that can be replaced.' },
+      { id:'prompt',    x:370, y:340,  w:130, h:34, label:'PromptBuilder',  group:'framework', crate:'eli',    file:'prompt_builder.rs',          desc:'Builds sectioned system prompts. Three modes: Full (all context), Minimal (essentials), None (user prompt only). Injects date, skills, tools, history.' },
+      { id:'skills',    x:550, y:340,  w:90,  h:34, label:'Skills',         group:'framework', crate:'eli',    file:'skills.rs',                  desc:'Markdown-defined capabilities with YAML frontmatter. Three layers: project > global > builtin. Discovered from filesystem at startup.' },
+      { id:'router',    x:690, y:340,  w:120, h:34, label:'SmartRouter',    group:'framework', crate:'eli',    file:'smart_router.rs',            desc:'Pre-model command routing. Detects greetings, help, model switches, profile changes before they hit the LLM — saves tokens & latency.' },
 
-    const g = svg.append('g');
+      // Agent layer (y=450)
+      { id:'agent',     x:340, y:455,  w:140, h:40, label:'Agent',          group:'agent',     crate:'eli',    file:'builtin/agent/mod.rs',       desc:'Wraps nexil::LLM and orchestrates the tool-calling loop. Sends ChatRequest, receives tool calls, executes tools, feeds results back, loops until final response.' },
+      { id:'tools',     x:570, y:455,  w:130, h:40, label:'Tools (21+)',    group:'agent',     crate:'eli',    file:'builtin/tools.rs',           desc:'21+ builtin tools: shell.run, fs.read/write/list/delete, http.fetch/post, tape.query/anchor/fork, subagent.ask, decisions.set/get. Dot-named internally.' },
 
-    /* ── Links ── */
-    const linkG = g.append('g');
-    const linkEls = linkG.selectAll('line').data(links).join('line')
-      .attr('stroke', d => d.type === 'data' ? 'rgba(99,102,241,0.25)' : 'rgba(71,85,105,0.15)')
-      .attr('stroke-width', d => d.type === 'data' ? 1.5 : 1)
-      .attr('marker-end', d => `url(#arrow-${d.type})`);
+      // LLM layer (y=560)
+      { id:'llm',       x:290, y:565,  w:140, h:40, label:'nexil::LLM',    group:'llm',       crate:'nexil',  file:'llm/mod.rs',                 desc:'High-level facade for chat completions and embeddings. LLMBuilder configures provider, model, API key, tools, streaming. Provider-agnostic.' },
+      { id:'adapter',   x:500, y:565,  w:120, h:40, label:'Adapter',        group:'llm',       crate:'nexil',  file:'adapter.rs',                 desc:'Routes between OpenAI-compatible and Anthropic message formats. Auto-detects provider from API base URL. Normalizes request/response shapes.' },
 
-    /* ── Flow particles ── */
-    const particleG = g.append('g');
-    let flowActive = true;
-    let particles = [];
+      // Providers (y=670)
+      { id:'openai',    x:230, y:675,  w:100, h:36, label:'OpenAI',         group:'provider',  crate:'nexil',  file:'providers/openai.rs',        desc:'GPT-4o, GPT-4o-mini, o1, custom endpoints. Function calling, streaming, token counting in OpenAI format.' },
+      { id:'anthropic', x:400, y:675,  w:110, h:36, label:'Anthropic',      group:'provider',  crate:'nexil',  file:'providers/anthropic.rs',     desc:'Claude 3.x/4.x via Messages API. Tool use blocks, streaming events, Anthropic-specific content types.' },
+      { id:'copilot',   x:580, y:675,  w:120, h:36, label:'GitHub Copilot', group:'provider',  crate:'nexil',  file:'auth/github_copilot.rs',     desc:'GitHub Copilot via OAuth device flow. Authenticates through GitHub, obtains Copilot tokens, routes through Copilot API.' },
 
-    function spawnParticle() {
-      if (!flowActive) return;
-      const idx = Math.floor(Math.random() * (flowPath.length - 1));
-      const src = flowPath[idx], tgt = flowPath[idx + 1];
-      const srcN = nodes.find(n => n.id === src);
-      const tgtN = nodes.find(n => n.id === tgt);
-      if (!srcN || !tgtN) return;
-      particles.push({ sx: srcN.x, sy: srcN.y, tx: tgtN.x, ty: tgtN.y, t: 0, speed: 0.012 + Math.random() * 0.008 });
+      // Tape system (right column)
+      { id:'tape_svc',  x:870, y:310,  w:130, h:38, label:'TapeService',    group:'tape',      crate:'eli',    file:'builtin/tape.rs',            desc:'Session-based tape operations. Manages tape lifecycle, session resolution, coordinates between framework and nexil TapeManager.' },
+      { id:'tape_mgr',  x:870, y:455,  w:130, h:38, label:'TapeManager',    group:'tape',      crate:'nexil',  file:'tape/manager.rs',            desc:'Append-only conversation history. Anchors, search, forking, context spill. Context is built FROM tape, not session accumulation.' },
+      { id:'tape_store', x:870, y:580, w:130, h:38, label:'TapeStore',      group:'tape',      crate:'nexil',  file:'tape/store.rs',              desc:'Pluggable storage backends: in-memory (tests) and file-based (~/.eli/tapes/). Each session gets its own append-only file.' },
+    ];
+
+    /* ── Connections with data labels ── */
+    const edges = [
+      // Channels → Manager
+      { from:'cli',      to:'chan_mgr',  label:'ChannelMessage',   main:true },
+      { from:'telegram', to:'chan_mgr',  label:'ChannelMessage',   main:true },
+      { from:'webhook',  to:'chan_mgr',  label:'ChannelMessage',   main:false },
+      { from:'sidecar',  to:'webhook',   label:'HTTP/stdio',       main:false },
+      // Manager → Framework
+      { from:'chan_mgr',  to:'framework', label:'Envelope (JSON)',  main:true },
+      // Framework → hooks
+      { from:'framework', to:'hooks',     label:'12 hook calls',    main:true },
+      { from:'framework', to:'prompt',    label:'build_prompt',     main:false },
+      { from:'framework', to:'skills',    label:'inject skills',    main:false },
+      { from:'framework', to:'router',    label:'classify_inbound', main:false },
+      // Framework → Agent
+      { from:'framework', to:'agent',     label:'run_model hook',   main:true },
+      // Agent ↔ Tools
+      { from:'agent',     to:'tools',     label:'ToolCall / Result',main:false },
+      // Agent → LLM
+      { from:'agent',     to:'llm',       label:'ChatRequest',      main:true },
+      // LLM → Adapter
+      { from:'llm',       to:'adapter',   label:'normalize format', main:true },
+      // Adapter → Providers
+      { from:'adapter',   to:'openai',    label:'OpenAI API',       main:false },
+      { from:'adapter',   to:'anthropic', label:'Messages API',     main:true  },
+      { from:'adapter',   to:'copilot',   label:'Copilot API',      main:false },
+      // Tape connections
+      { from:'framework', to:'tape_svc',  label:'save_state / load_state', main:false },
+      { from:'tape_svc',  to:'tape_mgr',  label:'append / query',          main:false },
+      { from:'tape_mgr',  to:'tape_store',label:'read / write',            main:false },
+      { from:'llm',       to:'tape_mgr',  label:'stream turns',            main:false },
+    ];
+
+    /* ── Data flow path for particle animation ── */
+    const flowSteps = [
+      { from:'cli',      to:'chan_mgr',  data:'{ text: "summarize this repo" }' },
+      { from:'chan_mgr',  to:'framework', data:'Envelope { content, channel, session }' },
+      { from:'framework', to:'hooks',     data:'resolve_session -> load_state' },
+      { from:'framework', to:'agent',     data:'PromptValue + State + Tools' },
+      { from:'agent',     to:'llm',       data:'ChatRequest { messages, tools }' },
+      { from:'llm',       to:'adapter',   data:'normalize -> Anthropic format' },
+      { from:'adapter',   to:'anthropic', data:'POST /v1/messages (streaming)' },
+      { from:'adapter',   to:'llm',       data:'StreamEvent { delta, usage }',    reverse:true },
+      { from:'agent',     to:'tools',     data:'ToolCall { name: "fs.read" }' },
+      { from:'tools',     to:'agent',     data:'ToolResult { content: "..." }',   reverse:true },
+      { from:'llm',       to:'tape_mgr',  data:'append(Turn { user, assistant })' },
+      { from:'agent',     to:'framework', data:'TurnResult { response, usage }',  reverse:true },
+      { from:'framework', to:'chan_mgr',  data:'render_outbound -> dispatch',     reverse:true },
+      { from:'chan_mgr',  to:'cli',       data:'markdown rendered to terminal',   reverse:true },
+    ];
+
+    /* ── Helper: get module center ── */
+    function mc(id) {
+      const m = modules.find(n => n.id === id);
+      return { x: m.x + m.w / 2, y: m.y + m.h / 2 };
     }
 
-    /* ── Nodes ── */
-    const nodeG = g.append('g');
-    const nodeEls = nodeG.selectAll('g').data(nodes).join('g')
-      .attr('cursor', 'pointer')
-      .call(d3.drag()
-        .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-        .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
-        .on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; })
-      );
+    /* ── Helper: get edge endpoint (from border, not center) ── */
+    function edgePoints(fromId, toId) {
+      const a = modules.find(n => n.id === fromId);
+      const b = modules.find(n => n.id === toId);
+      const ax = a.x + a.w/2, ay = a.y + a.h/2;
+      const bx = b.x + b.w/2, by = b.y + b.h/2;
+      const dx = bx - ax, dy = by - ay;
+      const absDx = Math.abs(dx), absDy = Math.abs(dy);
 
-    /* Node background circle (glow) */
-    nodeEls.append('circle')
-      .attr('r', d => d.id === 'framework' ? 38 : (d.id === 'agent' || d.id === 'llm' ? 32 : 26))
-      .attr('fill', d => `url(#grad-${d.group})`)
-      .attr('stroke', d => groupColors[d.group].stroke)
-      .attr('stroke-width', 1.5);
-
-    /* Node inner circle */
-    nodeEls.append('circle')
-      .attr('r', d => d.id === 'framework' ? 6 : (d.id === 'agent' || d.id === 'llm' ? 5 : 4))
-      .attr('fill', d => groupColors[d.group].fill)
-      .style('filter','url(#glow)');
-
-    /* Node label */
-    nodeEls.append('text')
-      .text(d => d.label)
-      .attr('dy', d => (d.id === 'framework' ? 38 : (d.id === 'agent' || d.id === 'llm' ? 32 : 26)) + 14)
-      .attr('text-anchor','middle')
-      .attr('fill','#94a3b8')
-      .attr('font-size','10px')
-      .attr('font-family','Inter, system-ui, sans-serif')
-      .attr('font-weight','600');
-
-    /* ── Force simulation ── */
-    const sim = d3.forceSimulation(nodes)
-      .force('link', d3.forceLink(links).id(d => d.id).distance(d => {
-        if (d.type === 'control') return 60;
-        return 90;
-      }).strength(0.6))
-      .force('charge', d3.forceManyBody().strength(-300))
-      .force('center', d3.forceCenter(W / 2, H / 2))
-      .force('collision', d3.forceCollide().radius(42))
-      .force('x', d3.forceX(W / 2).strength(0.05))
-      .force('y', d3.forceY(H / 2).strength(0.05))
-      .on('tick', tick);
-
-    /* Particle canvas layer */
-    const particleCanvas = document.createElement('canvas');
-    particleCanvas.width = W; particleCanvas.height = H;
-    particleCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10;';
-    container.appendChild(particleCanvas);
-    const pCtx = particleCanvas.getContext('2d');
-
-    function tick() {
-      linkEls
-        .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
-        .attr('x2', d => {
-          const dx = d.target.x - d.source.x, dy = d.target.y - d.source.y;
-          const dist = Math.sqrt(dx*dx + dy*dy);
-          const r = d.target.id === 'framework' ? 38 : (d.target.id === 'agent' || d.target.id === 'llm' ? 32 : 26);
-          return dist > 0 ? d.target.x - (dx/dist) * (r+4) : d.target.x;
-        })
-        .attr('y2', d => {
-          const dx = d.target.x - d.source.x, dy = d.target.y - d.source.y;
-          const dist = Math.sqrt(dx*dx + dy*dy);
-          const r = d.target.id === 'framework' ? 38 : (d.target.id === 'agent' || d.target.id === 'llm' ? 32 : 26);
-          return dist > 0 ? d.target.y - (dy/dist) * (r+4) : d.target.y;
-        });
-
-      nodeEls.attr('transform', d => `translate(${d.x},${d.y})`);
-
-      /* Update particles */
-      pCtx.clearRect(0, 0, W, H);
-      if (flowActive) {
-        if (Math.random() < 0.08) spawnParticle();
-        particles = particles.filter(p => p.t <= 1);
-        particles.forEach(p => {
-          p.t += p.speed;
-          const x = p.sx + (p.tx - p.sx) * p.t;
-          const y = p.sy + (p.ty - p.sy) * p.t;
-          const alpha = p.t < 0.15 ? p.t / 0.15 : p.t > 0.85 ? (1 - p.t) / 0.15 : 1;
-          pCtx.beginPath();
-          pCtx.arc(x, y, 2.5, 0, Math.PI * 2);
-          pCtx.fillStyle = `rgba(99,211,170,${alpha * 0.9})`;
-          pCtx.fill();
-          /* Trail */
-          pCtx.beginPath();
-          pCtx.arc(x, y, 5, 0, Math.PI * 2);
-          pCtx.fillStyle = `rgba(99,211,170,${alpha * 0.15})`;
-          pCtx.fill();
-        });
+      let x1, y1, x2, y2;
+      // From point (exit from a)
+      if (absDy / absDx > a.h / a.w) {
+        // exit top or bottom
+        y1 = dy > 0 ? a.y + a.h : a.y;
+        x1 = ax + dx * Math.abs(y1 - ay) / absDy;
+      } else {
+        x1 = dx > 0 ? a.x + a.w : a.x;
+        y1 = ay + dy * Math.abs(x1 - ax) / absDx;
       }
+      // To point (enter b)
+      if (absDy / absDx > b.h / b.w) {
+        y2 = dy > 0 ? b.y : b.y + b.h;
+        x2 = bx - dx * Math.abs(y2 - by) / absDy;
+      } else {
+        x2 = dx > 0 ? b.x : b.x + b.w;
+        y2 = by - dy * Math.abs(x2 - bx) / absDx;
+      }
+      return { x1, y1, x2, y2 };
     }
 
-    /* Keep simulation warm for particle rendering */
-    setInterval(() => { if (flowActive && sim.alpha() < 0.02) sim.alpha(0.02).restart(); }, 500);
+    /* ── Build SVG ── */
+    let svgContent = '';
 
-    /* ── Click → detail panel ── */
+    // Defs
+    svgContent += `<defs>
+      <marker id="ah" viewBox="0 -4 8 8" refX="7" refY="0" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0,-3.5L8,0L0,3.5" fill="rgba(99,102,241,0.5)"/>
+      </marker>
+      <marker id="ah-main" viewBox="0 -4 8 8" refX="7" refY="0" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0,-3.5L8,0L0,3.5" fill="rgba(52,211,153,0.7)"/>
+      </marker>
+      <marker id="ah-tape" viewBox="0 -4 8 8" refX="7" refY="0" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0,-3.5L8,0L0,3.5" fill="rgba(236,72,153,0.5)"/>
+      </marker>
+      <filter id="glow"><feGaussianBlur stdDeviation="4" result="g"/>
+        <feMerge><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <linearGradient id="tape-grad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="rgba(236,72,153,0.15)"/>
+        <stop offset="100%" stop-color="rgba(236,72,153,0.02)"/>
+      </linearGradient>
+    </defs>`;
+
+    // Background grid
+    svgContent += `<g opacity="0.04">`;
+    for (let x = 0; x < W; x += 40) svgContent += `<line x1="${x}" y1="0" x2="${x}" y2="${H}" stroke="#94a3b8" stroke-width="0.5"/>`;
+    for (let y = 0; y < H; y += 40) svgContent += `<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="#94a3b8" stroke-width="0.5"/>`;
+    svgContent += `</g>`;
+
+    // Layer zone backgrounds
+    const zones = [
+      { label:'CHANNELS',    y:30,  h:70,  color:C.channel.bg,   border:C.channel.border, x:140, w:740 },
+      { label:'ELI FRAMEWORK', y:130, h:265, color:C.framework.bg, border:C.framework.border, x:140, w:690 },
+      { label:'AGENT',       y:425, h:85,  color:C.agent.bg,     border:C.agent.border,   x:290, w:460 },
+      { label:'NEXIL (LLM)', y:535, h:85,  color:C.llm.bg,       border:C.llm.border,     x:240, w:430 },
+      { label:'PROVIDERS',   y:650, h:70,  color:C.provider.bg,  border:C.provider.border, x:180, w:570 },
+      { label:'TAPE SYSTEM', y:285, h:350, color:C.tape.bg,      border:C.tape.border,    x:830, w:180 },
+    ];
+    zones.forEach(z => {
+      svgContent += `<rect x="${z.x}" y="${z.y}" width="${z.w}" height="${z.h}" rx="12" fill="${z.color}" stroke="${z.border}" stroke-width="1" stroke-dasharray="4 3"/>`;
+      svgContent += `<text x="${z.x+10}" y="${z.y+16}" fill="${z.border}" font-size="9" font-family="Inter,system-ui,sans-serif" font-weight="700" letter-spacing="0.1em">${z.label}</text>`;
+    });
+
+    // Tape visual — film strip on the right
+    svgContent += `<g opacity="0.35">`;
+    for (let i = 0; i < 7; i++) {
+      const ty = 390 + i * 25;
+      svgContent += `<rect x="960" y="${ty}" width="40" height="18" rx="3" fill="none" stroke="rgba(236,72,153,0.3)" stroke-width="0.7"/>`;
+      svgContent += `<text x="980" y="${ty+12}" text-anchor="middle" fill="rgba(236,72,153,0.4)" font-size="7" font-family="JetBrains Mono,monospace">${['user','asst','user','tool','asst','user','asst'][i]}</text>`;
+    }
+    svgContent += `<text x="980" y="${390+7*25+8}" text-anchor="middle" fill="rgba(236,72,153,0.3)" font-size="7" font-family="JetBrains Mono,monospace">append-only</text>`;
+    svgContent += `</g>`;
+
+    // Edges
+    edges.forEach(e => {
+      const p = edgePoints(e.from, e.to);
+      const isTape = e.from === 'tape_svc' || e.from === 'tape_mgr' || e.to === 'tape_svc' || e.to === 'tape_mgr' || e.to === 'tape_store';
+      const marker = e.main ? 'url(#ah-main)' : (isTape ? 'url(#ah-tape)' : 'url(#ah)');
+      const color = e.main ? 'rgba(52,211,153,0.35)' : (isTape ? 'rgba(236,72,153,0.25)' : 'rgba(99,102,241,0.2)');
+      const width = e.main ? 2 : 1.2;
+      const dash = e.main ? '' : 'stroke-dasharray="5 4"';
+
+      // Curved path
+      const mx = (p.x1 + p.x2) / 2, my = (p.y1 + p.y2) / 2;
+      const dx = p.x2 - p.x1, dy = p.y2 - p.y1;
+      // Slight curve offset
+      const cx = mx - dy * 0.08, cy = my + dx * 0.08;
+      svgContent += `<path d="M${p.x1},${p.y1} Q${cx},${cy} ${p.x2},${p.y2}" fill="none" stroke="${color}" stroke-width="${width}" ${dash} marker-end="${marker}" class="edge" data-from="${e.from}" data-to="${e.to}"/>`;
+
+      // Edge label
+      if (e.label) {
+        const lx = mx - dy * 0.04, ly = my + dx * 0.04;
+        const labelColor = e.main ? 'rgba(52,211,153,0.55)' : (isTape ? 'rgba(236,72,153,0.45)' : 'rgba(148,163,184,0.45)');
+        svgContent += `<text x="${lx}" y="${ly - 5}" text-anchor="middle" fill="${labelColor}" font-size="8" font-family="JetBrains Mono,monospace" font-weight="500">${e.label}</text>`;
+      }
+    });
+
+    // Main flow animated path (dashed line overlay)
+    const mainEdges = edges.filter(e => e.main);
+    mainEdges.forEach(e => {
+      const p = edgePoints(e.from, e.to);
+      const mx = (p.x1 + p.x2) / 2, my = (p.y1 + p.y2) / 2;
+      const dx = p.x2 - p.x1, dy = p.y2 - p.y1;
+      const cx = mx - dy * 0.08, cy = my + dx * 0.08;
+      svgContent += `<path d="M${p.x1},${p.y1} Q${cx},${cy} ${p.x2},${p.y2}" fill="none" stroke="rgba(52,211,153,0.5)" stroke-width="2" stroke-dasharray="6 8" class="flow-line">
+        <animate attributeName="stroke-dashoffset" from="0" to="-28" dur="1.5s" repeatCount="indefinite"/>
+      </path>`;
+    });
+
+    // Module boxes
+    modules.forEach(m => {
+      const c = C[m.group];
+      svgContent += `<g class="module" data-id="${m.id}" style="cursor:pointer;">
+        <rect x="${m.x}" y="${m.y}" width="${m.w}" height="${m.h}" rx="8"
+              fill="${c.bg}" stroke="${c.border}" stroke-width="1.5"
+              class="module-bg" style="transition: all 0.2s;"/>
+        <rect x="${m.x}" y="${m.y}" width="4" height="${m.h}" rx="2"
+              fill="${c.fill}" opacity="0.6"/>
+        <text x="${m.x + 14}" y="${m.y + m.h/2 + 1}" dominant-baseline="middle"
+              fill="#e2e8f0" font-size="11" font-family="Inter,system-ui,sans-serif"
+              font-weight="600" class="module-label" style="transition: fill 0.2s;">${m.label}</text>
+      </g>`;
+    });
+
+    // Legend
+    svgContent += `<g transform="translate(20,780)">`;
+    const legendItems = [
+      { color: C.channel.fill, label: 'Channel' },
+      { color: C.framework.fill, label: 'Framework' },
+      { color: C.agent.fill, label: 'Agent' },
+      { color: C.llm.fill, label: 'LLM (nexil)' },
+      { color: C.provider.fill, label: 'Provider' },
+      { color: C.tape.fill, label: 'Tape' },
+    ];
+    legendItems.forEach((item, i) => {
+      const lx = i * 110;
+      svgContent += `<circle cx="${lx + 6}" cy="4" r="4" fill="${item.color}"/>`;
+      svgContent += `<text x="${lx + 16}" y="7" fill="#64748b" font-size="10" font-family="Inter,system-ui,sans-serif" font-weight="500">${item.label}</text>`;
+    });
+    svgContent += `</g>`;
+
+    // Flow status label
+    svgContent += `<text x="${W-20}" y="800" text-anchor="end" fill="rgba(52,211,153,0.5)" font-size="9" font-family="JetBrains Mono,monospace">
+      <tspan fill="rgba(52,211,153,0.8)">&#9679;</tspan> main data flow animated
+    </text>`;
+
+    svg.innerHTML = svgContent;
+
+    /* ── Particle animation on canvas ── */
+    const container = document.getElementById('arch-container');
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    canvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10;';
+    container.insertBefore(canvas, container.querySelector('#detail-panel'));
+    const ctx = canvas.getContext('2d');
+
+    let particles = [];
+    let flowStep = 0;
+    let flowTimer = 0;
+
+    function spawnFlowParticle() {
+      const step = flowSteps[flowStep % flowSteps.length];
+      const from = step.reverse ? step.to : step.from;
+      const to = step.reverse ? step.from : step.to;
+      const p = edgePoints(from, to);
+      const mx = (p.x1+p.x2)/2, my = (p.y1+p.y2)/2;
+      const dx = p.x2-p.x1, dy = p.y2-p.y1;
+      const cx = mx - dy*0.08, cy = my + dx*0.08;
+      particles.push({
+        x1:p.x1, y1:p.y1, cx, cy, x2:p.x2, y2:p.y2,
+        t: 0, speed: 0.015 + Math.random()*0.005,
+        label: step.data,
+        color: step.reverse ? 'rgba(167,139,250,A)' : 'rgba(52,211,153,A)',
+      });
+      flowStep++;
+    }
+
+    function bezier(x1,y1,cx,cy,x2,y2,t) {
+      const u = 1-t;
+      return {
+        x: u*u*x1 + 2*u*t*cx + t*t*x2,
+        y: u*u*y1 + 2*u*t*cy + t*t*y2,
+      };
+    }
+
+    function animateParticles() {
+      // Scale canvas for container
+      const rect = container.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      flowTimer++;
+      if (flowTimer % 30 === 0) spawnFlowParticle();
+
+      particles = particles.filter(p => p.t <= 1);
+      particles.forEach(p => {
+        p.t += p.speed;
+        const pos = bezier(p.x1,p.y1,p.cx,p.cy,p.x2,p.y2, Math.min(p.t, 1));
+        const alpha = p.t < 0.1 ? p.t/0.1 : p.t > 0.85 ? (1-p.t)/0.15 : 1;
+
+        // Glow
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, 8, 0, Math.PI*2);
+        ctx.fillStyle = p.color.replace('A', (alpha*0.15).toFixed(2));
+        ctx.fill();
+
+        // Dot
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, 3, 0, Math.PI*2);
+        ctx.fillStyle = p.color.replace('A', (alpha*0.9).toFixed(2));
+        ctx.fill();
+
+        // Data label (shown near the particle)
+        if (p.label && alpha > 0.3 && p.t > 0.2 && p.t < 0.8) {
+          ctx.font = '500 8px "JetBrains Mono", monospace';
+          ctx.fillStyle = p.color.replace('A', (alpha*0.7).toFixed(2));
+          ctx.fillText(p.label, pos.x + 8, pos.y - 6);
+        }
+      });
+
+      requestAnimationFrame(animateParticles);
+    }
+    requestAnimationFrame(animateParticles);
+
+    /* ── Click interaction ── */
     const panel = document.getElementById('detail-panel');
     const detailName = document.getElementById('detail-name');
     const detailDesc = document.getElementById('detail-desc');
     const detailCrate = document.getElementById('detail-crate');
     const detailDot = document.getElementById('detail-dot');
     const detailFile = document.getElementById('detail-file');
-    const detailConns = document.getElementById('detail-connections');
 
     let selectedId = null;
 
-    nodeEls.on('click', (e, d) => {
-      e.stopPropagation();
-      selectedId = d.id;
-      detailName.textContent = d.label;
-      detailDesc.textContent = d.desc;
-      detailCrate.textContent = d.crate;
-      detailDot.style.background = groupColors[d.group].fill;
-      detailFile.textContent = d.file;
-
-      /* Find connections */
-      const connected = [];
-      links.forEach(l => {
-        const sid = typeof l.source === 'object' ? l.source.id : l.source;
-        const tid = typeof l.target === 'object' ? l.target.id : l.target;
-        if (sid === d.id) connected.push({ id: tid, dir: 'out' });
-        if (tid === d.id) connected.push({ id: sid, dir: 'in' });
+    document.querySelectorAll('.module').forEach(el => {
+      el.addEventListener('mouseenter', () => {
+        el.querySelector('.module-bg').setAttribute('stroke-width', '2.5');
+        el.querySelector('.module-label').setAttribute('fill', '#ffffff');
       });
-      detailConns.innerHTML = connected.map(c => {
-        const n = nodes.find(n => n.id === c.id);
-        const color = groupColors[n.group].fill;
-        const arrow = c.dir === 'out' ? '&rarr;' : '&larr;';
-        return `<span class="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium" style="background:rgba(255,255,255,0.06);color:${color};border:1px solid ${groupColors[n.group].stroke};">${arrow} ${n.label}</span>`;
-      }).join('');
+      el.addEventListener('mouseleave', () => {
+        if (el.dataset.id !== selectedId) {
+          el.querySelector('.module-bg').setAttribute('stroke-width', '1.5');
+          el.querySelector('.module-label').setAttribute('fill', '#e2e8f0');
+        }
+      });
+      el.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const id = el.dataset.id;
+        const m = modules.find(n => n.id === id);
+        selectedId = id;
 
-      panel.style.transform = 'translateY(0)';
+        detailName.textContent = m.label;
+        detailDesc.textContent = m.desc;
+        detailCrate.textContent = m.crate;
+        detailDot.style.background = C[m.group].fill;
+        detailFile.textContent = m.file;
+        panel.style.transform = 'translateY(0)';
 
-      /* Highlight selected node */
-      nodeEls.selectAll('circle:first-child')
-        .attr('stroke-width', n => n.id === d.id ? 2.5 : 1.5)
-        .attr('stroke', n => n.id === d.id ? groupColors[n.group].fill : groupColors[n.group].stroke);
-
-      linkEls
-        .attr('stroke', l => {
-          const sid = typeof l.source === 'object' ? l.source.id : l.source;
-          const tid = typeof l.target === 'object' ? l.target.id : l.target;
-          if (sid === d.id || tid === d.id) return l.type === 'data' ? 'rgba(99,102,241,0.6)' : 'rgba(148,163,184,0.4)';
-          return l.type === 'data' ? 'rgba(99,102,241,0.1)' : 'rgba(71,85,105,0.06)';
-        })
-        .attr('stroke-width', l => {
-          const sid = typeof l.source === 'object' ? l.source.id : l.source;
-          const tid = typeof l.target === 'object' ? l.target.id : l.target;
-          return (sid === d.id || tid === d.id) ? 2.5 : (l.type === 'data' ? 1.5 : 1);
+        // Highlight
+        document.querySelectorAll('.module').forEach(other => {
+          const isSelected = other.dataset.id === id;
+          const isConnected = edges.some(e =>
+            (e.from === id && e.to === other.dataset.id) ||
+            (e.to === id && e.from === other.dataset.id)
+          );
+          other.querySelector('.module-bg').setAttribute('stroke-width', isSelected ? '3' : (isConnected ? '2' : '1'));
+          other.querySelector('.module-bg').style.opacity = (isSelected || isConnected) ? '1' : '0.4';
+          other.querySelector('.module-label').style.opacity = (isSelected || isConnected) ? '1' : '0.4';
         });
+
+        document.querySelectorAll('.edge').forEach(edge => {
+          const connected = edge.dataset.from === id || edge.dataset.to === id;
+          edge.style.opacity = connected ? '1' : '0.15';
+        });
+      });
     });
 
     function closePanel() {
       selectedId = null;
       panel.style.transform = 'translateY(100%)';
-      nodeEls.selectAll('circle:first-child')
-        .attr('stroke-width', 1.5)
-        .attr('stroke', d => groupColors[d.group].stroke);
-      linkEls
-        .attr('stroke', d => d.type === 'data' ? 'rgba(99,102,241,0.25)' : 'rgba(71,85,105,0.15)')
-        .attr('stroke-width', d => d.type === 'data' ? 1.5 : 1);
+      document.querySelectorAll('.module').forEach(el => {
+        el.querySelector('.module-bg').setAttribute('stroke-width', '1.5');
+        el.querySelector('.module-bg').style.opacity = '1';
+        el.querySelector('.module-label').style.opacity = '1';
+        el.querySelector('.module-label').setAttribute('fill', '#e2e8f0');
+      });
+      document.querySelectorAll('.edge').forEach(e => e.style.opacity = '1');
     }
 
     document.getElementById('detail-close').addEventListener('click', closePanel);
-    svg.on('click', closePanel);
-
-    /* ── Flow toggle ── */
-    document.getElementById('flow-toggle').addEventListener('click', () => {
-      flowActive = !flowActive;
-      const icon = document.getElementById('flow-icon');
-      if (flowActive) {
-        icon.style.background = '#34d399';
-        icon.style.boxShadow = '0 0 6px #34d399';
-        sim.alpha(0.05).restart();
-      } else {
-        icon.style.background = '#64748b';
-        icon.style.boxShadow = 'none';
-        particles = [];
-        pCtx.clearRect(0, 0, W, H);
-      }
+    svg.addEventListener('click', (e) => {
+      if (!e.target.closest('.module')) closePanel();
     });
-
-    /* ── Responsive resize ── */
-    const ro = new ResizeObserver(() => {
-      W = container.clientWidth;
-      svg.attr('viewBox', `0 0 ${W} ${H}`);
-      particleCanvas.width = W;
-      sim.force('center', d3.forceCenter(W / 2, H / 2));
-      sim.force('x', d3.forceX(W / 2).strength(0.05));
-      sim.alpha(0.3).restart();
-    });
-    ro.observe(container);
-
-    /* ── Hover effects ── */
-    nodeEls
-      .on('mouseenter', function(e, d) {
-        d3.select(this).selectAll('circle:first-child')
-          .transition().duration(200)
-          .attr('r', d.id === 'framework' ? 42 : (d.id === 'agent' || d.id === 'llm' ? 36 : 30));
-        d3.select(this).select('text')
-          .transition().duration(200)
-          .attr('fill','#e2e8f0');
-      })
-      .on('mouseleave', function(e, d) {
-        d3.select(this).selectAll('circle:first-child')
-          .transition().duration(200)
-          .attr('r', d.id === 'framework' ? 38 : (d.id === 'agent' || d.id === 'llm' ? 32 : 26));
-        d3.select(this).select('text')
-          .transition().duration(200)
-          .attr('fill','#94a3b8');
-      });
   })();
   </script>
 
