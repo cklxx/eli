@@ -9,10 +9,89 @@ import type {
   SessionContext,
 } from "./types.js";
 import { logger, pluginLogger } from "./log.js";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { buildRandomTempFilePath } from "openclaw/plugin-sdk/temp-path";
 
 const log = logger("runtime");
 const typingLog = logger("typing");
 const skillsLog = logger("skills");
+
+const MIME_TO_EXTENSION: Record<string, string> = {
+  "application/pdf": ".pdf",
+  "audio/mp4": ".m4a",
+  "audio/mpeg": ".mp3",
+  "audio/ogg": ".ogg",
+  "audio/wav": ".wav",
+  "image/bmp": ".bmp",
+  "image/gif": ".gif",
+  "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
+  "image/png": ".png",
+  "image/svg+xml": ".svg",
+  "image/tiff": ".tiff",
+  "image/webp": ".webp",
+  "text/plain": ".txt",
+  "video/mp4": ".mp4",
+  "video/quicktime": ".mov",
+  "video/webm": ".webm",
+};
+
+function normalizeContentType(contentType?: string): string {
+  return contentType?.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
+}
+
+function extensionFromContentType(contentType: string): string | undefined {
+  return MIME_TO_EXTENSION[normalizeContentType(contentType)];
+}
+
+function extensionFromFileName(fileName?: string): string | undefined {
+  const extension = fileName ? path.extname(path.basename(fileName)).toLowerCase() : "";
+  return extension || undefined;
+}
+
+function startsWithBytes(buffer: Buffer, bytes: number[]): boolean {
+  return bytes.every((byte, index) => buffer[index] === byte);
+}
+
+function looksLikeSvg(buffer: Buffer): boolean {
+  return buffer.subarray(0, 256).toString("utf8").toLowerCase().includes("<svg");
+}
+
+function detectMimeFromBuffer(buffer?: Buffer): string {
+  if (!buffer?.length) return "application/octet-stream";
+  if (startsWithBytes(buffer, [0xff, 0xd8, 0xff])) return "image/jpeg";
+  if (startsWithBytes(buffer, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
+  if (startsWithBytes(buffer, [0x47, 0x49, 0x46, 0x38])) return "image/gif";
+  if (startsWithBytes(buffer, [0x42, 0x4d])) return "image/bmp";
+  if (startsWithBytes(buffer, [0x49, 0x49, 0x2a, 0x00])) return "image/tiff";
+  if (startsWithBytes(buffer, [0x4d, 0x4d, 0x00, 0x2a])) return "image/tiff";
+  if (buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP") return "image/webp";
+  return looksLikeSvg(buffer) ? "image/svg+xml" : "application/octet-stream";
+}
+
+async function detectMime(input: Buffer | { buffer?: Buffer }): Promise<string> {
+  const buffer = Buffer.isBuffer(input) ? input : input?.buffer;
+  return detectMimeFromBuffer(buffer);
+}
+
+async function saveMediaBuffer(
+  buffer: Buffer,
+  contentType: string,
+  direction: string,
+  maxBytes: number,
+  fileName?: string,
+): Promise<{ path: string; contentType: string }> {
+  if (buffer.length > maxBytes) throw new Error(`media exceeds maxBytes: ${buffer.length} > ${maxBytes}`);
+  const resolvedType = normalizeContentType(contentType) === "application/octet-stream"
+    ? detectMimeFromBuffer(buffer)
+    : normalizeContentType(contentType);
+  const extension = extensionFromFileName(fileName) ?? extensionFromContentType(resolvedType);
+  const filePath = buildRandomTempFilePath({ prefix: `${direction}-media`, extension });
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, buffer);
+  return { path: filePath, contentType: resolvedType };
+}
 
 // ---------------------------------------------------------------------------
 // Typing indicator state — keyed by session so outbound can clean up
@@ -270,6 +349,9 @@ function buildPluginRuntime(config: SidecarConfig) {
       logInbound: () => {},
       logOutbound: () => {},
     },
+    media: {
+      detectMime,
+    },
     channel: {
       discord: buildDiscordRuntimeNamespace(),
       reply: {
@@ -439,7 +521,7 @@ function buildPluginRuntime(config: SidecarConfig) {
         resolveRequireMention: () => false,
       },
       media: {
-        saveMediaBuffer: async () => null,
+        saveMediaBuffer,
       },
       session: {
         resolveStorePath: (_store: any, _opts: any) => "/tmp/openclaw/sessions",

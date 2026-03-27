@@ -572,7 +572,7 @@ fn reconstruct_context_media(msg: &ChannelMessage) -> Vec<MediaItem> {
 
     items
         .into_iter()
-        .filter(|(_, media_type)| media_type == "image")
+        .filter(|(_, media_type)| media_type.starts_with("image"))
         .map(|(path, _)| {
             let mime = mime_from_path(&path);
             let path_clone = path.clone();
@@ -796,6 +796,25 @@ mod tests {
         let resolved = resolve_image_media(&[]).await;
         assert!(resolved.parts.is_empty());
         assert!(resolved.errors.is_empty());
+    }
+
+    #[test]
+    fn reconstruct_context_media_accepts_image_mime_types() {
+        let mut msg = ChannelMessage::new("session", "cli", "content");
+        msg.context.insert(
+            "media_paths".to_owned(),
+            serde_json::json!(["/tmp/inbound.jpg", "/tmp/doc.pdf"]),
+        );
+        msg.context.insert(
+            "media_types".to_owned(),
+            serde_json::json!(["image/jpeg", "application/pdf"]),
+        );
+
+        let media = reconstruct_context_media(&msg);
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].media_type, MediaType::Image);
+        assert_eq!(media[0].mime_type, "image/jpeg");
+        assert_eq!(media[0].filename.as_deref(), Some("/tmp/inbound.jpg"));
     }
 
     #[tokio::test]
