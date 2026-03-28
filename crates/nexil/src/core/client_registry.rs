@@ -93,6 +93,11 @@ impl ClientRegistry {
         self.cache.contains_key(&cache_key)
     }
 
+    pub fn remove(&mut self, provider: &str, api_key: Option<&str>, api_base: Option<&str>) {
+        let cache_key = ClientCacheKey::new(provider, api_key, api_base);
+        self.cache.remove(&cache_key);
+    }
+
     pub fn clear(&mut self) {
         self.cache.clear();
     }

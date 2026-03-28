@@ -231,7 +231,13 @@ impl LLMCore {
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| {
-                ConduitError::new(ErrorKind::Provider, format!("SSE stream error: {e}"))
+                info!(
+                    target: "eli_trace",
+                    error = ?e,
+                    bytes_received = buffer.len(),
+                    "sse_stream_chunk_error"
+                );
+                ConduitError::new(ErrorKind::Provider, format!("SSE stream error: {e:?}"))
             })?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
         }
