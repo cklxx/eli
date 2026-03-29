@@ -118,8 +118,7 @@ impl ClientRegistry {
         // OpenAI Codex CLI uses a JWT (eyJ…) routed to chatgpt.com/backend-api/codex.
         // That backend forces streaming on every request and can run for many minutes on
         // complex tasks — it needs the same extended timeout as Anthropic OAuth tokens.
-        let is_codex_jwt =
-            api_key.is_some_and(|k| k.starts_with("eyJ"));
+        let is_codex_jwt = api_key.is_some_and(|k| k.starts_with("eyJ"));
 
         Self::insert_auth_header(&mut headers, api_key, is_anthropic, is_oauth_token);
 
