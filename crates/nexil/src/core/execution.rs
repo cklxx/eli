@@ -465,9 +465,12 @@ impl LLMCore {
         let mut last_error: Option<ConduitError> = None;
 
         for (provider_name, model_id) in &candidates {
-            let candidate = self.build_candidate(provider_name, model_id);
-
             for attempt in self.retry_attempts() {
+                // Rebuild candidate each attempt so that after a client eviction (SSE stream
+                // error), the next retry gets a fresh connection pool rather than reusing the
+                // stale Arc<Client> captured before the eviction.
+                let candidate = self.build_candidate(provider_name, model_id);
+
                 let prepared = match self.prepare_attempt(
                     &candidate,
                     &messages_payload,
@@ -586,9 +589,11 @@ impl LLMCore {
         let mut last_error: Option<ConduitError> = None;
 
         for (provider_name, model_id) in &candidates {
-            let candidate = self.build_candidate(provider_name, model_id);
-
             for attempt in self.retry_attempts() {
+                // Rebuild candidate each attempt so after a client eviction the retry
+                // gets a fresh connection pool.
+                let candidate = self.build_candidate(provider_name, model_id);
+
                 let prepared = match self.prepare_attempt(
                     &candidate,
                     &messages_payload,

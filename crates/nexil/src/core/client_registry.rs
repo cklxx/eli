@@ -44,7 +44,7 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             default_headers: HashMap::new(),
-            timeout_secs: 120,
+            timeout_secs: 600,
         }
     }
 }

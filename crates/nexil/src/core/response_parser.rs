@@ -249,11 +249,14 @@ impl LLMCore {
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| {
-                // Include the full debug chain so "error decoding response body" shows the
-                // underlying cause (h2 reset, IO error, etc.).
-                let source = std::error::Error::source(&e)
-                    .map(|s| format!(": {s}"))
-                    .unwrap_or_default();
+                // Walk the full error source chain so logs show the root cause
+                // (e.g. h2 RST_STREAM, GOAWAY, IO error) not just the top-level message.
+                let mut chain = String::new();
+                let mut src: Option<&dyn std::error::Error> = std::error::Error::source(&e);
+                while let Some(s) = src {
+                    chain.push_str(&format!(": {s}"));
+                    src = s.source();
+                }
                 info!(
                     target: "eli_trace",
                     error = ?e,
@@ -262,7 +265,7 @@ impl LLMCore {
                 );
                 ConduitError::new(
                     ErrorKind::Temporary,
-                    format!("SSE stream error: {e}{source}"),
+                    format!("SSE stream error: {e}{chain}"),
                 )
             })?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
