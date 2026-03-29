@@ -13,7 +13,7 @@ use super::error_classify::AttemptDecision;
 use super::errors::{ConduitError, ErrorKind};
 use super::message_norm::normalize_messages_for_api;
 use super::provider_runtime::ProviderRuntime;
-use super::response_parser::TransportResponse;
+use super::response_parser::{SSE_STREAM_ERROR_PREFIX, TransportResponse};
 use crate::clients::parsing::TransportKind;
 
 /// How API keys are configured.
@@ -465,9 +465,13 @@ impl LLMCore {
         let mut last_error: Option<ConduitError> = None;
 
         for (provider_name, model_id) in &candidates {
-            let candidate = self.build_candidate(provider_name, model_id);
-
             for attempt in self.retry_attempts() {
+                // Build the candidate inside the retry loop so that after a client eviction
+                // (e.g. stale SSE connection pool) the next attempt gets a fresh Arc<Client>
+                // from the registry rather than re-using the old one still held by a prior
+                // ModelCandidate.
+                let candidate = self.build_candidate(provider_name, model_id);
+
                 let prepared = match self.prepare_attempt(
                     &candidate,
                     &messages_payload,
@@ -522,7 +526,7 @@ impl LLMCore {
                     Err(e) => {
                         // SSE stream body errors are caused by stale pooled connections.
                         // Evict the cached client so the next retry gets a fresh connection pool.
-                        if e.message.contains("SSE stream error") {
+                        if e.message.contains(SSE_STREAM_ERROR_PREFIX) {
                             self.client_registry.remove(
                                 &candidate.provider_name,
                                 candidate.api_key.as_deref(),
