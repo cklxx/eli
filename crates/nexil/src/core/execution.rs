@@ -520,6 +520,15 @@ impl LLMCore {
                 {
                     Ok(v) => v,
                     Err(e) => {
+                        // SSE stream body errors are caused by stale pooled connections.
+                        // Evict the cached client so the next retry gets a fresh connection pool.
+                        if e.message.contains("SSE stream error") {
+                            self.client_registry.remove(
+                                &candidate.provider_name,
+                                candidate.api_key.as_deref(),
+                                candidate.api_base.as_deref(),
+                            );
+                        }
                         if self.handle_send_error(
                             e,
                             &candidate.provider_name,
