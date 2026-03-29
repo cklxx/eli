@@ -1,43 +1,73 @@
-# 2026-03-29 · SSE stream error after 8 minutes — server-side termination, silent retries
+# 2026-03-29 · SSE stream error — 120s reqwest timeout firing 4×, totaling exactly 480s
 
 ## Context
 
 Fifth occurrence of `[temporary] SSE stream error: error decoding response body: request or response body error`.
-Provider: `openai:gpt-5.4` via `chatgpt.com/backend-api/codex`. Elapsed: `480079ms` (8 minutes).
+Provider: `openai:gpt-5.4` via `chatgpt.com/backend-api/codex`. `elapsed_ms=480079`.
 Previous fixes (stale pool eviction, build_candidate inside loop) were deployed and running. Still occurred.
 
 ## Root Cause
 
-**Layer 1 — forced streaming**: When API key starts with `eyJ` (Codex CLI JWT),
-`uses_openai_codex_backend()` returns true → `resolved_api_base()` = `https://chatgpt.com/backend-api/codex`.
-`build_responses_body` detects `base.contains("chatgpt.com")` → injects `"stream": true` into body.
-`body_forced_stream = !stream(false) && body["stream"](true)` = `true`.
-Result: every tool round goes through `collect_sse_response`, even when caller passes `stream: false`.
+### Layer 1 — forced streaming (why SSE is involved at all)
 
-**Layer 2 — error type**: `reqwest::Kind::Decode(Kind::Body)` = h2 stream interrupted by server
-(RST_STREAM or TCP close). Displayed as `"error decoding response body: request or response body error"`.
-Our code appends source: `{e}{source(&e)}` → the double-layered message we see.
+`api_key.starts_with("eyJ")` (Codex CLI JWT) → `uses_openai_codex_backend()=true`
+→ `resolved_api_base()="https://chatgpt.com/backend-api/codex"`
+→ `build_responses_body`: `base.contains("chatgpt.com")` injects `"stream": true`
+→ `body_forced_stream = !stream(false) && body["stream"](true)` = `true`
+→ every tool round goes through `collect_sse_response`, even when caller passes `stream: false`
 
-**Layer 3 — why after 8 minutes**: `chatgpt.com/backend-api/codex` backend has a
-per-stream or per-connection time limit (~8 min). After extended streaming, server resets the stream.
-NOT a stale pool issue — the connection was actively streaming before failure.
+### Layer 2 — the actual trigger: reqwest 120s timeout
 
-**Layer 4 — why retries don't rescue**: Retries ARE triggered (`ErrorKind::Temporary` →
-`should_retry()=true`). But `log_error` is gated behind `verbose > 0` (default 0), so
-all retry attempts are completely silent. Evidence: `elapsed_ms=480079` = ~8 min exactly,
-consistent with one long attempt + 3 fast-failing retries (server-side issue persists).
+`client_registry.rs:116-117`:
+```rust
+let is_oauth_token =
+    api_key.is_some_and(|k| k.to_ascii_lowercase().starts_with("sk-ant-oat"));
+```
+Only Anthropic OAuth (`sk-ant-oat`) gets the 600s extension (`timeout_secs.max(600)`).
+The Codex JWT (`eyJ`) is NOT matched → gets the **default 120s timeout**.
+
+### Layer 3 — why the error looks like a body error, not an explicit timeout
+
+When the 120s tower timeout fires during h2 body streaming, it doesn't produce `Kind::Request`
+("error sending request"). Instead: tower cancels the hyper/h2 future → h2 RST_STREAM →
+reqwest wraps as `Kind::Decode(Kind::Body)` → display: "error decoding response body: request or response body error".
+`is_timeout()` returns false for this chain (checks `source` one level deep, misses the nested h2 error).
+
+### Layer 4 — the smoking gun: 4 × 120s = 480s
+
+`max_retries.unwrap_or(3)` → 4 total attempts.
+No backoff between retries (just `continue`).
+Each attempt: same large context → same slow generation → same 120s timeout.
+
+**4 × 120,000ms = 480,000ms. elapsed_ms = 480,079ms. Δ = 79ms (framework overhead).**
+
+### Layer 5 — why retries were invisible
+
+`log_error()` in `error_classify.rs` is gated by `verbose > 0`. Default `verbose=0` →
+all retry attempts were completely silent in the console.
+
+### Layer 6 — OpenAI Responses SSE error events not handled
+
+`parse_responses_sse` only looks for `response.completed`. No `"error"` event handling.
+The Anthropic error event handler (`"error"` type in `MessagesAccumulator`) is only used
+for `TransportKind::Messages`. So even if the Codex backend sent an SSE error event,
+it would be silently dropped and fall through to "SSE stream ended without response.completed event".
 
 ## Fix
 
-Added `tracing::warn!` directly in the SSE-error branch of `run_chat` (not behind verbose),
-logging `provider`, `model`, `attempt`, `max_attempts`, and `error` whenever an SSE stream
-error triggers a retry. This makes retries visible in the console without requiring verbose mode.
+1. **Root fix** (`client_registry.rs`): Added `is_codex_jwt = api_key.starts_with("eyJ")`.
+   `timeout_secs = if is_oauth_token || is_codex_jwt { max(timeout, 600) }`.
+   Now the Codex JWT path gets 600s, same as Anthropic OAuth.
 
-## Rule
+2. **Visibility fix** (`execution.rs`): Added unconditional `warn!` when SSE stream error
+   triggers a retry, showing `provider/model/attempt/max_attempts/error`. Not gated by verbose.
 
-- `log_error` is verbose-gated — never assume retries are silent failures without checking verbose level.
-- When an error has `elapsed_ms` ≈ N minutes and the same error appears with no retry logs, check if retries
-  are happening silently (look for `verbose > 0` gates).
-- The chatgpt.com Codex backend forces streaming on ALL requests regardless of the `stream` param —
-  any request to this backend can produce SSE stream errors including simple tool-call rounds.
-- To get `bytes_received` on the failing chunk, set `ELI_TRACE=1` (writes to `~/.eli/logs/eli-trace.log`).
+## Rules
+
+- When `elapsed_ms` ≈ N × 120,000: check if the reqwest 120s timeout is firing. Specifically
+  check `client_registry::build_client` for the `is_oauth_token` guard — it only covers `sk-ant-oat`.
+- `Kind::Decode(Kind::Body)` does NOT mean `is_timeout()=true`, even when the root cause IS a timeout.
+  The error path through h2 RST_STREAM bypasses the `is_timeout()` chain.
+- `log_error()` is `verbose > 0` gated — retry attempts are invisible by default.
+- The chatgpt.com Codex backend forces streaming on ALL requests. Any slow tool round can hit the timeout.
+- `parse_responses_sse` has no error event handling — add it if the Codex backend starts sending error events.
