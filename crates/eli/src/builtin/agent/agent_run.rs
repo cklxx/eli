@@ -243,6 +243,53 @@ async fn maybe_auto_handoff(
     }
 }
 
+/// Returns true when the error is a context overflow or SSE timeout — both are
+/// cases where a handoff is necessary even though we have no model response to
+/// use as a summary.
+fn is_context_or_timeout_error(e: &nexil::ConduitError) -> bool {
+    let lower = e.message.to_lowercase();
+    lower.contains("context_length")
+        || lower.contains("context window")
+        || lower.contains("context length")
+        || lower.contains("input too long")
+        || lower.contains("maximum context")
+        || lower.contains("too many tokens")
+        || lower.contains("prompt is too long")
+        || lower.contains("sse_stream_error")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+}
+
+/// Bug 2: trigger handoff from the error path so that SSE timeouts and context
+/// overflow errors (which bypass the normal success branch) still rotate the
+/// tape anchor.
+async fn maybe_auto_handoff_on_error(
+    tapes: &TapeService,
+    tape_name: &str,
+    error: &nexil::ConduitError,
+    settings: &AgentSettings,
+) {
+    if !is_context_or_timeout_error(error) {
+        return;
+    }
+    if try_decrement_grace(tapes, tape_name).await {
+        return;
+    }
+    tracing::info!(
+        tape = tape_name,
+        error = %error.message,
+        "auto-handoff: triggering from error path (context overflow or timeout)"
+    );
+    place_handoff_anchor(
+        tapes,
+        tape_name,
+        "[auto-handoff triggered by context overflow or timeout]",
+        settings.context_window,
+        settings,
+    )
+    .await;
+}
+
 async fn try_decrement_grace(tapes: &TapeService, tape_name: &str) -> bool {
     let Ok(Some((remaining, prev_anchor))) = tapes.auto_handoff_grace(tape_name).await else {
         return false;
@@ -268,8 +315,22 @@ async fn try_decrement_grace(tapes: &TapeService, tape_name: &str) -> bool {
 }
 
 fn should_handoff(output: &ToolAutoResult, settings: &AgentSettings) -> Option<usize> {
-    let input_tokens = output.usage.last().map(|u| u.input_tokens).unwrap_or(0) as usize;
-    let threshold = settings.context_window * 70 / 100;
+    // Bug 5: use max() across all rounds instead of last() to avoid under-counting
+    // in multi-round turns where an earlier round may have had the peak token count.
+    let input_tokens = output
+        .usage
+        .iter()
+        .map(|u| u.input_tokens)
+        .max()
+        .unwrap_or(0) as usize;
+    // Bug 1: default to 40% (was 70%) so large models (1M/200K windows) actually trigger.
+    // Override with ELI_HANDOFF_THRESHOLD_PCT (1–99) for custom tuning.
+    let pct: usize = std::env::var("ELI_HANDOFF_THRESHOLD_PCT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|p| p.clamp(1, 99))
+        .unwrap_or(40);
+    let threshold = settings.context_window * pct / 100;
     (input_tokens >= threshold).then_some(input_tokens)
 }
 
@@ -445,6 +506,9 @@ async fn process_agent_result(
                 "agent.run finished with error"
             );
             record_run_event(elapsed_ms, "error", Some(&e.message), &[]);
+            // Bug 2: context overflow and SSE timeouts never reach the success
+            // branch, so check them here and trigger handoff if needed.
+            maybe_auto_handoff_on_error(tapes, tape_name, &e, settings).await;
             Err(e)
         }
         Ok(ref output) if output.kind == ToolAutoResultKind::Text => {
