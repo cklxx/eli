@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use reqwest::Client;
 use serde_json::Value;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::api_format::ApiFormat;
 use super::client_registry::ClientRegistry;
@@ -524,9 +524,22 @@ impl LLMCore {
                 {
                     Ok(v) => v,
                     Err(e) => {
-                        // SSE stream body errors are caused by stale pooled connections.
+                        // SSE stream body errors are caused by stale pooled connections or
+                        // server-side stream termination (e.g. backend time limit).
                         // Evict the cached client so the next retry gets a fresh connection pool.
                         if e.message.contains(SSE_STREAM_ERROR_PREFIX) {
+                            let next = attempt + 1;
+                            let max = self.max_attempts();
+                            if next < max {
+                                warn!(
+                                    provider = %candidate.provider_name,
+                                    model = %candidate.model_id,
+                                    attempt = next,
+                                    max_attempts = max,
+                                    error = %e.message,
+                                    "SSE stream error — evicting client and retrying"
+                                );
+                            }
                             self.client_registry.remove(
                                 &candidate.provider_name,
                                 candidate.api_key.as_deref(),
