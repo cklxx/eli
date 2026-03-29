@@ -115,6 +115,11 @@ impl ClientRegistry {
         let is_anthropic = provider.eq_ignore_ascii_case("anthropic");
         let is_oauth_token =
             api_key.is_some_and(|k| k.to_ascii_lowercase().starts_with("sk-ant-oat"));
+        // OpenAI Codex CLI uses a JWT (eyJ…) routed to chatgpt.com/backend-api/codex.
+        // That backend forces streaming on every request and can run for many minutes on
+        // complex tasks — it needs the same extended timeout as Anthropic OAuth tokens.
+        let is_codex_jwt =
+            api_key.is_some_and(|k| k.starts_with("eyJ"));
 
         Self::insert_auth_header(&mut headers, api_key, is_anthropic, is_oauth_token);
 
@@ -127,9 +132,10 @@ impl ClientRegistry {
             reqwest::header::HeaderValue::from_static("application/json"),
         );
 
-        // OAuth tokens force streaming with extended thinking, which can take several minutes.
-        // Use a much longer timeout to avoid cutting off long-running SSE streams.
-        let timeout_secs = if is_oauth_token {
+        // Long-running backends (Anthropic OAuth extended thinking, OpenAI Codex JWT) force
+        // streaming and can take several minutes per request. Use a much longer timeout so the
+        // 120 s default does not cut off mid-stream after exactly 4 × 120 s = 480 s.
+        let timeout_secs = if is_oauth_token || is_codex_jwt {
             self.config.timeout_secs.max(600)
         } else {
             self.config.timeout_secs
