@@ -9,6 +9,10 @@ use super::errors::{ConduitError, ErrorKind};
 use super::execution::LLMCore;
 use crate::clients::parsing::TransportKind;
 
+/// Sentinel prefix embedded in SSE chunk-read errors so the retry loop can
+/// detect them and evict the stale connection pool before retrying.
+pub(crate) const SSE_STREAM_ERROR_PREFIX: &str = "SSE stream error";
+
 /// A transport kind paired with the raw response payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransportResponse {
@@ -262,7 +266,7 @@ impl LLMCore {
                 );
                 ConduitError::new(
                     ErrorKind::Temporary,
-                    format!("SSE stream error: {e}{source}"),
+                    format!("{SSE_STREAM_ERROR_PREFIX}: {e}{source}"),
                 )
             })?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
