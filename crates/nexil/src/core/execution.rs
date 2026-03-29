@@ -440,49 +440,22 @@ impl LLMCore {
         );
     }
 
-    /// Returns true when an HTTP 400/422 error message indicates the request
-    /// context was too large for the model.
-    fn is_context_overflow_error(e: &ConduitError) -> bool {
-        if !matches!(e.kind, ErrorKind::InvalidInput) {
-            return false;
-        }
-        let lower = e.message.to_lowercase();
-        lower.contains("context_length")
-            || lower.contains("context window")
-            || lower.contains("context length")
-            || lower.contains("input too long")
-            || lower.contains("too many tokens")
-            || lower.contains("maximum context")
-            || lower.contains("prompt is too long")
-            || lower.contains("request too large")
-    }
-
-    /// Bug 3: Remove oldest messages (preferring tool-result role) until the
-    /// list is at most 60 % of its original size.  Called before a fallback
-    /// candidate so the smaller model gets a truncated context rather than the
-    /// same oversized payload that caused the 400/413/422 on the primary.
-    fn truncate_messages_for_context(messages: &mut Vec<Value>) {
-        let target_len = (messages.len() * 6 / 10).max(2);
-        while messages.len() > target_len {
-            // Prefer dropping the oldest tool-result message so that we keep
-            // user/assistant turns intact as long as possible.
-            let pos = messages
-                .iter()
-                .position(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool"));
-            let remove_idx = pos.unwrap_or(0);
-            messages.remove(remove_idx);
-        }
-    }
-
     /// Execute a synchronous (non-streaming) chat call with retry logic.
     ///
     /// Iterates over model candidates, retrying on transient errors.
     /// The `on_response` callback receives `(TransportResponse, provider, model, attempt)`
     /// and should return `Ok(T)` on success or `Err(None)` to signal a retry.
+    ///
+    /// When the primary model overflows, the fallback receives the **full**
+    /// unmodified context.  If it also overflows, the error propagates and the
+    /// higher-level handoff mechanism (via `maybe_auto_handoff_on_error`) places
+    /// a tape anchor so the next turn starts fresh.  We never truncate here
+    /// because the tape is append-only and information must never be silently
+    /// dropped from the payload.
     #[allow(clippy::too_many_arguments)]
     pub async fn run_chat<T, F>(
         &mut self,
-        mut messages_payload: Vec<Value>,
+        messages_payload: Vec<Value>,
         tools_payload: Option<Vec<Value>>,
         model: Option<&str>,
         provider: Option<&str>,
@@ -498,23 +471,7 @@ impl LLMCore {
         let candidates = self.model_candidates(model, provider)?;
         let mut last_error: Option<ConduitError> = None;
 
-        for (candidate_idx, (provider_name, model_id)) in candidates.iter().enumerate() {
-            // Bug 3: if the previous candidate failed with a context overflow,
-            // truncate the messages before giving the fallback a chance, so it
-            // doesn't receive the same payload that caused the 400/422.
-            if candidate_idx > 0
-                && let Some(ref err) = last_error
-                && Self::is_context_overflow_error(err)
-            {
-                Self::truncate_messages_for_context(&mut messages_payload);
-                warn!(
-                    provider = %provider_name,
-                    model = %model_id,
-                    msg_count = messages_payload.len(),
-                    "context overflow on previous model — truncated messages for fallback"
-                );
-            }
-
+        for (provider_name, model_id) in &candidates {
             for attempt in self.retry_attempts() {
                 // Build the candidate inside the retry loop so that after a client eviction
                 // (e.g. stale SSE connection pool) the next attempt gets a fresh Arc<Client>
