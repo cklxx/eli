@@ -39,20 +39,6 @@
 
 ---
 
-## P1: Telegram → Sidecar 迁移
-
-**What:** 把 Telegram 从 Rust 内置 channel 迁移到 sidecar 插件模式，和飞书统一架构。
-
-**Why:** 统一 channel 架构，Rust 侧只保留 webhook 一个入口。砍掉 teloxide 重依赖，加新 channel 不再需要改 Rust。
-
-**Steps:** 见 `docs/plans/telegram-sidecar-migration.md`（8 步，全部未开始）
-
-**Effort:** M
-**Priority:** P1
-**Depends on:** 确认 openclaw telegram 插件功能对齐（webhook 模式、群组、media）
-
----
-
 ## P3: Python/JS bindings for conduit (PyO3/napi-rs)
 
 **What:** Publish conduit with FFI bindings so Python/JS developers can use the tape system and LLM toolkit.
