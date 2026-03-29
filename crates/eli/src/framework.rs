@@ -115,6 +115,9 @@ impl EliFramework {
         let workspace = self.workspace.read().await.clone();
 
         if let Some(result) = Self::try_greet_shortcircuit(&rt, &inbound) {
+            for outbound in &result.outbounds {
+                rt.call_dispatch_outbound(outbound).await;
+            }
             return Ok(result);
         }
 
