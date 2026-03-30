@@ -26,6 +26,7 @@ Non-trivial tasks follow phases. **Each phase runs in its own Agent context** to
 - Plan touches >5 files → question if there's a simpler path
 - Hit an irreversible decision (public API, serialization format, trait redesign) → stop, flag it, wait for user confirmation
 - Choosing between A and B → check memory rules; no match → pick the reversible one; both reversible → ask user
+- Before coding → identify the 3-5 most consequential decisions specific to THIS task, show choices and alternatives, wait for user confirmation
 - Plan done → align with user before proceeding
 
 ### Phase 3: Implement
