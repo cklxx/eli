@@ -1,6 +1,9 @@
 use super::*;
-use crate::core::results::StreamEventKind;
+use crate::auth::APIKeyResolver;
+use crate::core::results::{StreamEvent, StreamEventKind, ToolExecution};
+use crate::tape::entries::TapeEntry;
 use serde_json::json;
+use std::collections::HashMap;
 
 // ----- LLM::new -----
 

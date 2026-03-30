@@ -235,8 +235,8 @@ impl AgentSettings {
         // (e.g. zero, absurdly large) doesn't cause handoff math to go haywire.
         const MIN_CONTEXT_WINDOW: usize = 1_000;
         const MAX_CONTEXT_WINDOW: usize = 10_000_000;
-        let raw_context_window = env_parse("ELI_CONTEXT_WINDOW")
-            .unwrap_or_else(|| infer_context_window(&model));
+        let raw_context_window =
+            env_parse("ELI_CONTEXT_WINDOW").unwrap_or_else(|| infer_context_window(&model));
         let context_window = raw_context_window.clamp(MIN_CONTEXT_WINDOW, MAX_CONTEXT_WINDOW);
         if context_window != raw_context_window {
             tracing::warn!(

@@ -136,7 +136,11 @@ fn cjk_content_ratio(messages: &[Value]) -> f64 {
             }
         }
     }
-    if total == 0 { 0.0 } else { cjk as f64 / total as f64 }
+    if total == 0 {
+        0.0
+    } else {
+        cjk as f64 / total as f64
+    }
 }
 
 fn is_cjk(c: char) -> bool {
