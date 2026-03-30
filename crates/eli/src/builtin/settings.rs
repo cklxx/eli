@@ -231,6 +231,23 @@ impl AgentSettings {
         let model = EnvConfig::model(&config);
         let (api_key, api_base) = EnvConfig::api_credentials();
 
+        // Bug G: validate context_window so a misconfigured ELI_CONTEXT_WINDOW
+        // (e.g. zero, absurdly large) doesn't cause handoff math to go haywire.
+        const MIN_CONTEXT_WINDOW: usize = 1_000;
+        const MAX_CONTEXT_WINDOW: usize = 10_000_000;
+        let raw_context_window = env_parse("ELI_CONTEXT_WINDOW")
+            .unwrap_or_else(|| infer_context_window(&model));
+        let context_window = raw_context_window.clamp(MIN_CONTEXT_WINDOW, MAX_CONTEXT_WINDOW);
+        if context_window != raw_context_window {
+            tracing::warn!(
+                value = raw_context_window,
+                clamped = context_window,
+                min = MIN_CONTEXT_WINDOW,
+                max = MAX_CONTEXT_WINDOW,
+                "context_window out of valid range [1000, 10_000_000], clamped"
+            );
+        }
+
         Self {
             home,
             fallback_models: parse_fallback_models(),
@@ -240,8 +257,7 @@ impl AgentSettings {
                 .unwrap_or_else(|| infer_max_output_tokens(&model)),
             model_timeout_seconds: env_parse("ELI_MODEL_TIMEOUT_SECONDS"),
             verbose: env_parse::<u8>("ELI_VERBOSE").unwrap_or(0).min(2),
-            context_window: env_parse("ELI_CONTEXT_WINDOW")
-                .unwrap_or_else(|| infer_context_window(&model)),
+            context_window,
             api_key,
             api_base,
             model,

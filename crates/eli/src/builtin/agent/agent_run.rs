@@ -236,6 +236,18 @@ async fn maybe_auto_handoff(
     settings: &AgentSettings,
 ) {
     if try_decrement_grace(tapes, tape_name).await {
+        // Bug B: new tool results appended during grace can push context over the
+        // threshold again. If that happens, don't wait for grace to expire — fire a
+        // new handoff immediately so the tape stays manageable.
+        if let Some(input_tokens) = should_handoff(output, settings) {
+            tracing::warn!(
+                tape = tape_name,
+                input_tokens,
+                "auto-handoff: context re-exceeded threshold during grace period, \
+                 triggering immediate handoff"
+            );
+            place_handoff_anchor(tapes, tape_name, response_text, input_tokens, settings).await;
+        }
         return;
     }
     if let Some(input_tokens) = should_handoff(output, settings) {
@@ -246,18 +258,41 @@ async fn maybe_auto_handoff(
 /// Returns true when the error is a context overflow or SSE timeout — both are
 /// cases where a handoff is necessary even though we have no model response to
 /// use as a summary.
+///
+/// Only matches against `e.message` (the provider error message), never against
+/// user prompt content. Patterns are annotated with the providers that emit them.
 fn is_context_or_timeout_error(e: &nexil::ConduitError) -> bool {
-    let lower = e.message.to_lowercase();
-    lower.contains("context_length")
-        || lower.contains("context window")
-        || lower.contains("context length")
-        || lower.contains("input too long")
-        || lower.contains("maximum context")
-        || lower.contains("too many tokens")
-        || lower.contains("prompt is too long")
-        || lower.contains("sse_stream_error")
-        || lower.contains("timeout")
-        || lower.contains("timed out")
+    // Use only the error message field, not any user content that may appear
+    // elsewhere in a structured error payload.
+    let msg = e.message.to_lowercase();
+
+    // OpenAI / Azure OpenAI: error code "context_length_exceeded"
+    msg.contains("context_length_exceeded")
+    // OpenAI: "This model's maximum context length is N tokens"
+    || msg.contains("maximum context length")
+    // Anthropic: "prompt is too long"
+    || msg.contains("prompt is too long")
+    // Anthropic / common: "input too long"
+    || msg.contains("input too long")
+    // OpenAI / many providers: "context window"
+    || msg.contains("context window")
+    // Generic: "context length"
+    || msg.contains("context length")
+    // OpenRouter relay / OpenAI legacy: "context_length" (underscore form)
+    || msg.contains("context_length")
+    // Gemini / Google: "N tokens exceeds the limit"
+    || msg.contains("tokens exceeds")
+    // Common: "too many tokens"
+    || msg.contains("too many tokens")
+    // Cohere: "context limit exceeded"
+    || msg.contains("context limit")
+    // Mistral / Together AI: "Request too large"
+    || msg.contains("request too large")
+    // Provider-agnostic SSE network layer error
+    || msg.contains("sse_stream_error")
+    // Timeout conditions (reqwest / provider-side)
+    || msg.contains("timed out")
+    || msg.contains("timeout")
 }
 
 /// Bug 2: trigger handoff from the error path so that SSE timeouts and context
@@ -317,12 +352,30 @@ async fn try_decrement_grace(tapes: &TapeService, tape_name: &str) -> bool {
 fn should_handoff(output: &ToolAutoResult, settings: &AgentSettings) -> Option<usize> {
     // Bug 5: use max() across all rounds instead of last() to avoid under-counting
     // in multi-round turns where an earlier round may have had the peak token count.
-    let input_tokens = output
+    let reported = output
         .usage
         .iter()
         .map(|u| u.input_tokens)
         .max()
         .unwrap_or(0) as usize;
+
+    // Bug A: some providers omit usage fields entirely, leaving input_tokens=0 so
+    // handoff never fires. Fall back to a char-count estimate from the response
+    // content so we still have a signal even without server-side token counts.
+    let input_tokens = if reported == 0 {
+        let estimated = estimate_tokens_from_output(output);
+        if estimated > 0 {
+            tracing::warn!(
+                estimated_tokens = estimated,
+                "auto-handoff: provider did not return usage, \
+                 estimating input tokens from response char count"
+            );
+        }
+        estimated
+    } else {
+        reported
+    };
+
     // Bug 1: default to 40% (was 70%) so large models (1M/200K windows) actually trigger.
     // Override with ELI_HANDOFF_THRESHOLD_PCT (1–99) for custom tuning.
     let pct: usize = std::env::var("ELI_HANDOFF_THRESHOLD_PCT")
@@ -332,6 +385,48 @@ fn should_handoff(output: &ToolAutoResult, settings: &AgentSettings) -> Option<u
         .unwrap_or(40);
     let threshold = settings.context_window * pct / 100;
     (input_tokens >= threshold).then_some(input_tokens)
+}
+
+/// Estimate input token count from the output content when the provider does
+/// not return usage data. Uses a conservative mixed-language heuristic:
+///   - ASCII/Latin chars ≈ 4 chars / token
+///   - CJK / wide chars  ≈ 1.5 chars / token  (i.e. chars × 2 / 3)
+fn estimate_tokens_from_output(output: &ToolAutoResult) -> usize {
+    let text = output.text.as_deref().unwrap_or("");
+    let tool_str: String = output
+        .tool_results
+        .iter()
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => serde_json::to_string(other).unwrap_or_default(),
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    let mut ascii = 0usize;
+    let mut cjk = 0usize;
+    for c in text.chars().chain(tool_str.chars()) {
+        if is_cjk_char(c) {
+            cjk += 1;
+        } else {
+            ascii += 1;
+        }
+    }
+    ascii / 4 + cjk * 2 / 3
+}
+
+/// Returns true for characters in common CJK / wide-character Unicode blocks.
+fn is_cjk_char(c: char) -> bool {
+    matches!(c as u32,
+        0x4E00..=0x9FFF   // CJK Unified Ideographs
+        | 0x3400..=0x4DBF  // CJK Extension A
+        | 0x20000..=0x2A6DF// CJK Extension B
+        | 0x3000..=0x303F  // CJK Symbols and Punctuation
+        | 0xFF00..=0xFFEF  // Halfwidth and Fullwidth Forms
+        | 0x3040..=0x309F  // Hiragana
+        | 0x30A0..=0x30FF  // Katakana
+        | 0xAC00..=0xD7AF  // Hangul Syllables
+    )
 }
 
 async fn place_handoff_anchor(

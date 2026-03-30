@@ -1531,7 +1531,22 @@ fn slice_entries_by_anchor(entries: &[TapeEntry], anchor: &AnchorSelector) -> Ve
     };
     match anchor_pos {
         Some(idx) => entries[idx + 1..].to_vec(),
-        None => entries.to_vec(),
+        // Bug E: anchor not found — log an error so operators can detect stale
+        // handoff state (e.g. tape was trimmed after the anchor was written),
+        // then fall back to the full history so the user still gets context.
+        None => {
+            match anchor {
+                AnchorSelector::Named(name) => tracing::error!(
+                    anchor = %name,
+                    "tape: named anchor not found, falling back to full history"
+                ),
+                AnchorSelector::LastAnchor => tracing::error!(
+                    "tape: no anchor found in tape, falling back to full history"
+                ),
+                AnchorSelector::None => unreachable!(),
+            }
+            entries.to_vec()
+        }
     }
 }
 
