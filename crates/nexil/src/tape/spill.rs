@@ -38,7 +38,20 @@ pub fn spill_if_needed(
     fs::write(&spill_path, content)?;
 
     // Canonicalize to absolute path so the model can read the file.
-    let absolute = spill_path.canonicalize().unwrap_or(spill_path);
+    // Bug F: log a warning when canonicalize fails (e.g. the spill dir lives on
+    // a path with a symlink that was removed) so operators can diagnose missing
+    // spill files instead of silently getting a relative/broken path.
+    let absolute = match spill_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                path = %spill_path.display(),
+                error = %e,
+                "spill: canonicalize failed, using original path (model may not be able to read the file)"
+            );
+            spill_path
+        }
+    };
 
     Ok(Some(build_truncated(content, &absolute, config)))
 }

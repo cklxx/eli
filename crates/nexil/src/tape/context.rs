@@ -90,17 +90,66 @@ fn default_messages(entries: &[TapeEntry]) -> Vec<Value> {
         .collect()
 }
 
-/// Maximum total characters across all messages before aggressive trimming kicks in.
+/// Maximum total bytes across all messages before aggressive trimming kicks in
+/// for predominantly ASCII / Latin content (English chars ≈ 4 chars/token,
+/// so 400 KB ≈ 100K tokens).
 const MAX_TOTAL_CONTEXT_CHARS: usize = 400_000;
+
+/// Lower threshold used when the conversation is predominantly CJK text.
+/// CJK chars are each roughly 1–1.5 tokens, so a 400K-char budget can exceed
+/// a 128K-token context window. 200K chars keeps us safely within most limits.
+const MAX_TOTAL_CONTEXT_CHARS_CJK: usize = 200_000;
+
+/// CJK ratio threshold (0.0–1.0) above which the tighter budget applies.
+const CJK_RATIO_THRESHOLD: f64 = 0.30;
 
 /// Number of recent user-message rounds to keep during aggressive trimming.
 const AGGRESSIVE_TRIM_KEEP_ROUNDS: usize = 2;
 
 pub fn apply_context_budget(messages: &mut Vec<Value>) {
     let total_chars: usize = messages.iter().map(content_char_count).sum();
-    if total_chars > MAX_TOTAL_CONTEXT_CHARS {
+    // Bug C: use a tighter limit for CJK-heavy conversations because CJK chars
+    // are ~1 token each, so the default 400K-char budget can balloon to 400K
+    // tokens — well beyond a typical 128K context window.
+    let threshold = if cjk_content_ratio(messages) > CJK_RATIO_THRESHOLD {
+        MAX_TOTAL_CONTEXT_CHARS_CJK
+    } else {
+        MAX_TOTAL_CONTEXT_CHARS
+    };
+    if total_chars > threshold {
         aggressive_trim(messages);
     }
+}
+
+/// Estimate the fraction of Unicode scalar values in message content that are
+/// CJK / wide characters (Japanese, Korean, Chinese, CJK punctuation, etc.).
+fn cjk_content_ratio(messages: &[Value]) -> f64 {
+    let mut total = 0usize;
+    let mut cjk = 0usize;
+    for msg in messages {
+        if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
+            for c in text.chars() {
+                total += 1;
+                if is_cjk(c) {
+                    cjk += 1;
+                }
+            }
+        }
+    }
+    if total == 0 { 0.0 } else { cjk as f64 / total as f64 }
+}
+
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x4E00..=0x9FFF    // CJK Unified Ideographs
+        | 0x3400..=0x4DBF  // CJK Extension A
+        | 0x20000..=0x2A6DF// CJK Extension B
+        | 0x3000..=0x303F  // CJK Symbols and Punctuation
+        | 0xFF00..=0xFFEF  // Halfwidth and Fullwidth Forms
+        | 0x3040..=0x309F  // Hiragana
+        | 0x30A0..=0x30FF  // Katakana
+        | 0xAC00..=0xD7AF  // Hangul Syllables
+    )
 }
 
 fn msg_role(msg: &Value) -> &str {
