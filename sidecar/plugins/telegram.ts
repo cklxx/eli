@@ -242,6 +242,17 @@ async function pollLoop(
       });
     } catch (err: any) {
       if (abortSignal?.aborted) break;
+      // Telegram returns "Conflict: terminated by other getUpdates request"
+      // when another process is polling the same bot token. Retrying is
+      // futile — the other instance will keep winning. Exit cleanly.
+      if (err.message?.includes("Conflict:")) {
+        log.error(
+          "another bot instance is polling this token — stopping this poller. " +
+          "Kill the other `eli gateway` process or check for stale sidecar processes.",
+          { err: err.message },
+        );
+        break;
+      }
       log.error("polling error", { err: err.message });
       await new Promise(r => setTimeout(r, 3000));
       continue;

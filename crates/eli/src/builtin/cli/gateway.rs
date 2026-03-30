@@ -331,6 +331,53 @@ fn channel_message_from_envelope(envelope: &Value) -> ChannelMessage {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PID lock — prevents two `eli gateway` processes from fighting over the same
+// Telegram bot token (Telegram's getUpdates is single-consumer).
+// ---------------------------------------------------------------------------
+
+struct GatewayLockGuard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for GatewayLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_gateway_lock() -> anyhow::Result<GatewayLockGuard> {
+    let eli_dir = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
+        .join(".eli");
+    let _ = std::fs::create_dir_all(&eli_dir);
+    let lock_path = eli_dir.join("gateway.lock");
+
+    // If a lock file exists, check whether the owning process is still alive.
+    if lock_path.exists()
+        && let Ok(contents) = std::fs::read_to_string(&lock_path)
+        && let Ok(pid) = contents.trim().parse::<u32>()
+    {
+        // Signal 0 checks if process exists without killing it.
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if alive {
+            anyhow::bail!(
+                "Another eli gateway is already running (PID {pid}).\n\
+                 Kill it first or remove {}",
+                lock_path.display()
+            );
+        }
+        // Stale lock — fall through and overwrite it.
+    }
+
+    std::fs::write(&lock_path, std::process::id().to_string())?;
+    Ok(GatewayLockGuard { path: lock_path })
+}
+
 /// Start channel listeners (Webhook/Sidecar). Telegram now runs through sidecar.
 pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     use std::collections::HashMap;
@@ -342,6 +389,9 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
 
     // Load .env so ELI_TELEGRAM_TOKEN (and others) are available.
     let _ = dotenvy::dotenv();
+
+    // Acquire a PID lock to prevent concurrent gateway instances.
+    let _lock_guard = acquire_gateway_lock()?;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ChannelMessage>(256);
     #[allow(unused_variables, unused_mut)]
