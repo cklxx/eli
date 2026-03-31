@@ -12,6 +12,10 @@ use nexil::{TapeEntry, TapeQuery, Tool, ToolContext};
 use serde_json::Value;
 use tempfile::NamedTempFile;
 
+use crate::builtin::command_semantics::{
+    ExitOutcome, interpret_exit, is_blocking_sleep, is_silent_command,
+};
+use crate::builtin::config::eli_home;
 use crate::builtin::shell_manager::shell_manager;
 use crate::builtin::tape::TapeService;
 use crate::envelope::ValueExt;
@@ -23,6 +27,11 @@ const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10MB
 const DEFAULT_READ_LINE_LIMIT: usize = 500;
+
+/// Bash output above this char count gets spilled to a file with a preview.
+const BASH_OUTPUT_LARGE_THRESHOLD: usize = 30_000;
+/// How many characters of preview to show for spilled output.
+const BASH_OUTPUT_PREVIEW_CHARS: usize = 2_000;
 
 static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(reqwest::Client::new);
@@ -735,6 +744,58 @@ fn render_search_entry(entry: &TapeEntry) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// bash — helpers
+// ---------------------------------------------------------------------------
+
+/// Write large bash output to a spill file and return a preview + path.
+fn spill_large_bash_output(output: &str) -> String {
+    let dir = eli_home().join("tool-results");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!("bash spill: failed to create {}: {e}", dir.display());
+        // Fall back to returning the raw output truncated inline
+        let preview: String = output.chars().take(BASH_OUTPUT_PREVIEW_CHARS).collect();
+        return format!(
+            "{preview}\n\n[Output truncated — {total} chars total, showing first ~{shown}]",
+            total = output.chars().count(),
+            shown = BASH_OUTPUT_PREVIEW_CHARS,
+        );
+    }
+
+    let filename = format!("bash-{}.txt", &uuid::Uuid::new_v4().to_string()[..8]);
+    let path = dir.join(&filename);
+    if let Err(e) = std::fs::write(&path, output) {
+        tracing::warn!("bash spill: failed to write {}: {e}", path.display());
+        let preview: String = output.chars().take(BASH_OUTPUT_PREVIEW_CHARS).collect();
+        return format!(
+            "{preview}\n\n[Output truncated — {total} chars total, showing first ~{shown}]",
+            total = output.chars().count(),
+            shown = BASH_OUTPUT_PREVIEW_CHARS,
+        );
+    }
+
+    let total = output.chars().count();
+    let preview: String = output.chars().take(BASH_OUTPUT_PREVIEW_CHARS).collect();
+    let abs = path.canonicalize().unwrap_or(path);
+    format!(
+        "[Output: {total} chars — showing first ~{shown}, full output saved to {path}]\n\n\
+         {preview}\n\n\
+         ...\n\n\
+         [Use fs.read(path=\"{path}\") to read more]",
+        shown = BASH_OUTPUT_PREVIEW_CHARS,
+        path = abs.display(),
+    )
+}
+
+/// Return the output as-is or spill if it exceeds the large threshold.
+fn maybe_spill_bash_output(output: &str) -> String {
+    if output.chars().count() > BASH_OUTPUT_LARGE_THRESHOLD {
+        spill_large_bash_output(output)
+    } else {
+        output.to_owned()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // bash
 // ---------------------------------------------------------------------------
 
@@ -773,6 +834,11 @@ fn tool_bash() -> Tool {
                     as u64;
                 let background = args.get_bool_field("background").unwrap_or(false);
 
+                // Sleep guard: block `sleep N` (N≥2) unless backgrounded
+                if !background && let Some(reason) = is_blocking_sleep(&cmd) {
+                    return Err(ConduitError::new(ErrorKind::InvalidInput, reason));
+                }
+
                 let workspace = ctx
                     .as_ref()
                     .and_then(|c| c.state.get("_runtime_workspace"))
@@ -800,29 +866,46 @@ fn tool_bash() -> Tool {
 
                 match result {
                     Ok(Ok((output, returncode, _status))) => {
-                        if let Some(code) = returncode
-                            && code != 0
-                        {
-                            let body = output.trim();
-                            let body = if body.is_empty() {
-                                "(command failed with no output — check if the command exists or try adding 2>&1)"
-                            } else {
-                                body
-                            };
-                            return Err(ConduitError::new(
-                                ErrorKind::Tool,
-                                format!(
-                                    "command exited with code {code}\noutput:\n{body}\n\n\
-                                     [Tip: read the error above to diagnose.]"
-                                ),
-                            ));
-                        }
+                        let code = returncode.unwrap_or(0);
                         let trimmed = output.trim();
-                        ok_val(if trimmed.is_empty() {
-                            "(command succeeded, no output)"
-                        } else {
-                            trimmed
-                        })
+
+                        if code != 0 {
+                            // Semantic exit-code interpretation
+                            match interpret_exit(&cmd, code) {
+                                ExitOutcome::Info(msg) => {
+                                    let body = if trimmed.is_empty() {
+                                        format!("exit code {code}: {msg}")
+                                    } else {
+                                        format!("exit code {code}: {msg}\n{trimmed}")
+                                    };
+                                    return ok_val(maybe_spill_bash_output(&body));
+                                }
+                                ExitOutcome::Error => {
+                                    let body = if trimmed.is_empty() {
+                                        "(command failed with no output — check if the command exists or try adding 2>&1)".to_owned()
+                                    } else {
+                                        trimmed.to_owned()
+                                    };
+                                    return Err(ConduitError::new(
+                                        ErrorKind::Tool,
+                                        format!(
+                                            "command exited with code {code}\noutput:\n{body}\n\n\
+                                             [Tip: read the error above to diagnose.]"
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Exit 0 — success
+                        if trimmed.is_empty() {
+                            return ok_val(if is_silent_command(&cmd) {
+                                "Done"
+                            } else {
+                                "(command succeeded, no output)"
+                            });
+                        }
+                        ok_val(maybe_spill_bash_output(trimmed))
                     }
                     Ok(Err(e)) => Err(ConduitError::new(ErrorKind::Tool, format!("{e}"))),
                     Err(_) => {
