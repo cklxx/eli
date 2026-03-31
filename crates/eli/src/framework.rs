@@ -174,10 +174,11 @@ impl EliFramework {
             let prompt = Self::build_prompt(&rt, &inbound, &session_id, &state).await;
             let state = Self::state_with_system_prompt(&rt, &prompt, state);
             let model_output = Self::run_model(&rt, &prompt, &session_id, &state, &inbound).await;
+            let preview_len = model_output.floor_char_boundary(120);
             tracing::info!(
                 session_id = %session_id,
                 output_len = model_output.len(),
-                output_preview = %&model_output[..model_output.len().min(120)],
+                output_preview = %&model_output[..preview_len],
                 "run_model completed"
             );
 
@@ -560,6 +561,24 @@ mod tests {
         release: Arc<tokio::sync::Notify>,
     }
 
+    struct UnicodeBoundaryModelPlugin;
+
+    #[async_trait]
+    impl EliHookSpec for UnicodeBoundaryModelPlugin {
+        fn plugin_name(&self) -> &str {
+            "unicode-boundary-model-plugin"
+        }
+
+        async fn run_model(
+            &self,
+            _prompt: &PromptValue,
+            _session_id: &str,
+            _state: &State,
+        ) -> Result<Option<String>, HookError> {
+            Ok(Some(format!("{}完继续", "a".repeat(118))))
+        }
+    }
+
     #[async_trait]
     impl EliHookSpec for BlockingModelPlugin {
         fn plugin_name(&self) -> &str {
@@ -703,6 +722,20 @@ mod tests {
         let msg = json!({"content": "hello", "session_id": "system-prompt"});
         let result = fw.process_inbound(msg).await.unwrap();
         assert_eq!(result.model_output, "from-hook");
+    }
+
+    #[tokio::test]
+    async fn test_process_inbound_logs_utf8_safe_preview() {
+        let fw = EliFramework::new();
+        fw.register_plugin(
+            "model",
+            Arc::new(UnicodeBoundaryModelPlugin) as Arc<dyn EliHookSpec>,
+        )
+        .await;
+
+        let msg = json!({"content": "hello", "session_id": "utf8-preview"});
+        let result = fw.process_inbound(msg).await.unwrap();
+        assert!(result.model_output.starts_with(&"a".repeat(118)));
     }
 
     #[tokio::test]
