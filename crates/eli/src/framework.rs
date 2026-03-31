@@ -114,10 +114,15 @@ impl EliFramework {
 
     /// Run one inbound message through all hooks and return the turn result.
     pub async fn process_inbound(&self, mut inbound: Envelope) -> anyhow::Result<TurnResult> {
+        use std::time::Instant;
+
+        let turn_start = Instant::now();
         Self::strip_internal_context(&mut inbound);
 
+        let t0 = Instant::now();
         let rt = self.hook_runtime_snapshot();
         let workspace = self.workspace.read().await.clone();
+        let snapshot_ms = t0.elapsed().as_micros();
 
         if let Some(result) = Self::try_greet_shortcircuit(&rt, &inbound) {
             for outbound in &result.outbounds {
@@ -144,12 +149,16 @@ impl EliFramework {
         };
 
         with_turn_context(turn_ctx, async {
+            let t0 = Instant::now();
             let session_id = self.resolve_session_id(&rt, &inbound).await;
+            let resolve_us = t0.elapsed().as_micros();
             Self::inject_session_id(&mut inbound, &session_id);
 
+            let t0 = Instant::now();
             let state = self
                 .build_state(&rt, &inbound, &session_id, &workspace)
                 .await;
+            let load_state_us = t0.elapsed().as_micros();
 
             // --- Greeting on join / new session ---
             let is_join = inbound.get("kind").and_then(|v| v.as_str()) == Some("join");
@@ -165,7 +174,6 @@ impl EliFramework {
                 }
 
                 if is_join {
-                    // Join events have no user message — return after greeting.
                     return Ok(TurnResult {
                         session_id,
                         prompt: PromptValue::Text(String::new()),
@@ -176,9 +184,18 @@ impl EliFramework {
                 }
             }
 
+            let t0 = Instant::now();
             let prompt = Self::build_prompt(&rt, &inbound, &session_id, &state).await;
+            let build_prompt_us = t0.elapsed().as_micros();
+
+            let t0 = Instant::now();
             let state = Self::state_with_system_prompt(&rt, &prompt, state);
+            let sys_prompt_us = t0.elapsed().as_micros();
+
+            let t0 = Instant::now();
             let model_output = Self::run_model(&rt, &prompt, &session_id, &state, &inbound).await;
+            let run_model_us = t0.elapsed().as_micros();
+
             let preview_len = model_output.floor_char_boundary(120);
             tracing::info!(
                 session_id = %session_id,
@@ -187,20 +204,39 @@ impl EliFramework {
                 "run_model completed"
             );
 
+            let t0 = Instant::now();
             rt.call_save_state(&session_id, &state, &inbound, &model_output)
                 .await;
+            let save_state_us = t0.elapsed().as_micros();
 
+            let t0 = Instant::now();
             let outbounds = self
                 .collect_outbounds(&rt, &inbound, &session_id, &state, &model_output)
                 .await;
-            tracing::info!(
-                session_id = %session_id,
-                outbound_count = outbounds.len(),
-                "dispatch_outbound"
-            );
+            let render_us = t0.elapsed().as_micros();
+
+            let t0 = Instant::now();
             for outbound in &outbounds {
                 rt.call_dispatch_outbound(outbound).await;
             }
+            let dispatch_us = t0.elapsed().as_micros();
+
+            let total_us = turn_start.elapsed().as_micros();
+
+            tracing::info!(
+                session_id = %session_id,
+                total_ms = total_us / 1000,
+                snapshot_us = snapshot_ms,
+                resolve_us,
+                load_state_us,
+                build_prompt_us,
+                sys_prompt_us,
+                run_model_ms = run_model_us / 1000,
+                save_state_us,
+                render_us,
+                dispatch_us,
+                "turn.timing"
+            );
 
             let usage = turn_usage()
                 .map(|u| TurnUsageInfo {
