@@ -8,6 +8,10 @@ use crate::tools::schema::{Tool, ToolResult};
 use futures::future::join_all;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::time::Duration;
+
+/// Default per-tool timeout: 60 seconds wall-clock time.
+const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Executes tool calls parsed from LLM responses.
 #[derive(Debug, Clone)]
@@ -200,13 +204,20 @@ impl ToolExecutor {
         }
 
         let ctx = if tool.context { context.cloned() } else { None };
+        let timeout = tool.timeout.unwrap_or(DEFAULT_TOOL_TIMEOUT);
 
-        tool.run(args, ctx).await.map_err(|e| {
-            ConduitError::new(
+        match tokio::time::timeout(timeout, tool.run(args, ctx)).await {
+            Ok(result) => result.map_err(|e| {
+                ConduitError::new(
+                    ErrorKind::Tool,
+                    format!("Tool '{name}' execution failed: {e}"),
+                )
+            }),
+            Err(_elapsed) => Err(ConduitError::new(
                 ErrorKind::Tool,
-                format!("Tool '{name}' execution failed: {e}"),
-            )
-        })
+                format!("Tool '{}' timed out after {}s", name, timeout.as_secs()),
+            )),
+        }
     }
 
     /// Normalize a response from the model into a list of tool call objects.
@@ -713,5 +724,69 @@ mod tests {
 
         assert!(result.error.is_none());
         assert_eq!(result.tool_results[0]["run_id"], "test-run-123");
+    }
+
+    // ----- Per-tool timeout -----
+
+    fn make_slow_tool(sleep_ms: u64) -> Tool {
+        Tool::new(
+            "slow",
+            "Sleeps for a while",
+            json!({"type": "object", "properties": {}}),
+            move |_args, _ctx| {
+                Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+                    Ok(json!({"done": true}))
+                })
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn test_tool_timeout_fires() {
+        let tool = make_slow_tool(200).with_timeout(std::time::Duration::from_millis(50));
+        let executor = ToolExecutor::new();
+        let call = tool_call_json("slow", json!({}));
+
+        let result = executor
+            .execute_async(ToolCallResponse::List(vec![call]), &[tool], None)
+            .await
+            .unwrap();
+
+        assert!(result.error.is_some());
+        let err = result.error.unwrap();
+        assert!(err.message.contains("timed out"), "got: {}", err.message);
+    }
+
+    #[tokio::test]
+    async fn test_tool_completes_before_timeout() {
+        let tool = make_slow_tool(10).with_timeout(std::time::Duration::from_secs(1));
+        let executor = ToolExecutor::new();
+        let call = tool_call_json("slow", json!({}));
+
+        let result = executor
+            .execute_async(ToolCallResponse::List(vec![call]), &[tool], None)
+            .await
+            .unwrap();
+
+        assert!(result.error.is_none());
+        assert_eq!(result.tool_results[0]["done"], true);
+    }
+
+    #[tokio::test]
+    async fn test_tool_custom_timeout_used() {
+        let tool = make_slow_tool(150).with_timeout(std::time::Duration::from_millis(100));
+        assert_eq!(tool.timeout, Some(std::time::Duration::from_millis(100)));
+        let executor = ToolExecutor::new();
+        let call = tool_call_json("slow", json!({}));
+
+        let result = executor
+            .execute_async(ToolCallResponse::List(vec![call]), &[tool], None)
+            .await
+            .unwrap();
+
+        // Should timeout because sleep(150ms) > timeout(100ms)
+        assert!(result.error.is_some());
+        assert!(result.error.unwrap().message.contains("timed out"));
     }
 }

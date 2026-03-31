@@ -20,7 +20,7 @@ use super::message::ChannelMessage;
 /// 4. **Follow-up** (non-active) messages arriving while the window is open
 ///    schedule a flush after `max_wait_seconds`.
 pub struct BufferedMessageHandler {
-    handler: mpsc::UnboundedSender<ChannelMessage>,
+    handler: mpsc::Sender<ChannelMessage>,
     inner: Arc<Mutex<BufferInner>>,
     notify: Arc<Notify>,
     active_time_window: Duration,
@@ -36,7 +36,7 @@ struct BufferInner {
 impl BufferedMessageHandler {
     /// Create a new buffered handler.
     ///
-    /// * `sink` — unbounded sender where the final (batched) message is placed
+    /// * `sink` — bounded sender where the final (batched) message is placed
     ///   for framework processing.
     /// * `active_time_window` — how long (seconds) to consider the channel
     ///   "active" after the last active message.
@@ -44,7 +44,7 @@ impl BufferedMessageHandler {
     ///   messages.
     /// * `debounce_seconds` — debounce delay after each active message.
     pub fn new(
-        sink: mpsc::UnboundedSender<ChannelMessage>,
+        sink: mpsc::Sender<ChannelMessage>,
         active_time_window: f64,
         max_wait_seconds: f64,
         debounce_seconds: f64,
@@ -84,7 +84,9 @@ impl BufferedMessageHandler {
             dropped_pending = dropped,
             "session.message received command"
         );
-        let _ = self.handler.send(message);
+        if let Err(e) = self.handler.try_send(message) {
+            warn!(error = %e, "inbound channel full, dropping command");
+        }
     }
 
     async fn handle_buffered(&self, message: ChannelMessage) {
@@ -149,9 +151,9 @@ impl BufferedMessageHandler {
                     drop(guard);
 
                     if let Some(merged) = ChannelMessage::from_batch(&batch)
-                        && sink.send(merged).is_err()
+                        && let Err(e) = sink.try_send(merged)
                     {
-                        warn!("buffered handler: sink closed, dropping batch");
+                        warn!(error = %e, "buffered handler: channel full or closed, dropping batch");
                     }
                 }
                 () = notify.notified() => {}
@@ -182,7 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_passes_through_immediately() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         let handler = BufferedMessageHandler::new(tx, 10.0, 10.0, 0.01);
 
         handler.handle(make_msg("/help", false)).await;
@@ -193,7 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_clears_pending_buffer() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         let handler = BufferedMessageHandler::new(tx, 10.0, 10.0, 0.05);
 
         handler.handle(make_msg("buffered", true)).await;
@@ -209,7 +211,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_inactive_message_outside_window_is_dropped() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         let handler = BufferedMessageHandler::new(tx, 0.01, 10.0, 0.01);
 
         // No prior active message, so inactive should be dropped
@@ -222,7 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_active_message_schedules_flush() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         let handler = BufferedMessageHandler::new(tx, 10.0, 10.0, 0.01);
 
         handler.handle(make_msg("hello", true)).await;
@@ -235,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_active_messages_debounced_into_batch() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         let handler = BufferedMessageHandler::new(tx, 10.0, 10.0, 0.05);
 
         handler.handle(make_msg("msg1", true)).await;
@@ -250,7 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_followup_within_active_window_is_buffered() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         let handler = BufferedMessageHandler::new(tx, 10.0, 0.05, 0.05);
 
         // Send active message to open window
@@ -263,5 +265,30 @@ mod tests {
         let received = rx.try_recv().unwrap();
         assert!(received.content.contains("active"));
         assert!(received.content.contains("followup"));
+    }
+
+    #[tokio::test]
+    async fn test_bounded_channel_normal_send() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let handler = BufferedMessageHandler::new(tx, 10.0, 10.0, 0.01);
+        handler.handle(make_msg("hello", true)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received.content, "hello");
+    }
+
+    #[tokio::test]
+    async fn test_bounded_channel_full_drops() {
+        // Capacity 1: first message fills it, second should be dropped.
+        let (tx, _rx) = mpsc::channel(1);
+        let handler = BufferedMessageHandler::new(tx, 10.0, 10.0, 0.01);
+
+        // Send first active message — will schedule a flush after debounce.
+        handler.handle(make_msg("msg1", true)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Channel now has msg1 in it (flushed). Send a command which bypasses
+        // buffering and calls try_send directly.
+        handler.handle(make_msg(",cmd", false)).await;
+        // If try_send fails on full, it logs WARN and drops — no panic.
     }
 }

@@ -30,6 +30,8 @@ pub struct Tool {
     pub handler: Option<Arc<ToolHandlerFn>>,
     /// Whether this tool expects a `ToolContext` argument.
     pub context: bool,
+    /// Per-tool wall-clock timeout. `None` means use the executor default (60s).
+    pub timeout: Option<std::time::Duration>,
 }
 
 impl fmt::Debug for Tool {
@@ -40,6 +42,7 @@ impl fmt::Debug for Tool {
             .field("parameters", &self.parameters)
             .field("handler", &self.handler.is_some())
             .field("context", &self.context)
+            .field("timeout", &self.timeout)
             .finish()
     }
 }
@@ -63,6 +66,7 @@ impl Clone for Tool {
             parameters: self.parameters.clone(),
             handler: self.handler.clone(),
             context: self.context,
+            timeout: self.timeout,
         }
     }
 }
@@ -80,6 +84,7 @@ impl Tool {
             parameters,
             handler: None,
             context: false,
+            timeout: None,
         }
     }
 
@@ -99,6 +104,7 @@ impl Tool {
             parameters,
             handler: Some(Arc::new(handler)),
             context: false,
+            timeout: None,
         }
     }
 
@@ -118,6 +124,7 @@ impl Tool {
             parameters,
             handler: Some(Arc::new(handler)),
             context: true,
+            timeout: None,
         }
     }
 
@@ -162,6 +169,12 @@ impl Tool {
     /// Returns true if this tool has a handler.
     pub fn is_runnable(&self) -> bool {
         self.handler.is_some()
+    }
+
+    /// Set a custom wall-clock timeout for this tool.
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
     }
 }
 

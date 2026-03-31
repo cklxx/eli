@@ -15,12 +15,14 @@ pub mod tools;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use nexil::ConduitError;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tracing::{debug, info};
 
 use crate::builtin::agent::Agent;
 use crate::builtin::store::{FileTapeStore, ForkTapeStore};
@@ -34,15 +36,23 @@ use crate::types::{Envelope, PromptValue, State};
 
 pub(crate) const CLEANUP_ONLY_CONTEXT_KEY: &str = "_eli_cleanup_only";
 
+/// Default session TTL: 30 minutes.
+const DEFAULT_SESSION_TTL_SECS: u64 = 30 * 60;
+
+/// Interval between session cleanup sweeps.
+const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
 /// Default hook implementations for basic runtime operations.
 pub struct BuiltinImpl {
     agents: std::sync::RwLock<HashMap<String, Arc<Mutex<Agent>>>>,
+    last_active: std::sync::RwLock<HashMap<String, Instant>>,
     home: PathBuf,
     router: SmartRouter,
     middleware_chain: MiddlewareChain,
     tape_service: std::sync::OnceLock<TapeService>,
     /// Channels for outbound dispatch (populated by gateway; empty in CLI mode).
     channels: std::sync::RwLock<HashMap<String, Arc<dyn Channel>>>,
+    session_ttl: Duration,
 }
 
 #[allow(clippy::new_without_default)]
@@ -51,18 +61,32 @@ impl BuiltinImpl {
     pub fn new() -> Self {
         tools::register_builtin_tools();
         let home = settings::AgentSettings::from_env().home;
+        let session_ttl = Duration::from_secs(
+            std::env::var("ELI_SESSION_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_SESSION_TTL_SECS),
+        );
         Self {
             agents: std::sync::RwLock::new(HashMap::new()),
+            last_active: std::sync::RwLock::new(HashMap::new()),
             home,
             router: SmartRouter::new(),
             middleware_chain: MiddlewareChain::with_defaults(),
             tape_service: std::sync::OnceLock::new(),
             channels: std::sync::RwLock::new(HashMap::new()),
+            session_ttl,
         }
     }
 
     /// Get or create a per-session Agent, enabling concurrent model execution across sessions.
     fn get_or_create_agent(&self, session_id: &str) -> Arc<Mutex<Agent>> {
+        // Update last-active timestamp.
+        {
+            let mut active = self.last_active.write().unwrap_or_else(|e| e.into_inner());
+            active.insert(session_id.to_owned(), Instant::now());
+        }
+
         {
             let agents = self.agents.read().unwrap_or_else(|e| e.into_inner());
             if let Some(agent) = agents.get(session_id) {
@@ -74,6 +98,68 @@ impl BuiltinImpl {
             .entry(session_id.to_owned())
             .or_insert_with(|| Arc::new(Mutex::new(Agent::new())))
             .clone()
+    }
+
+    /// Start the background session cleanup task.
+    ///
+    /// Evicts sessions idle longer than `session_ttl`. Skips sessions whose
+    /// Agent mutex is currently locked (active turn in progress).
+    pub fn start_cleanup_task(self: &Arc<Self>) {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(SESSION_CLEANUP_INTERVAL).await;
+                this.sweep_stale_sessions();
+            }
+        });
+    }
+
+    /// Sweep stale sessions, evicting those idle past the TTL.
+    fn sweep_stale_sessions(&self) {
+        let now = Instant::now();
+        let stale_keys: Vec<String> = {
+            let active = self.last_active.read().unwrap_or_else(|e| e.into_inner());
+            active
+                .iter()
+                .filter(|(_, ts)| now.duration_since(**ts) > self.session_ttl)
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+
+        if stale_keys.is_empty() {
+            return;
+        }
+
+        // Check which stale sessions are not currently locked (active).
+        let agents = self.agents.read().unwrap_or_else(|e| e.into_inner());
+        let evictable: Vec<String> = stale_keys
+            .into_iter()
+            .filter(|key| {
+                agents
+                    .get(key)
+                    .map(|a| a.try_lock().is_ok())
+                    .unwrap_or(true)
+            })
+            .collect();
+        drop(agents);
+
+        if evictable.is_empty() {
+            return;
+        }
+
+        let mut agents = self.agents.write().unwrap_or_else(|e| e.into_inner());
+        let mut active = self.last_active.write().unwrap_or_else(|e| e.into_inner());
+
+        for key in &evictable {
+            agents.remove(key);
+            active.remove(key);
+        }
+
+        info!(
+            evicted = evictable.len(),
+            "session cleanup: evicted idle sessions"
+        );
+        debug!(sessions = ?evictable, "evicted session IDs");
     }
 
     /// Resolve a session ID from a channel message.
@@ -997,5 +1083,71 @@ mod tests {
         assert!(text.contains("describe this"));
         assert!(!text.contains("image_base64"));
         assert!(!text.contains("image/png"));
+    }
+
+    // ----- Session TTL & Cleanup -----
+
+    fn builtin_with_ttl(ttl: Duration) -> BuiltinImpl {
+        tools::register_builtin_tools();
+        let home = settings::AgentSettings::from_env().home;
+        BuiltinImpl {
+            agents: std::sync::RwLock::new(HashMap::new()),
+            last_active: std::sync::RwLock::new(HashMap::new()),
+            home,
+            router: SmartRouter::new(),
+            middleware_chain: MiddlewareChain::with_defaults(),
+            tape_service: std::sync::OnceLock::new(),
+            channels: std::sync::RwLock::new(HashMap::new()),
+            session_ttl: ttl,
+        }
+    }
+
+    #[test]
+    fn test_session_evicted_after_ttl() {
+        let builtin = builtin_with_ttl(Duration::from_millis(0));
+        builtin.get_or_create_agent("stale:1");
+        // TTL is 0ms, so the session is immediately stale.
+        std::thread::sleep(Duration::from_millis(1));
+        builtin.sweep_stale_sessions();
+        let agents = builtin.agents.read().unwrap();
+        assert!(agents.is_empty(), "stale session should have been evicted");
+    }
+
+    #[test]
+    fn test_active_session_preserved() {
+        let builtin = builtin_with_ttl(Duration::from_secs(3600));
+        builtin.get_or_create_agent("active:1");
+        builtin.sweep_stale_sessions();
+        let agents = builtin.agents.read().unwrap();
+        assert_eq!(agents.len(), 1, "active session should be preserved");
+    }
+
+    #[test]
+    fn test_evicted_session_re_bootstraps() {
+        let builtin = builtin_with_ttl(Duration::from_millis(0));
+        let a1 = builtin.get_or_create_agent("session:x");
+        std::thread::sleep(Duration::from_millis(1));
+        builtin.sweep_stale_sessions();
+        let a2 = builtin.get_or_create_agent("session:x");
+        assert!(
+            !Arc::ptr_eq(&a1, &a2),
+            "re-bootstrapped agent should be new"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_locked_session_not_evicted() {
+        let builtin = builtin_with_ttl(Duration::from_millis(0));
+        let agent = builtin.get_or_create_agent("locked:1");
+        // Hold the lock to simulate an active turn.
+        let _guard = agent.lock().await;
+        std::thread::sleep(Duration::from_millis(1));
+        builtin.sweep_stale_sessions();
+        let agents = builtin.agents.read().unwrap();
+        assert_eq!(
+            agents.len(),
+            1,
+            "locked session should not be evicted during active turn"
+        );
     }
 }

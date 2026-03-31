@@ -270,6 +270,7 @@ impl MiddlewareChain {
                     parameters: tool.parameters.clone(),
                     handler: wrapped_handler.or_else(|| tool.handler.clone()),
                     context: tool.context,
+                    timeout: tool.timeout,
                 }
             })
             .collect()

@@ -21,6 +21,8 @@
 
 **参考:** elephant.ai 的 `toolregistry/registry.go`，5 层装饰器链 + `DegradationExecutor` + `circuitBreakerStore`。
 
+**Note:** Per-tool timeout is now handled separately in `executor.rs` (`Tool::with_timeout()` + `tokio::time::timeout()` wrapper). This TODO should focus on circuit breaker + degradation chain only.
+
 **Effort:** S-M
 **Priority:** P1
 

@@ -122,8 +122,8 @@ pub struct ChannelManager {
     settings: ChannelSettings,
     enabled_list: Vec<String>,
 
-    tx: mpsc::UnboundedSender<ChannelMessage>,
-    rx: Mutex<mpsc::UnboundedReceiver<ChannelMessage>>,
+    tx: mpsc::Sender<ChannelMessage>,
+    rx: Mutex<mpsc::Receiver<ChannelMessage>>,
     session_handlers: Mutex<HashMap<String, Arc<BufferedMessageHandler>>>,
     ongoing_tasks: Mutex<HashMap<String, HashSet<tokio::task::Id>>>,
     task_handles: Mutex<HashMap<tokio::task::Id, tokio::task::JoinHandle<()>>>,
@@ -137,7 +137,8 @@ impl ChannelManager {
         enabled_channels: Option<Vec<String>>,
     ) -> Arc<Self> {
         let enabled_list = enabled_channels.unwrap_or_else(|| settings.enabled_set());
-        let (tx, rx) = mpsc::unbounded_channel();
+        const INBOUND_CHANNEL_CAPACITY: usize = 256;
+        let (tx, rx) = mpsc::channel(INBOUND_CHANNEL_CAPACITY);
 
         Arc::new(Self {
             channels,
@@ -188,8 +189,11 @@ impl ChannelManager {
                     .clone()
             };
             handler.handle(message).await;
-        } else {
-            let _ = self.tx.send(message);
+        } else if let Err(e) = self.tx.try_send(message) {
+            warn!(
+                error = %e,
+                "inbound channel full, dropping message"
+            );
         }
     }
 
@@ -200,7 +204,15 @@ impl ChannelManager {
 
     // ----- outbound ---------------------------------------------------------
 
+    /// Maximum dispatch retry attempts.
+    const DISPATCH_MAX_RETRIES: u32 = 3;
+
     /// Dispatch an outbound envelope to the correct channel.
+    ///
+    /// Retries on send failure with exponential backoff (same pattern as
+    /// sidecar health checks in `gateway.rs`). All `send()` errors are
+    /// connection-level by nature — HTTP-level errors are handled inside
+    /// channel implementations.
     pub async fn dispatch(&self, message: &Envelope) -> bool {
         let Some(outbound) = self.build_outbound(message) else {
             return false;
@@ -209,11 +221,35 @@ impl ChannelManager {
         let Some(channel) = self.channels.get(&channel_name).map(Arc::clone) else {
             return false;
         };
-        if let Err(e) = channel.send(outbound).await {
-            error!(error = %e, "failed to send outbound message");
-            return false;
+
+        for attempt in 0..Self::DISPATCH_MAX_RETRIES {
+            match channel.send(outbound.clone()).await {
+                Ok(()) => return true,
+                Err(e) => {
+                    if attempt + 1 < Self::DISPATCH_MAX_RETRIES {
+                        let backoff =
+                            std::time::Duration::from_millis((200u64 << attempt.min(4)).min(3000));
+                        warn!(
+                            error = %e,
+                            attempt = attempt + 1,
+                            max = Self::DISPATCH_MAX_RETRIES,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "dispatch failed, retrying"
+                        );
+                        tokio::time::sleep(backoff).await;
+                    } else {
+                        error!(
+                            error = %e,
+                            channel = %channel_name,
+                            "dispatch failed after {} attempts",
+                            Self::DISPATCH_MAX_RETRIES
+                        );
+                        return false;
+                    }
+                }
+            }
         }
-        true
+        false
     }
 
     fn build_outbound(&self, message: &Envelope) -> Option<ChannelMessage> {
@@ -409,5 +445,93 @@ impl ChannelManager {
             ongoing.drain().flat_map(|(_, ids)| ids).collect()
         };
         self.abort_tasks(all_task_ids).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A mock channel that fails a configurable number of times then succeeds.
+    struct MockChannel {
+        fail_count: AtomicU32,
+        fails_remaining: AtomicU32,
+    }
+
+    impl MockChannel {
+        fn new(fail_n_times: u32) -> Self {
+            Self {
+                fail_count: AtomicU32::new(0),
+                fails_remaining: AtomicU32::new(fail_n_times),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Channel for MockChannel {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        async fn start(&self, _cancel: CancellationToken) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn send(&self, _message: ChannelMessage) -> anyhow::Result<()> {
+            let remaining = self.fails_remaining.load(Ordering::SeqCst);
+            if remaining > 0 {
+                self.fails_remaining.fetch_sub(1, Ordering::SeqCst);
+                self.fail_count.fetch_add(1, Ordering::SeqCst);
+                return Err(anyhow::anyhow!("connection refused"));
+            }
+            Ok(())
+        }
+    }
+
+    fn test_envelope(channel: &str) -> Envelope {
+        json!({
+            "channel": channel,
+            "chat_id": "test",
+            "content": "hello",
+        })
+    }
+
+    fn make_manager(channel: Arc<dyn Channel>) -> Arc<ChannelManager> {
+        let mut channels = HashMap::new();
+        channels.insert("mock".to_string(), channel);
+        ChannelManager::new(channels, ChannelSettings::default(), None)
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_retry_succeeds_second_attempt() {
+        let ch = Arc::new(MockChannel::new(1));
+        let mgr = make_manager(ch.clone());
+        let result = mgr.dispatch(&test_envelope("mock")).await;
+        assert!(result, "dispatch should succeed after retry");
+        assert_eq!(ch.fail_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_retry_exhausted() {
+        let ch = Arc::new(MockChannel::new(10)); // fails more than max retries
+        let mgr = make_manager(ch.clone());
+        let result = mgr.dispatch(&test_envelope("mock")).await;
+        assert!(!result, "dispatch should fail after retries exhausted");
+        assert_eq!(
+            ch.fail_count.load(Ordering::SeqCst),
+            ChannelManager::DISPATCH_MAX_RETRIES
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_unknown_channel_returns_false() {
+        let ch: Arc<dyn Channel> = Arc::new(MockChannel::new(0));
+        let mgr = make_manager(ch);
+        let result = mgr.dispatch(&test_envelope("nonexistent")).await;
+        assert!(!result);
     }
 }
