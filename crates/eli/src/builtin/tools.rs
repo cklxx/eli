@@ -1,4 +1,4 @@
-//! Builtin tool implementations: bash, fs, tape, web, subagent, etc.
+//! Builtin tool implementations: bash, fs, tape, web, agent, etc.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -294,7 +294,10 @@ fn builtin_tools() -> Vec<Tool> {
         tool_decision_list(),
         tool_decision_remove(),
         tool_web_fetch(),
-        tool_subagent(),
+        tool_agent(),
+        tool_agent_status(),
+        tool_agent_kill(),
+        tool_agent_result(),
         tool_message_send(),
         tool_help(),
         tool_quit(),
@@ -606,7 +609,22 @@ fn auto_notice(tool_name: &str, args: &Value) -> String {
             }
         }
         "tape.anchors" => "列出 anchors".to_owned(),
-        "subagent" => format!("子任务: {}", shorten(primary("prompt"), 50)),
+        "agent" => {
+            let desc = primary("description");
+            let bg = args
+                .get("run_in_background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let prefix = if bg { "后台agent" } else { "agent" };
+            if !desc.is_empty() {
+                format!("{prefix}: {}", shorten(desc, 50))
+            } else {
+                format!("{prefix}: {}", shorten(primary("prompt"), 50))
+            }
+        }
+        "agent.status" => "查看 agents".to_owned(),
+        "agent.kill" => format!("终止 {}", primary("agent_id")),
+        "agent.result" => format!("获取结果 {}", primary("agent_id")),
         _ => tool_name.to_owned(),
     }
 }
@@ -1736,44 +1754,62 @@ fn tool_web_fetch() -> Tool {
 }
 
 // ---------------------------------------------------------------------------
-// subagent
+// agent (replaces subagent)
 // ---------------------------------------------------------------------------
 
-fn tool_subagent() -> Tool {
+fn tool_agent() -> Tool {
     Tool::with_context(
-        "subagent",
-        "Spawn an async coding sub-agent that runs in the background via an external CLI (claude, codex, kimi).\n\n\
-         Returns immediately with an agent ID. When the sub-agent finishes, its full output and a git diff of any file changes are injected back as an inbound message for you to review.\n\n\
+        "agent",
+        "Launch a sub-agent to handle a task via an external coding CLI (claude, codex, kimi).\n\n\
+         By default runs **synchronously** — waits for the agent to finish and returns its output directly.\n\
+         Set `run_in_background: true` to launch asynchronously; the result will be injected as an inbound message when done.\n\n\
          WHEN TO USE:\n\
-         - Task is independent: the subtask doesn't need your current conversation context or intermediate results from other work.\n\
-         - Task is well-scoped: you can describe it fully in a single prompt (the sub-agent starts fresh with no shared memory).\n\
-         - Parallelizable work: you have 2+ independent coding tasks and want them done concurrently instead of sequentially.\n\
-         - Long-running changes: a refactor, migration, or large code generation that would block the main conversation.\n\
-         - Cross-repo work: you need changes in a different directory or repository while continuing work here.\n\
-         - Research + implement split: spawn a sub-agent to research/explore while you implement something else.\n\
-         - Review delegation: ask a sub-agent to review code, run tests, or audit a module while you keep building.\n\n\
+         - Task is independent and well-scoped: describable in a single prompt.\n\
+         - Parallelizable work: use `run_in_background` for 2+ concurrent tasks.\n\
+         - Long-running changes: refactors, migrations, large code generation.\n\
+         - Cross-repo work: changes in a different directory.\n\
+         - Research + implement split: spawn a background agent to explore while you build.\n\n\
          WHEN NOT TO USE:\n\
-         - The task depends on results from your current work — do it yourself instead.\n\
-         - The task is trivial (< 30 seconds) — overhead of spawning isn't worth it.\n\
-         - The task needs interactive back-and-forth with the user — sub-agents can't ask questions.\n\n\
-         EXAMPLES:\n\
-         - \"Write unit tests for the auth module in crates/eli/src/builtin/auth.rs\"\n\
-         - \"Refactor all error handling in crates/nexil/ to use thiserror instead of manual impls\"\n\
-         - \"Search the codebase for all uses of unwrap() and assess which ones could panic in production\"\n\
-         - \"Add OpenAPI doc comments to every public function in crates/eli/src/builtin/tools.rs\"\n\
-         - \"Run cargo clippy --workspace and fix all warnings\"",
+         - Task depends on your current work — do it yourself.\n\
+         - Task is trivial (< 30 seconds) — overhead not worth it.\n\
+         - Task needs interactive user input — agents can't ask questions.\n\n\
+         ISOLATION:\n\
+         - Set `isolation: \"worktree\"` to run the agent in a temporary git worktree.\n\
+         - The worktree is auto-removed if no changes; preserved with path returned if changes were made.",
         serde_json::json!({
             "type": "object",
             "properties": {
-                "prompt": {"type": "string"},
-                "cwd": {"type": "string", "description": "Absolute path. Defaults to workspace."},
-                "cli": {"type": "string", "description": "e.g. 'claude', 'codex'. Auto-detected if omitted."}
+                "prompt": {
+                    "type": "string",
+                    "description": "Complete task description for the sub-agent."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Short (3-5 word) summary of the task."
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "If true, returns immediately with agent_id. Result injected as inbound message later. Default: false (sync)."
+                },
+                "isolation": {
+                    "type": "string",
+                    "enum": ["worktree"],
+                    "description": "Run in an isolated git worktree."
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Absolute path. Defaults to workspace."
+                },
+                "cli": {
+                    "type": "string",
+                    "description": "CLI to use: 'claude', 'codex', 'kimi'. Auto-detected if omitted."
+                }
             },
-            "required": ["prompt"]
+            "required": ["prompt", "description"]
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
-                maybe_send_user_facing_notice("subagent", ctx.as_ref(), &args).await;
+                maybe_send_user_facing_notice("agent", ctx.as_ref(), &args).await;
 
                 let prompt = args
                     .require_str_field("prompt")
@@ -1785,12 +1821,20 @@ fn tool_subagent() -> Tool {
                         "prompt must not be empty",
                     ));
                 }
+                let description = args
+                    .get_str_field("description")
+                    .unwrap_or("agent task")
+                    .to_owned();
+                let run_in_background = args
+                    .get("run_in_background")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let isolation = args.get_str_field("isolation").map(|s| s.to_owned());
 
                 let cli_arg = args
                     .get_str_field("cli")
                     .map(str::trim)
                     .filter(|s| !s.is_empty());
-                let cli = resolve_cli(cli_arg)?;
 
                 let state = ctx.map(|c| c.state).unwrap_or_default();
                 let workspace = args
@@ -1808,7 +1852,70 @@ fn tool_subagent() -> Tool {
                             .unwrap_or_else(|_| ".".to_owned())
                     });
 
-                // Write prompt to temp file, pipe to CLI via stdin redirection.
+                // --- Worktree isolation ---
+                let effective_cwd = if isolation.as_deref() == Some("worktree") {
+                    match crate::builtin::subagent::worktree::create_worktree(Path::new(&workspace))
+                        .await
+                    {
+                        Ok(wt_path) => wt_path.to_string_lossy().to_string(),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "worktree creation failed, using workspace");
+                            workspace.clone()
+                        }
+                    }
+                } else {
+                    workspace.clone()
+                };
+
+                // --- Resolve CLI (fallback to in-process if not found) ---
+                let cli = match resolve_cli(cli_arg) {
+                    Ok(c) => c,
+                    Err(_) if !run_in_background => {
+                        // In-process fallback for sync mode.
+                        tracing::info!("no external CLI found, running agent in-process");
+                        let result = crate::builtin::subagent::fallback::run_in_process(
+                            &prompt,
+                            &effective_cwd,
+                            None,
+                        )
+                        .await;
+
+                        // Cleanup worktree if applicable.
+                        let worktree_info = if isolation.as_deref() == Some("worktree")
+                            && effective_cwd != workspace
+                        {
+                            Some(
+                                crate::builtin::subagent::worktree::cleanup_worktree(Path::new(
+                                    &effective_cwd,
+                                ))
+                                .await,
+                            )
+                        } else {
+                            None
+                        };
+
+                        return match result {
+                            Ok(r) => {
+                                let mut result_json = serde_json::json!({
+                                    "status": "completed",
+                                    "engine": "in-process",
+                                    "content": r.content,
+                                    "duration_ms": r.duration_ms,
+                                });
+                                append_worktree_info(&mut result_json, worktree_info);
+                                Ok(result_json)
+                            }
+                            Err(e) => Ok(serde_json::json!({
+                                "status": "error",
+                                "engine": "in-process",
+                                "error": e.message,
+                            })),
+                        };
+                    }
+                    Err(e) => return Err(e),
+                };
+
+                // --- CLI-based execution ---
                 let prompt_tempfile = write_prompt_tempfile(&prompt)?;
                 let prompt_path = prompt_tempfile
                     .path()
@@ -1818,19 +1925,93 @@ fn tool_subagent() -> Tool {
                     })?
                     .to_owned();
 
-                let pre_head = snapshot_git_head(&workspace);
-
+                let pre_head = snapshot_git_head(&effective_cwd);
                 let full_cmd = build_cli_command(&cli, &prompt_path);
 
                 let mgr = shell_manager();
-                let shell_id = mgr.start(&full_cmd, Some(&workspace)).await.map_err(|e| {
-                    ConduitError::new(ErrorKind::Tool, format!("failed to start CLI: {e}"))
-                })?;
+                let shell_id = mgr
+                    .start(&full_cmd, Some(&effective_cwd))
+                    .await
+                    .map_err(|e| {
+                        ConduitError::new(ErrorKind::Tool, format!("failed to start CLI: {e}"))
+                    })?;
 
                 let agent_id = shell_id.replace("bash-", "agent-");
                 let cli_name = cli.name.clone();
 
-                // Capture everything the monitor task needs.
+                // --- Sync mode (default): wait for completion ---
+                if !run_in_background {
+                    // Keep prompt file alive during execution.
+                    let _prompt_file = prompt_tempfile;
+                    let start = std::time::Instant::now();
+
+                    let (output, exit_code, _) = mgr
+                        .wait_closed(&shell_id)
+                        .await
+                        .unwrap_or_else(|e| (e.to_string(), Some(-1), "error".to_owned()));
+
+                    let artifacts = collect_artifacts(&effective_cwd, pre_head.as_deref()).await;
+                    let duration_ms = start.elapsed().as_millis() as u64;
+
+                    // Cleanup worktree if applicable.
+                    let worktree_info =
+                        if isolation.as_deref() == Some("worktree") && effective_cwd != workspace {
+                            Some(
+                                crate::builtin::subagent::worktree::cleanup_worktree(Path::new(
+                                    &effective_cwd,
+                                ))
+                                .await,
+                            )
+                        } else {
+                            None
+                        };
+
+                    let status = match exit_code {
+                        Some(0) => "completed",
+                        Some(_) => "failed",
+                        None => "unknown",
+                    };
+                    let content = truncate_output(&output);
+
+                    let mut result_json = serde_json::json!({
+                        "status": status,
+                        "engine": cli_name,
+                        "exit_code": exit_code,
+                        "content": content,
+                        "changes": artifacts,
+                        "duration_ms": duration_ms,
+                    });
+                    append_worktree_info(&mut result_json, worktree_info);
+
+                    return Ok(result_json);
+                }
+
+                // --- Async mode: fire-and-forget ---
+                let tracker = crate::builtin::subagent::tracker::agent_tracker();
+                let prompt_summary: String = description.chars().take(100).collect();
+                if !tracker
+                    .register(
+                        &agent_id,
+                        Some(shell_id.clone()),
+                        "general-purpose",
+                        &prompt_summary,
+                        &effective_cwd,
+                        &cli_name,
+                    )
+                    .await
+                {
+                    // At capacity — kill the process and return error.
+                    let _ = mgr.terminate(&shell_id).await;
+                    return Err(ConduitError::new(
+                        ErrorKind::Tool,
+                        format!(
+                            "max concurrent background agents reached ({}). \
+                             Wait for a running agent to finish, or run synchronously.",
+                            tracker.running_count().await + 1
+                        ),
+                    ));
+                }
+
                 let inject_fn = crate::control_plane::inbound_injector();
                 let session_id = state
                     .get("session_id")
@@ -1856,13 +2037,15 @@ fn tool_subagent() -> Tool {
                 let monitor_agent_id = agent_id.clone();
                 let monitor_cli_name = cli_name.clone();
                 let monitor_shell_id = shell_id.clone();
-                let monitor_workspace = workspace.clone();
+                let monitor_workspace = effective_cwd.clone();
+                let monitor_isolation = isolation.clone();
+                let monitor_orig_workspace = workspace.clone();
 
                 tokio::spawn(async move {
-                    // Keep prompt file alive until the CLI has a chance to read it.
                     let _prompt_file = prompt_tempfile;
 
                     let mgr = shell_manager();
+                    let start = std::time::Instant::now();
                     let (output, exit_code, _) = mgr
                         .wait_closed(&monitor_shell_id)
                         .await
@@ -1870,18 +2053,57 @@ fn tool_subagent() -> Tool {
 
                     let artifacts =
                         collect_artifacts(&monitor_workspace, pre_head.as_deref()).await;
-                    let message = build_completion_message(
-                        &monitor_agent_id,
-                        &monitor_cli_name,
-                        exit_code,
-                        &output,
-                        &artifacts,
+                    let duration_ms = start.elapsed().as_millis() as u64;
+
+                    // Cleanup worktree if applicable.
+                    let mut worktree_note = String::new();
+                    if monitor_isolation.as_deref() == Some("worktree")
+                        && monitor_workspace != monitor_orig_workspace
+                    {
+                        use crate::builtin::subagent::worktree::{
+                            WorktreeOutcome, cleanup_worktree,
+                        };
+                        match cleanup_worktree(Path::new(&monitor_workspace)).await {
+                            WorktreeOutcome::NoChanges => {
+                                worktree_note = "\n\nworktree: removed (no changes)".to_owned();
+                            }
+                            WorktreeOutcome::HasChanges { path, branch } => {
+                                worktree_note = format!(
+                                    "\n\nworktree: changes at {} (branch: {branch})",
+                                    path.display()
+                                );
+                            }
+                            WorktreeOutcome::NotApplicable(_) => {}
+                        }
+                    }
+
+                    // Record in tracker.
+                    let tracker = crate::builtin::subagent::tracker::agent_tracker();
+                    tracker
+                        .complete(
+                            &monitor_agent_id,
+                            crate::builtin::subagent::tracker::AgentResult {
+                                exit_code,
+                                output: output.clone(),
+                                artifacts: artifacts.clone(),
+                                duration_ms,
+                            },
+                        )
+                        .await;
+
+                    let message = format!(
+                        "{}{}",
+                        build_completion_message(
+                            &monitor_agent_id,
+                            &monitor_cli_name,
+                            exit_code,
+                            &output,
+                            &artifacts,
+                        ),
+                        worktree_note
                     );
 
                     if let Some(inject) = inject_fn {
-                        // Start with the original inbound context (carries
-                        // source_channel, account_id, channel_target, etc.
-                        // needed for outbound routing through the sidecar).
                         let mut ctx = inbound_context;
                         ctx.insert("source".to_owned(), serde_json::json!("subagent"));
                         ctx.insert("agent_id".to_owned(), serde_json::json!(monitor_agent_id));
@@ -1899,16 +2121,163 @@ fn tool_subagent() -> Tool {
                     } else {
                         tracing::warn!(
                             agent_id = %monitor_agent_id,
-                            "subagent completed but no inbound injector set"
+                            "agent completed but no inbound injector set"
                         );
                     }
                 });
 
-                ok_val(format!(
-                    "{agent_id} spawned ({cli_name}). \
-                     Its output and file changes will arrive as an inbound message when it completes — \
-                     continue with other work."
-                ))
+                Ok(serde_json::json!({
+                    "status": "background_launched",
+                    "agent_id": agent_id,
+                    "engine": cli_name,
+                    "description": description,
+                }))
+            })
+        },
+    )
+}
+
+/// Truncate output to tail portion for inclusion in results.
+fn truncate_output(output: &str) -> String {
+    if output.trim().is_empty() {
+        "(agent produced no output)".to_owned()
+    } else if output.len() > SUBAGENT_OUTPUT_TAIL {
+        let tail_start = output.len() - SUBAGENT_OUTPUT_TAIL;
+        let boundary = output.ceil_char_boundary(tail_start);
+        format!("...(truncated)\n{}", &output[boundary..])
+    } else {
+        output.to_owned()
+    }
+}
+
+/// Append worktree info to a result JSON object.
+fn append_worktree_info(
+    result: &mut Value,
+    outcome: Option<crate::builtin::subagent::worktree::WorktreeOutcome>,
+) {
+    use crate::builtin::subagent::worktree::WorktreeOutcome;
+    if let Some(outcome) = outcome {
+        match outcome {
+            WorktreeOutcome::NoChanges => {
+                result["worktree"] = serde_json::json!("removed (no changes)");
+            }
+            WorktreeOutcome::HasChanges { path, branch } => {
+                result["worktree"] = serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "branch": branch,
+                    "status": "changes preserved"
+                });
+            }
+            WorktreeOutcome::NotApplicable(reason) => {
+                result["worktree"] = serde_json::json!(reason);
+            }
+        }
+    }
+}
+
+// -- Agent management tools --------------------------------------------------
+
+fn tool_agent_status() -> Tool {
+    Tool::new(
+        "agent.status",
+        "List all background agents and their current status.",
+        serde_json::json!({"type": "object", "properties": {}}),
+        |_args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move {
+                let tracker = crate::builtin::subagent::tracker::agent_tracker();
+                let agents = tracker.list().await;
+                if agents.is_empty() {
+                    return ok_val("No background agents.");
+                }
+                let lines: Vec<String> = agents
+                    .iter()
+                    .map(|(id, s)| {
+                        let status = if s.running {
+                            format!("running ({:.1}s)", s.elapsed_ms as f64 / 1000.0)
+                        } else {
+                            format!(
+                                "done (exit {})",
+                                s.exit_code.map(|c| c.to_string()).unwrap_or("?".into())
+                            )
+                        };
+                        format!(
+                            "{id}  {status}  [{}/{}]  {}",
+                            s.cli, s.agent_type, s.prompt_summary
+                        )
+                    })
+                    .collect();
+                ok_val(lines.join("\n"))
+            })
+        },
+    )
+}
+
+fn tool_agent_kill() -> Tool {
+    Tool::new(
+        "agent.kill",
+        "Kill a running background agent by its agent ID.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"}
+            },
+            "required": ["agent_id"]
+        }),
+        |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move {
+                let agent_id = args
+                    .require_str_field("agent_id")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                let tracker = crate::builtin::subagent::tracker::agent_tracker();
+                match tracker.kill(&agent_id).await {
+                    Some(result) => Ok(serde_json::json!({
+                        "status": "killed",
+                        "agent_id": agent_id,
+                        "exit_code": result.exit_code,
+                        "output": truncate_output(&result.output),
+                    })),
+                    None => Err(ConduitError::new(
+                        ErrorKind::NotFound,
+                        format!("agent '{agent_id}' not found or already completed"),
+                    )),
+                }
+            })
+        },
+    )
+}
+
+fn tool_agent_result() -> Tool {
+    Tool::new(
+        "agent.result",
+        "Retrieve the result of a completed background agent.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"}
+            },
+            "required": ["agent_id"]
+        }),
+        |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move {
+                let agent_id = args
+                    .require_str_field("agent_id")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                let tracker = crate::builtin::subagent::tracker::agent_tracker();
+                match tracker.get_result(&agent_id).await {
+                    Some(result) => Ok(serde_json::json!({
+                        "agent_id": agent_id,
+                        "exit_code": result.exit_code,
+                        "content": truncate_output(&result.output),
+                        "changes": result.artifacts,
+                        "duration_ms": result.duration_ms,
+                    })),
+                    None => Err(ConduitError::new(
+                        ErrorKind::NotFound,
+                        format!("agent '{agent_id}' not found or still running"),
+                    )),
+                }
             })
         },
     )
@@ -2378,7 +2747,6 @@ mod tests {
             tool_tape_handoff(),
             tool_tape_anchors(),
             tool_web_fetch(),
-            tool_subagent(),
         ];
 
         for tool in tools {
@@ -2388,6 +2756,10 @@ mod tests {
                 tool.name
             );
         }
+
+        // agent tool intentionally exposes description as a task summary param.
+        let agent = tool_agent();
+        assert!(agent.parameters["properties"].get("description").is_some());
     }
 
     #[test]

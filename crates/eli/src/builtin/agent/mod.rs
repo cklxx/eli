@@ -54,6 +54,11 @@ impl Agent {
         }
     }
 
+    /// Replace the tape service (used by in-process fallback for ephemeral tapes).
+    pub fn set_tapes(&mut self, tapes: TapeService) {
+        self.tapes = Some(tapes);
+    }
+
     pub fn tapes(&mut self) -> &TapeService {
         self.ensure_tapes();
         // SAFETY: ensure_tapes() guarantees self.tapes is Some

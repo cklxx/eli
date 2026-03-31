@@ -8,6 +8,7 @@ mod model_specs;
 pub mod settings;
 pub mod shell_manager;
 pub mod store;
+pub mod subagent;
 pub mod tape;
 #[cfg(feature = "tape-viewer")]
 pub mod tape_viewer;
