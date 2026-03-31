@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
@@ -38,7 +39,8 @@ pub struct EliFramework {
     /// Working directory / project root.
     pub workspace: RwLock<PathBuf>,
     /// The hook runtime that dispatches to registered plugins.
-    hook_runtime: RwLock<HookRuntime>,
+    /// Uses `ArcSwap` for lock-free snapshot reads on the hot path.
+    hook_runtime: ArcSwap<HookRuntime>,
     /// Status of each loaded plugin.
     plugin_status: RwLock<HashMap<String, PluginStatus>>,
     /// Token budget ledger (control plane infrastructure).
@@ -50,7 +52,7 @@ impl EliFramework {
     pub fn new() -> Self {
         Self {
             workspace: RwLock::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
-            hook_runtime: RwLock::new(HookRuntime::new(Vec::new())),
+            hook_runtime: ArcSwap::from_pointee(HookRuntime::new(Vec::new())),
             plugin_status: RwLock::new(HashMap::new()),
 
             budget: BudgetLedger::new(),
@@ -61,7 +63,7 @@ impl EliFramework {
     pub fn with_workspace(workspace: PathBuf) -> Self {
         Self {
             workspace: RwLock::new(workspace),
-            hook_runtime: RwLock::new(HookRuntime::new(Vec::new())),
+            hook_runtime: ArcSwap::from_pointee(HookRuntime::new(Vec::new())),
             plugin_status: RwLock::new(HashMap::new()),
 
             budget: BudgetLedger::new(),
@@ -72,8 +74,11 @@ impl EliFramework {
 
     /// Register a plugin with the framework.
     pub async fn register_plugin(&self, name: &str, plugin: Arc<dyn EliHookSpec>) {
-        let mut rt = self.hook_runtime.write().await;
-        rt.register(plugin);
+        self.hook_runtime.rcu(|current| {
+            let mut new_rt = (**current).clone();
+            new_rt.register(plugin.clone());
+            new_rt
+        });
         let mut status = self.plugin_status.write().await;
         status.insert(
             name.to_string(),
@@ -111,7 +116,7 @@ impl EliFramework {
     pub async fn process_inbound(&self, mut inbound: Envelope) -> anyhow::Result<TurnResult> {
         Self::strip_internal_context(&mut inbound);
 
-        let rt = self.hook_runtime_snapshot().await;
+        let rt = self.hook_runtime_snapshot();
         let workspace = self.workspace.read().await.clone();
 
         if let Some(result) = Self::try_greet_shortcircuit(&rt, &inbound) {
@@ -216,8 +221,9 @@ impl EliFramework {
         .await
     }
 
-    async fn hook_runtime_snapshot(&self) -> HookRuntime {
-        self.hook_runtime.read().await.clone()
+    /// Load a snapshot of the hook runtime. Lock-free via `ArcSwap`.
+    fn hook_runtime_snapshot(&self) -> Arc<HookRuntime> {
+        self.hook_runtime.load_full()
     }
 
     fn strip_internal_context(inbound: &mut Envelope) {
@@ -369,7 +375,7 @@ impl EliFramework {
 
     /// Return hook implementation summary for diagnostics.
     pub async fn hook_report(&self) -> HashMap<String, Vec<String>> {
-        let rt = self.hook_runtime.read().await;
+        let rt = self.hook_runtime.load();
         rt.hook_report()
     }
 
@@ -385,7 +391,7 @@ impl EliFramework {
         &self,
         message_handler: MessageHandler,
     ) -> HashMap<String, Box<dyn ChannelHook>> {
-        let rt = self.hook_runtime.read().await;
+        let rt = self.hook_runtime.load();
         let all_channels = rt.call_provide_channels(message_handler);
         let mut map: HashMap<String, Box<dyn ChannelHook>> = HashMap::new();
         for ch in all_channels {
@@ -397,13 +403,13 @@ impl EliFramework {
 
     /// Get the first provided tape store.
     pub async fn get_tape_store(&self) -> Option<TapeStoreKind> {
-        let rt = self.hook_runtime.read().await;
+        let rt = self.hook_runtime.load();
         rt.call_provide_tape_store()
     }
 
     /// Build the system prompt via the hook chain.
     pub async fn get_system_prompt(&self, prompt: &PromptValue, state: &State) -> String {
-        let rt = self.hook_runtime.read().await;
+        let rt = self.hook_runtime.load();
         rt.call_build_system_prompt(&prompt.as_text(), state)
             .unwrap_or_default()
     }

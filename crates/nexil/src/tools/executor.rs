@@ -125,7 +125,7 @@ impl ToolExecutor {
     fn resolve_tool_call<'a>(
         &self,
         call: &'a Value,
-        tool_map: &'a HashMap<String, &'a Tool>,
+        tool_map: &'a HashMap<&'a str, &'a Tool>,
     ) -> Result<(&'a str, &'a Tool, Value), ConduitError> {
         let obj = call.as_object().ok_or_else(|| {
             ConduitError::new(ErrorKind::InvalidInput, "Each tool call must be an object.")
@@ -166,21 +166,23 @@ impl ToolExecutor {
     fn resolve_tool<'a>(
         &self,
         name: &str,
-        tool_map: &'a HashMap<String, &'a Tool>,
+        tool_map: &'a HashMap<&'a str, &'a Tool>,
     ) -> Option<&'a Tool> {
         tool_map
             .get(name)
             .copied()
             .or_else(|| {
                 if name.contains('_') {
-                    tool_map.get(&name.replace('_', ".")).copied()
+                    let alt = name.replace('_', ".");
+                    tool_map.get(alt.as_str()).copied()
                 } else {
                     None
                 }
             })
             .or_else(|| {
                 if name.contains('.') {
-                    tool_map.get(&name.replace('.', "_")).copied()
+                    let alt = name.replace('.', "_");
+                    tool_map.get(alt.as_str()).copied()
                 } else {
                     None
                 }
@@ -191,7 +193,7 @@ impl ToolExecutor {
     async fn handle_tool_call(
         &self,
         call: &Value,
-        tool_map: &HashMap<String, &Tool>,
+        tool_map: &HashMap<&str, &Tool>,
         context: Option<&ToolContext>,
     ) -> ToolResult {
         let (name, tool, args) = self.resolve_tool_call(call, tool_map)?;
@@ -268,11 +270,11 @@ impl ToolExecutor {
         ))
     }
 
-    fn build_tool_map<'a>(&self, tools: &'a [Tool]) -> HashMap<String, &'a Tool> {
+    fn build_tool_map<'a>(&self, tools: &'a [Tool]) -> HashMap<&'a str, &'a Tool> {
         tools
             .iter()
             .filter(|t| t.is_runnable() && !t.name.is_empty())
-            .map(|t| (t.name.clone(), t))
+            .map(|t| (t.name.as_str(), t))
             .collect()
     }
 

@@ -98,10 +98,13 @@ impl LLM {
                 buffer.push_str(&String::from_utf8_lossy(&bytes));
 
                 // Parse complete SSE lines from the buffer, leaving partial
-                // lines for the next chunk.
-                while let Some(line_end) = buffer.find('\n') {
-                    let line = buffer[..line_end].trim_end_matches('\r').to_owned();
-                    buffer = buffer[line_end + 1..].to_owned();
+                // lines for the next chunk.  We drain consumed bytes in-place
+                // instead of reallocating the remainder on every line.
+                let mut cursor = 0;
+                while let Some(rel) = buffer[cursor..].find('\n') {
+                    let line_end = cursor + rel;
+                    let line = buffer[cursor..line_end].trim_end_matches('\r').to_owned();
+                    cursor = line_end + 1;
 
                     if let Some(data) = line.strip_prefix("data: ") {
                         if data == "[DONE]" {
@@ -114,6 +117,10 @@ impl LLM {
                             }
                         }
                     }
+                }
+                // Remove consumed bytes in one operation instead of per-line.
+                if cursor > 0 {
+                    buffer.drain(..cursor);
                 }
             }
         });
