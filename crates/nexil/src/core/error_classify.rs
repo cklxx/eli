@@ -70,6 +70,7 @@ fn is_timeout_error(lower: &str) -> bool {
 
 fn is_server_error(lower: &str) -> bool {
     lower.contains("server error")
+        || lower.contains("overload")
         || has_http_status_pattern(lower, "500")
         || has_http_status_pattern(lower, "502")
         || has_http_status_pattern(lower, "503")
@@ -284,6 +285,18 @@ mod tests {
     fn classify_rate_limit() {
         assert_eq!(
             classify_by_text_signature("rate limit exceeded"),
+            Some(ErrorKind::Temporary)
+        );
+    }
+
+    #[test]
+    fn classify_overloaded() {
+        assert_eq!(
+            classify_by_text_signature("The AI service is temporarily overloaded"),
+            Some(ErrorKind::Temporary)
+        );
+        assert_eq!(
+            classify_by_text_signature(r#"{"type":"overloaded_error","message":"Overloaded"}"#),
             Some(ErrorKind::Temporary)
         );
     }

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::Client;
 use serde_json::Value;
@@ -161,6 +162,17 @@ impl LLMCore {
 
     fn retry_attempts(&self) -> std::ops::Range<u32> {
         0..self.max_attempts()
+    }
+
+    /// Exponential backoff delay for retry attempt `n` (0-indexed).
+    /// attempt 0 = no delay, attempt 1 = 1s, attempt 2 = 2s, attempt 3 = 4s, capped at 8s.
+    async fn backoff_delay(attempt: u32) {
+        if attempt == 0 {
+            return;
+        }
+        let secs = (1u64 << (attempt - 1)).min(8);
+        warn!(attempt, delay_secs = secs, "retrying after backoff");
+        tokio::time::sleep(Duration::from_secs(secs)).await;
     }
 
     /// Delegate to the custom error classifier, if set.
@@ -473,6 +485,8 @@ impl LLMCore {
 
         for (provider_name, model_id) in &candidates {
             for attempt in self.retry_attempts() {
+                Self::backoff_delay(attempt).await;
+
                 // Build the candidate inside the retry loop so that after a client eviction
                 // (e.g. stale SSE connection pool) the next attempt gets a fresh Arc<Client>
                 // from the registry rather than re-using the old one still held by a prior
@@ -613,6 +627,8 @@ impl LLMCore {
             let candidate = self.build_candidate(provider_name, model_id);
 
             for attempt in self.retry_attempts() {
+                Self::backoff_delay(attempt).await;
+
                 let prepared = match self.prepare_attempt(
                     &candidate,
                     &messages_payload,
