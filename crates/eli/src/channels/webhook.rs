@@ -13,6 +13,7 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use base64::Engine;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -68,6 +69,7 @@ pub struct WebhookChannel {
     settings: WebhookSettings,
     on_receive_tx: mpsc::UnboundedSender<ChannelMessage>,
     server_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    shutdown_token: CancellationToken,
     http_client: reqwest::Client,
 }
 
@@ -76,11 +78,17 @@ impl WebhookChannel {
         on_receive_tx: mpsc::UnboundedSender<ChannelMessage>,
         settings: WebhookSettings,
     ) -> Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             settings,
             on_receive_tx,
             server_handle: Mutex::new(None),
-            http_client: reqwest::Client::new(),
+            shutdown_token: CancellationToken::new(),
+            http_client,
         }
     }
 }
@@ -144,7 +152,12 @@ fn path_data_fetcher(path: &str) -> DataFetcher {
     let path = path.to_owned();
     Arc::new(move || {
         let path = path.clone();
-        Box::pin(async move { tokio::fs::read(path).await.unwrap_or_default() })
+        Box::pin(async move {
+            tokio::fs::read(&path).await.unwrap_or_else(|error| {
+                warn!(%error, path = %path, "webhook: failed to read media file");
+                Vec::new()
+            })
+        })
     })
 }
 
@@ -263,9 +276,15 @@ impl Channel for WebhookChannel {
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
         let listener = tokio::net::TcpListener::bind(addr).await?;
 
+        let shutdown_token = self.shutdown_token.clone();
         let handle = tokio::spawn(async move {
-            let server =
-                axum::serve(listener, app).with_graceful_shutdown(cancel.cancelled_owned());
+            let shutdown = async move {
+                tokio::select! {
+                    () = cancel.cancelled() => {},
+                    () = shutdown_token.cancelled() => {},
+                }
+            };
+            let server = axum::serve(listener, app).with_graceful_shutdown(shutdown);
 
             if let Err(e) = server.await {
                 error!(error = %e, "webhook server error");
@@ -279,9 +298,17 @@ impl Channel for WebhookChannel {
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
+        // Signal graceful shutdown via cancel token.
+        self.shutdown_token.cancel();
+
         if let Some(handle) = self.server_handle.lock().await.take() {
-            handle.abort();
-            let _ = handle.await;
+            // Give the server 5s to finish in-flight requests, then abort.
+            if tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .is_err()
+            {
+                warn!("webhook: graceful shutdown timed out, forcing stop");
+            }
         }
         info!("webhook.stopped");
         Ok(())
@@ -591,5 +618,153 @@ mod webhook_payload_tests {
         let message = parse_inbound_payload(payload);
 
         assert_eq!(message.session_id, "mock-channel:default:user_fixture");
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge case tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_outbound_no_media_produces_empty_or_null() {
+        let msg = ChannelMessage::new("s1", "webhook", "hello").with_chat_id("42");
+        let payload = build_webhook_payload(&msg);
+        let media = &payload["media"];
+        assert!(
+            media.is_null() || media.as_array().is_some_and(|a| a.is_empty()),
+            "no media should produce null or empty array, got {media}"
+        );
+    }
+
+    #[test]
+    fn test_inbound_empty_base64_skipped() {
+        let media = json!([{
+            "media_type": "image",
+            "mime_type": "image/png",
+            "filename": "empty.png",
+            "data_base64": ""
+        }]);
+        let message = parse_inbound_payload(inbound_message_payload(media));
+        assert!(
+            message.media.is_empty(),
+            "empty base64 should be filtered out"
+        );
+    }
+
+    #[test]
+    fn test_inbound_empty_path_skipped() {
+        let media = json!([{
+            "media_type": "image",
+            "mime_type": "image/png",
+            "path": ""
+        }]);
+        let message = parse_inbound_payload(inbound_message_payload(media));
+        assert!(
+            message.media.is_empty(),
+            "empty path should be filtered out"
+        );
+    }
+
+    #[test]
+    fn test_parse_media_type_case_insensitive() {
+        use super::parse_media_type;
+        assert_eq!(parse_media_type("IMAGE"), Some(MediaType::Image));
+        assert_eq!(parse_media_type("Image"), Some(MediaType::Image));
+        assert_eq!(parse_media_type("image"), Some(MediaType::Image));
+        assert_eq!(parse_media_type("AUDIO"), Some(MediaType::Audio));
+        assert_eq!(parse_media_type("Video"), Some(MediaType::Video));
+        assert_eq!(parse_media_type("DOC"), Some(MediaType::Document));
+        assert_eq!(parse_media_type("File"), Some(MediaType::Document));
+    }
+
+    #[test]
+    fn test_parse_media_type_unsupported_returns_none() {
+        use super::parse_media_type;
+        assert_eq!(parse_media_type("binary"), None);
+        assert_eq!(parse_media_type("unknown"), None);
+        assert_eq!(parse_media_type(""), None);
+    }
+
+    #[test]
+    fn test_inbound_defaults_applied_to_empty_fields() {
+        let media = json!([]);
+        let message = parse_inbound_payload(defaulted_message_payload(media));
+        assert_eq!(message.channel, "webhook");
+        assert_eq!(message.output_channel, "webhook");
+        assert!(message.is_active);
+    }
+
+    #[tokio::test]
+    async fn test_path_fetcher_missing_file_returns_empty() {
+        let media = json!([{
+            "media_type": "image",
+            "mime_type": "image/png",
+            "path": "/tmp/nonexistent_test_file_12345.png"
+        }]);
+        let message = parse_inbound_payload(inbound_message_payload(media));
+        assert_eq!(message.media.len(), 1);
+        let bytes = fetch_media_bytes(&message, 0).await;
+        assert!(bytes.is_empty(), "missing file should return empty bytes");
+    }
+
+    #[test]
+    fn test_inbound_media_with_only_base64_no_path() {
+        let inline_bytes = vec![10_u8, 20, 30];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&inline_bytes);
+        let media = json!([{
+            "media_type": "image",
+            "mime_type": "image/png",
+            "data_base64": b64
+        }]);
+        let message = parse_inbound_payload(inbound_message_payload(media));
+        assert_eq!(message.media.len(), 1);
+        assert!(message.media[0].data_fetcher.is_some());
+    }
+
+    #[test]
+    fn test_inbound_media_invalid_base64_skipped() {
+        let media = json!([{
+            "media_type": "image",
+            "mime_type": "image/png",
+            "data_base64": "not-valid-base64!!!"
+        }]);
+        let message = parse_inbound_payload(inbound_message_payload(media));
+        assert!(
+            message.media.is_empty(),
+            "invalid base64 should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_default_mime_types() {
+        use super::default_mime_type;
+        assert_eq!(default_mime_type(MediaType::Image), "image/jpeg");
+        assert_eq!(default_mime_type(MediaType::Audio), "audio/mpeg");
+        assert_eq!(default_mime_type(MediaType::Video), "video/mp4");
+        assert_eq!(
+            default_mime_type(MediaType::Document),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn test_inbound_mime_type_uses_explicit_over_default() {
+        let media = json!([{
+            "media_type": "image",
+            "mime_type": "image/webp",
+            "path": "/tmp/test.webp"
+        }]);
+        let message = parse_inbound_payload(inbound_message_payload(media));
+        assert_eq!(message.media[0].mime_type, "image/webp");
+    }
+
+    #[test]
+    fn test_inbound_mime_type_defaults_when_empty() {
+        let media = json!([{
+            "media_type": "audio",
+            "mime_type": "",
+            "path": "/tmp/test.mp3"
+        }]);
+        let message = parse_inbound_payload(inbound_message_payload(media));
+        assert_eq!(message.media[0].mime_type, "audio/mpeg");
     }
 }

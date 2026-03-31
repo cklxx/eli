@@ -220,7 +220,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
       // Fallback: extract source_channel from session_id (format: "channel:account:chatId")
       if (!sourceChannel && msg.session_id) {
         const parts = msg.session_id.split(":");
-        if (parts.length >= 2) {
+        if (parts.length >= 2 && parts[0]) {
           sourceChannel = parts[0];
           accountId = accountId || parts[1];
           chatId = chatId || parts.slice(2).join(":");

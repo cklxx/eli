@@ -154,8 +154,23 @@ if (isCLI) {
     // Normal mode: HTTP bridge server.
     createSidecar()
       .then((sidecar) => {
+        let shuttingDown = false;
         const shutdown = async () => {
-          await sidecar.stop();
+          if (shuttingDown) return;
+          shuttingDown = true;
+
+          // Force exit after 10s if graceful shutdown hangs.
+          const forceTimer = setTimeout(() => {
+            log.warn("graceful shutdown timed out, forcing exit");
+            process.exit(1);
+          }, 10_000);
+          forceTimer.unref();
+
+          try {
+            await sidecar.stop();
+          } catch (err) {
+            log.error("shutdown error", { err: String(err) });
+          }
           process.exit(0);
         };
         process.on("SIGINT", shutdown);

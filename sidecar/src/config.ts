@@ -87,16 +87,26 @@ export function loadConfig(path?: string): SidecarConfig {
   let fileConfig: Partial<SidecarConfig> = {};
   if (existsSync(configPath)) {
     const raw = readFileSync(configPath, "utf-8");
-    fileConfig = JSON.parse(raw);
-    log.info("loaded", { path: configPath });
+    try {
+      fileConfig = JSON.parse(raw);
+      log.info("loaded", { path: configPath });
+    } catch (err) {
+      log.error("invalid JSON in config file, using defaults", {
+        path: configPath,
+        err: String(err),
+      });
+    }
   } else {
     log.info("no config file, using auto-discovery", { path: configPath });
   }
 
   // Env overrides.
   const eli_url = process.env.SIDECAR_ELI_URL ?? fileConfig.eli_url ?? DEFAULTS.eli_url;
-  const port = process.env.SIDECAR_PORT
+  const parsedPort = process.env.SIDECAR_PORT
     ? parseInt(process.env.SIDECAR_PORT, 10)
+    : undefined;
+  const port = (parsedPort != null && !Number.isNaN(parsedPort))
+    ? parsedPort
     : fileConfig.port ?? DEFAULTS.port;
   const channels = fileConfig.channels ?? DEFAULTS.channels;
 

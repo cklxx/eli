@@ -934,3 +934,236 @@ describe("health check", () => {
     expect(body.channels).toContain("mock-channel");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Edge case: malformed session_id routing
+// ---------------------------------------------------------------------------
+
+describe("outbound routing edge cases", () => {
+  it("returns 400 for session_id with empty parts (colon-only)", async () => {
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(contractMessage({
+        session_id: ":::",
+        channel: "webhook",
+        content: "test",
+        chat_id: "u",
+        context: {},
+        output_channel: "webhook",
+      })),
+    });
+    expect(resp.status).toBe(400);
+  });
+
+  it("returns 400 for single-segment session_id", async () => {
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(contractMessage({
+        session_id: "x",
+        channel: "webhook",
+        content: "test",
+        chat_id: "u",
+        context: {},
+        output_channel: "webhook",
+      })),
+    });
+    expect(resp.status).toBe(400);
+  });
+
+  it("returns 400 for empty session_id and no context", async () => {
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/outbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(contractMessage({
+        session_id: "",
+        channel: "webhook",
+        content: "test",
+        chat_id: "u",
+        context: {},
+        output_channel: "webhook",
+      })),
+    });
+    expect(resp.status).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Edge case: tool execution
+// ---------------------------------------------------------------------------
+
+describe("tool execution edge cases", () => {
+  it("returns 404 for unknown tool", async () => {
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/tools/nonexistent_tool`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(contractPayload({ params: {} })),
+    });
+    expect(resp.status).toBe(404);
+    const body = (await resp.json()) as any;
+    expect(body.error).toContain("nonexistent_tool");
+  });
+
+  it("executes tool without session context (no auth wrapping)", async () => {
+    registry.registerTool({
+      name: "standalone_tool",
+      description: "A tool",
+      parameters: {},
+      execute: async (_id: string, params: any) => ({
+        content: [{ type: "text", text: `result: ${JSON.stringify(params)}` }],
+      }),
+    });
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/tools/standalone_tool`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(contractPayload({ params: { key: "value" } })),
+    });
+    expect(resp.status).toBe(200);
+    const body = (await resp.json()) as any;
+    expect(body.content[0].text).toContain("value");
+    // No session context → no notice sent.
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it("returns 500 when tool execution throws", async () => {
+    registry.registerTool({
+      name: "failing_tool",
+      description: "Fails",
+      parameters: {},
+      execute: async () => { throw new Error("boom"); },
+    });
+
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/tools/failing_tool`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(contractPayload({ params: {} })),
+    });
+    expect(resp.status).toBe(500);
+    const body = (await resp.json()) as any;
+    expect(body.content[0].text).toContain("boom");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Edge case: /notify endpoint
+// ---------------------------------------------------------------------------
+
+describe("/notify edge cases", () => {
+  it("returns 400 when session_id is missing", async () => {
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/notify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "notice" }),
+    });
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as any;
+    expect(body.error).toContain("session_id");
+  });
+
+  it("returns 400 when text is missing", async () => {
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/notify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: "mock-channel:default:u1" }),
+    });
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as any;
+    expect(body.error).toContain("text");
+  });
+
+  it("returns delivered:false for expired/unknown session", async () => {
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/notify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: "mock-channel:default:unknown_user",
+        text: "notice",
+      }),
+    });
+    expect(resp.status).toBe(200);
+    const body = (await resp.json()) as any;
+    expect(body.delivered).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Edge case: /send endpoint
+// ---------------------------------------------------------------------------
+
+describe("/send edge cases", () => {
+  it("returns 400 when required fields are missing", async () => {
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel: "mock-channel" }),
+    });
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as any;
+    expect(body.error).toContain("missing");
+  });
+
+  it("returns 404 for unknown channel", async () => {
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        channel: "nonexistent",
+        to: "user_1",
+        text: "hello",
+      }),
+    });
+    expect(resp.status).toBe(404);
+    const body = (await resp.json()) as any;
+    expect(body.error).toContain("nonexistent");
+    expect(body.available).toBeDefined();
+  });
+
+  it("sends message to valid channel with default account", async () => {
+    const resp = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        channel: "mock-channel",
+        to: "user_send",
+        text: "direct send",
+      }),
+    });
+    expect(resp.status).toBe(200);
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0].text).toBe("direct send");
+    expect(sentMessages[0].chatId).toBe("user_send");
+    expect(sentMessages[0].accountId).toBe("default");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Edge case: typing indicator races
+// ---------------------------------------------------------------------------
+
+describe("typing indicator edge cases", () => {
+  it("endPendingTyping is no-op when no typing state exists", async () => {
+    const { endPendingTyping: endTyping } = await import("../src/runtime.js");
+    // Should not throw.
+    await endTyping({ sessionId: "nonexistent:session:id", channelPlugin: mockChannel });
+    expect(pendingTyping.has("nonexistent:session:id")).toBe(false);
+  });
+
+  it("endPendingTyping called twice for same session is idempotent", async () => {
+    const { endPendingTyping: endTyping } = await import("../src/runtime.js");
+
+    pendingTyping.set("mock-channel:default:double_end", {
+      typingState: { reaction: "thinking" },
+      cfg: { channels: {} },
+      accountId: "default",
+    });
+
+    await endTyping({ sessionId: "mock-channel:default:double_end", channelPlugin: mockChannel });
+    await endTyping({ sessionId: "mock-channel:default:double_end", channelPlugin: mockChannel });
+
+    expect(pendingTyping.has("mock-channel:default:double_end")).toBe(false);
+    // Only one cleanup call — second endTyping should be a no-op.
+    expect(cleanupCalls).toHaveLength(1);
+  });
+});
