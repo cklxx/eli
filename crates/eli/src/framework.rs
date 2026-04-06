@@ -15,7 +15,8 @@ use crate::control_plane::{BudgetLedger, DispatchFn, TurnContext, turn_usage, wi
 use crate::envelope::{ValueExt, unpack_batch_vec};
 use crate::hooks::{ChannelHook, EliHookSpec, HookRuntime, TapeStoreKind};
 use crate::types::{
-    Envelope, MessageHandler, PromptValue, RUNTIME_SYSTEM_PROMPT_KEY, State, TurnResult,
+    Envelope, MessageHandler, PromptValue, RUNTIME_SYSTEM_PROMPT_KEY, RUNTIME_WORKSPACE_KEY,
+    State, TurnResult,
     TurnUsageInfo,
 };
 
@@ -342,7 +343,7 @@ impl EliFramework {
     ) -> State {
         let mut state: State = HashMap::new();
         state.insert(
-            "_runtime_workspace".to_string(),
+            RUNTIME_WORKSPACE_KEY.to_string(),
             Value::String(workspace.to_string_lossy().to_string()),
         );
 

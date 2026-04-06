@@ -106,7 +106,7 @@ pub fn push_save_event(name: &str, data: Value) {
     let _ = TURN_CTX.try_with(|ctx| {
         ctx.save_events
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .expect("lock poisoned")
             .push((name.to_owned(), data));
     });
 }
@@ -115,7 +115,7 @@ pub fn push_save_event(name: &str, data: Value) {
 pub fn drain_save_events() -> Vec<(String, Value)> {
     TURN_CTX
         .try_with(|ctx| {
-            std::mem::take(&mut *ctx.save_events.lock().unwrap_or_else(|e| e.into_inner()))
+            std::mem::take(&mut *ctx.save_events.lock().expect("lock poisoned"))
         })
         .unwrap_or_default()
 }
@@ -134,7 +134,7 @@ pub fn push_outbound_media(media: OutboundMedia) {
     let _ = TURN_CTX.try_with(|ctx| {
         ctx.outbound_media
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .expect("lock poisoned")
             .push(media);
     });
 }
@@ -143,7 +143,7 @@ pub fn push_outbound_media(media: OutboundMedia) {
 pub fn drain_outbound_media() -> Vec<OutboundMedia> {
     TURN_CTX
         .try_with(|ctx| {
-            std::mem::take(&mut *ctx.outbound_media.lock().unwrap_or_else(|e| e.into_inner()))
+            std::mem::take(&mut *ctx.outbound_media.lock().expect("lock poisoned"))
         })
         .unwrap_or_default()
 }
@@ -199,14 +199,14 @@ static INBOUND_INJECTOR: std::sync::LazyLock<std::sync::Mutex<Option<InjectInbou
 
 /// Register the global inbound injector. Called once at startup.
 pub fn set_inbound_injector(f: InjectInboundFn) {
-    *INBOUND_INJECTOR.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    *INBOUND_INJECTOR.lock().expect("lock poisoned") = Some(f);
 }
 
 /// Clone the current inbound injector, if set.
 pub fn inbound_injector() -> Option<InjectInboundFn> {
     INBOUND_INJECTOR
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .expect("lock poisoned")
         .clone()
 }
 

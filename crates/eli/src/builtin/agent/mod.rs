@@ -12,14 +12,14 @@ use serde_json::Value;
 use crate::builtin::settings::AgentSettings;
 use crate::builtin::store::{FileTapeStore, ForkTapeStore};
 use crate::builtin::tape::TapeService;
-use crate::types::PromptValue;
+use crate::types::{PromptValue, RUNTIME_WORKSPACE_KEY};
 
 use agent_request::{build_system_prompt, build_tool_state};
 use agent_run::{agent_loop, run_command};
 
 fn workspace_from_state(state: &HashMap<String, Value>) -> PathBuf {
     state
-        .get("_runtime_workspace")
+        .get(RUNTIME_WORKSPACE_KEY)
         .and_then(|v| v.as_str())
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
@@ -161,7 +161,7 @@ mod tests {
 
         let mut tool_state = HashMap::new();
         tool_state.insert(
-            "_runtime_workspace".to_owned(),
+            RUNTIME_WORKSPACE_KEY.to_owned(),
             json!(workspace.display().to_string()),
         );
 

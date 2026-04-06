@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::builtin::agent::Agent;
 use crate::builtin::store::ForkTapeStore;
 use crate::builtin::tape::TapeService;
-use crate::types::PromptValue;
+use crate::types::{PromptValue, RUNTIME_WORKSPACE_KEY};
 
 /// Result from an in-process agent run.
 pub struct FallbackResult {
@@ -45,7 +45,7 @@ pub async fn run_in_process(
     // Build minimal state — only workspace, blocked tools.
     let mut state: HashMap<String, Value> = HashMap::new();
     state.insert(
-        "_runtime_workspace".to_owned(),
+        RUNTIME_WORKSPACE_KEY.to_owned(),
         Value::String(workspace.to_owned()),
     );
 
@@ -54,7 +54,7 @@ pub async fn run_in_process(
     let all_tools: HashSet<String> = {
         let reg = crate::tools::REGISTRY
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .expect("lock poisoned");
         reg.keys()
             .filter(|k| !blocked.contains(k.as_str()))
             .cloned()

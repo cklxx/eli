@@ -836,7 +836,7 @@ mod tests {
         async fn on_error(&self, stage: &str, _error: &anyhow::Error, _message: Option<&Envelope>) {
             self.observed
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .expect("lock poisoned")
                 .push(stage.to_owned());
         }
     }
@@ -975,7 +975,7 @@ mod tests {
         ]);
         let err = anyhow::anyhow!("test error");
         rt.notify_error("turn", &err, None).await;
-        let observed = observer.observed.lock().unwrap_or_else(|e| e.into_inner());
+        let observed = observer.observed.lock().expect("lock poisoned");
         assert_eq!(*observed, vec!["turn"]);
     }
 
@@ -988,7 +988,7 @@ mod tests {
         let err = anyhow::anyhow!("test error");
         let msg = json!({"content": "hello"});
         rt.notify_error("pipeline", &err, Some(&msg)).await;
-        let observed = observer.observed.lock().unwrap_or_else(|e| e.into_inner());
+        let observed = observer.observed.lock().expect("lock poisoned");
         assert_eq!(*observed, vec!["pipeline"]);
     }
 

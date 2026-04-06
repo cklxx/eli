@@ -232,7 +232,7 @@ async fn wait_for_sidecar(sidecar_url: &str) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     for attempt in 0..15u32 {
         if sidecar_is_ready(&client, sidecar_url).await {
-            *crate::tools::SIDECAR_URL.lock().unwrap() = Some(sidecar_url.to_owned());
+            *crate::tools::SIDECAR_URL.lock().expect("lock poisoned") = Some(sidecar_url.to_owned());
             println!("Sidecar ready at {sidecar_url} (skills via .agents/skills/)");
             return Ok(());
         }

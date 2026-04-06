@@ -12,7 +12,7 @@ use crate::builtin::store::ForkTapeStore;
 use crate::prompt_builder::{PromptBuilder, PromptMode};
 
 use crate::tools::{REGISTRY, model_tools, model_tools_cached};
-use crate::types::{PromptValue, RUNTIME_SYSTEM_PROMPT_KEY};
+use crate::types::{PromptValue, RUNTIME_SYSTEM_PROMPT_KEY, RUNTIME_TAPES_DIR_KEY};
 
 pub(super) fn build_tool_state(
     state: &HashMap<String, Value>,
@@ -22,7 +22,7 @@ pub(super) fn build_tool_state(
 ) -> HashMap<String, Value> {
     let mut tool_state = state.clone();
     tool_state.insert(
-        "_runtime_tapes_dir".to_owned(),
+        RUNTIME_TAPES_DIR_KEY.to_owned(),
         Value::String(settings.home.join("tapes").display().to_string()),
     );
 
@@ -60,7 +60,7 @@ pub(super) fn build_tool_context(
 }
 
 pub(super) fn lookup_registered_tool(name: &str) -> Option<Tool> {
-    let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    let reg = REGISTRY.lock().expect("lock poisoned");
     reg.get(name)
         .cloned()
         .or_else(|| {
@@ -257,7 +257,7 @@ pub(super) async fn run_tools_once(
 ) -> Result<ToolAutoResult, ConduitError> {
     let has_filter = allowed_tools.is_some();
     let mut tools: Vec<Tool> = {
-        let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        let reg = REGISTRY.lock().expect("lock poisoned");
         if let Some(allowed) = allowed_tools {
             reg.values()
                 .filter(|t| allowed.contains(&t.name.to_lowercase()))

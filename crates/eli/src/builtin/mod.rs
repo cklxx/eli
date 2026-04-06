@@ -34,7 +34,7 @@ use crate::channels::message::{ChannelMessage, MessageKind};
 use crate::hooks::{EliHookSpec, TapeStoreKind};
 use crate::smart_router::{RouteDecision, SmartRouter};
 use crate::tool_middleware::MiddlewareChain;
-use crate::types::{Envelope, PromptValue, State};
+use crate::types::{Envelope, PromptValue, RUNTIME_WORKSPACE_KEY, State};
 
 pub(crate) const CLEANUP_ONLY_CONTEXT_KEY: &str = "_eli_cleanup_only";
 
@@ -85,17 +85,17 @@ impl BuiltinImpl {
     fn get_or_create_agent(&self, session_id: &str) -> Arc<Mutex<Agent>> {
         // Update last-active timestamp.
         {
-            let mut active = self.last_active.write().unwrap_or_else(|e| e.into_inner());
+            let mut active = self.last_active.write().expect("lock poisoned");
             active.insert(session_id.to_owned(), Instant::now());
         }
 
         {
-            let agents = self.agents.read().unwrap_or_else(|e| e.into_inner());
+            let agents = self.agents.read().expect("lock poisoned");
             if let Some(agent) = agents.get(session_id) {
                 return Arc::clone(agent);
             }
         }
-        let mut agents = self.agents.write().unwrap_or_else(|e| e.into_inner());
+        let mut agents = self.agents.write().expect("lock poisoned");
         agents
             .entry(session_id.to_owned())
             .or_insert_with(|| Arc::new(Mutex::new(Agent::new())))
@@ -120,7 +120,7 @@ impl BuiltinImpl {
     fn sweep_stale_sessions(&self) {
         let now = Instant::now();
         let stale_keys: Vec<String> = {
-            let active = self.last_active.read().unwrap_or_else(|e| e.into_inner());
+            let active = self.last_active.read().expect("lock poisoned");
             active
                 .iter()
                 .filter(|(_, ts)| now.duration_since(**ts) > self.session_ttl)
@@ -133,7 +133,7 @@ impl BuiltinImpl {
         }
 
         // Check which stale sessions are not currently locked (active).
-        let agents = self.agents.read().unwrap_or_else(|e| e.into_inner());
+        let agents = self.agents.read().expect("lock poisoned");
         let evictable: Vec<String> = stale_keys
             .into_iter()
             .filter(|key| {
@@ -149,8 +149,8 @@ impl BuiltinImpl {
             return;
         }
 
-        let mut agents = self.agents.write().unwrap_or_else(|e| e.into_inner());
-        let mut active = self.last_active.write().unwrap_or_else(|e| e.into_inner());
+        let mut agents = self.agents.write().expect("lock poisoned");
+        let mut active = self.last_active.write().expect("lock poisoned");
 
         for key in &evictable {
             agents.remove(key);
@@ -185,7 +185,7 @@ impl BuiltinImpl {
             .unwrap_or_default()
             .display()
             .to_string();
-        state.insert("_runtime_workspace".to_owned(), Value::String(workspace));
+        state.insert(RUNTIME_WORKSPACE_KEY.to_owned(), Value::String(workspace));
         state
     }
 
@@ -222,7 +222,7 @@ impl BuiltinImpl {
 
     /// Populate channels for gateway-mode outbound dispatch.
     pub fn set_channels(&self, channels: HashMap<String, Arc<dyn Channel>>) {
-        let mut chs = self.channels.write().unwrap_or_else(|e| e.into_inner());
+        let mut chs = self.channels.write().expect("lock poisoned");
         *chs = channels;
     }
 
@@ -507,7 +507,7 @@ impl EliHookSpec for BuiltinImpl {
         }
 
         let workspace = state
-            .get("_runtime_workspace")
+            .get(RUNTIME_WORKSPACE_KEY)
             .and_then(|v| v.as_str())
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -534,7 +534,7 @@ impl EliHookSpec for BuiltinImpl {
 
         // Resolve channel under the lock, then drop it before any await.
         let resolved = {
-            let channels = self.channels.read().unwrap_or_else(|e| e.into_inner());
+            let channels = self.channels.read().expect("lock poisoned");
             if channels.is_empty() {
                 None // CLI mode
             } else {
