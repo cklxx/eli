@@ -9,7 +9,7 @@ pub mod spill;
 pub mod store;
 
 pub use context::{AnchorSelector, TapeContext, build_messages};
-pub use entries::{TapeEntry, latest_system_content};
+pub use entries::{TapeEntry, TapeEntryKind, latest_system_content};
 pub use manager::{AsyncTapeManager, TapeManager};
 pub use query::TapeQuery;
 pub use session::TapeSession;

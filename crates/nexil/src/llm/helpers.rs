@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::core::errors::{ConduitError, ErrorKind};
 use crate::core::tool_calls::{normalize_message_tool_calls, normalize_tool_calls};
 use crate::tape::AnchorSelector;
-use crate::tape::entries::TapeEntry;
+use crate::tape::entries::{TapeEntry, TapeEntryKind};
 
 // ---------------------------------------------------------------------------
 // Message building
@@ -71,9 +71,9 @@ pub(super) fn slice_entries_by_anchor(
 ) -> Vec<TapeEntry> {
     let anchor_pos = match anchor {
         AnchorSelector::None => return entries.to_vec(),
-        AnchorSelector::LastAnchor => entries.iter().rposition(|e| e.kind == "anchor"),
+        AnchorSelector::LastAnchor => entries.iter().rposition(|e| e.kind == TapeEntryKind::Anchor),
         AnchorSelector::Named(name) => entries.iter().rposition(|e| {
-            e.kind == "anchor"
+            e.kind == TapeEntryKind::Anchor
                 && e.payload.get("name").and_then(|v| v.as_str()) == Some(name.as_str())
         }),
     };
@@ -104,17 +104,17 @@ pub(super) fn build_full_context_from_entries(entries: &[TapeEntry]) -> Vec<Valu
 }
 
 fn entry_to_messages(entry: &TapeEntry) -> Vec<Value> {
-    match entry.kind.as_str() {
-        "message" if entry.payload.is_object() => {
+    match entry.kind {
+        TapeEntryKind::Message if entry.payload.is_object() => {
             vec![normalize_message_tool_calls(&entry.payload)]
         }
-        "system" => entry
+        TapeEntryKind::System => entry
             .payload
             .get("content")
             .and_then(|c| c.as_str())
             .map(|content| vec![serde_json::json!({"role": "system", "content": content})])
             .unwrap_or_default(),
-        "tool_call" => entry
+        TapeEntryKind::ToolCall => entry
             .payload
             .get("calls")
             .and_then(|c| c.as_array())
@@ -129,7 +129,7 @@ fn entry_to_messages(entry: &TapeEntry) -> Vec<Value> {
                 })]
             })
             .unwrap_or_default(),
-        "tool_result" => entry
+        TapeEntryKind::ToolResult => entry
             .payload
             .get("results")
             .and_then(|r| r.as_array())

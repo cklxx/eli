@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use nexil::{ConduitError, ErrorKind, TapeEntry, TapeQuery};
+use nexil::{ConduitError, ErrorKind, TapeEntry, TapeEntryKind, TapeQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -60,7 +60,7 @@ impl TapeService {
         let anchor_positions: Vec<(usize, String)> = entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.kind == "anchor")
+            .filter(|(_, e)| e.kind == TapeEntryKind::Anchor)
             .map(|(i, e)| {
                 let name = e
                     .payload
@@ -94,7 +94,7 @@ impl TapeService {
     /// Ensure the tape has a bootstrap anchor. Creates one if none exist.
     /// Returns `true` when a new anchor was created (i.e. the session is brand new).
     pub async fn ensure_bootstrap_anchor(&self, tape_name: &str) -> Result<bool, ConduitError> {
-        let query = TapeQuery::new(tape_name).kinds(vec!["anchor".to_owned()]);
+        let query = TapeQuery::new(tape_name).kinds(vec![TapeEntryKind::Anchor]);
         let anchors = self.store.fetch_all(&query).await?;
         if anchors.is_empty() {
             let anchor = TapeEntry::anchor(
@@ -124,7 +124,7 @@ impl TapeService {
         tape_name: &str,
         limit: usize,
     ) -> Result<Vec<AnchorSummary>, ConduitError> {
-        let query = TapeQuery::new(tape_name).kinds(vec!["anchor".to_owned()]);
+        let query = TapeQuery::new(tape_name).kinds(vec![TapeEntryKind::Anchor]);
         let entries = self.store.fetch_all(&query).await?;
 
         let start = if entries.len() > limit {
@@ -213,7 +213,7 @@ impl TapeService {
 
     /// Get the name of the last anchor in the tape (if any).
     pub async fn last_anchor_name(&self, tape_name: &str) -> Result<Option<String>, ConduitError> {
-        let query = TapeQuery::new(tape_name).kinds(vec!["anchor".to_owned()]);
+        let query = TapeQuery::new(tape_name).kinds(vec![TapeEntryKind::Anchor]);
         let entries = self.store.fetch_all(&query).await?;
         Ok(entries.last().and_then(|e| {
             e.payload
@@ -229,7 +229,7 @@ impl TapeService {
         &self,
         tape_name: &str,
     ) -> Result<Option<(u32, String)>, ConduitError> {
-        let query = TapeQuery::new(tape_name).kinds(vec!["event".to_owned()]);
+        let query = TapeQuery::new(tape_name).kinds(vec![TapeEntryKind::Event]);
         let entries = self.store.fetch_all(&query).await?;
         // Walk backwards to find the latest grace event.
         for entry in entries.iter().rev() {
@@ -320,7 +320,7 @@ fn find_last_token_usage(entries: &[TapeEntry]) -> Option<i64> {
             .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        (entry.kind == "event" && (name == "run" || name == "agent.run"))
+        (entry.kind == TapeEntryKind::Event && (name == "run" || name == "agent.run"))
             .then(|| {
                 entry
                     .payload

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use crate::tape::entries::TapeEntry;
+use crate::tape::entries::{TapeEntry, TapeEntryKind};
 
 /// Collect active (non-revoked) decisions from tape entries.
 ///
@@ -15,14 +15,14 @@ use crate::tape::entries::TapeEntry;
 pub fn collect_active_decisions(entries: &[TapeEntry]) -> Vec<String> {
     let revoked: HashSet<String> = entries
         .iter()
-        .filter(|e| e.kind == "decision_revoked")
+        .filter(|e| e.kind == TapeEntryKind::DecisionRevoked)
         .filter_map(|e| e.payload.get("text").and_then(|v| v.as_str()))
         .map(str::to_owned)
         .collect();
 
     entries
         .iter()
-        .filter(|e| e.kind == "decision")
+        .filter(|e| e.kind == TapeEntryKind::Decision)
         .filter_map(|e| e.payload.get("text").and_then(|v| v.as_str()))
         .filter(|text| !text.is_empty() && !revoked.contains(*text))
         .map(str::to_owned)

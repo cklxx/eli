@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use nexil::tape::store::fetch_all_in_memory;
 use nexil::tape::{AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore, TapeStore};
-use nexil::{ConduitError, ErrorKind, TapeEntry, TapeQuery};
+use nexil::{ConduitError, ErrorKind, TapeEntry, TapeEntryKind, TapeQuery};
 use serde_json::Value;
 
 tokio::task_local! {
@@ -376,7 +376,7 @@ impl TapeFile {
 
         let stored = TapeEntry::new(
             self.next_id(),
-            entry.kind.clone(),
+            entry.kind,
             entry.payload.clone(),
             entry.meta.clone(),
             entry.date.clone(),
@@ -440,7 +440,7 @@ impl TapeFile {
 }
 
 fn is_anchor_boundary(entry: &TapeEntry, query: &TapeQuery) -> bool {
-    if entry.kind != "anchor" {
+    if entry.kind != TapeEntryKind::Anchor {
         return false;
     }
     let anchor_name = entry
@@ -455,7 +455,7 @@ fn is_anchor_boundary(entry: &TapeEntry, query: &TapeQuery) -> bool {
 fn entry_from_payload(payload: &Value) -> Option<TapeEntry> {
     let obj = payload.as_object()?;
     let id = obj.get("id")?.as_i64()?;
-    let kind = obj.get("kind")?.as_str()?.to_owned();
+    let kind: TapeEntryKind = serde_json::from_value(obj.get("kind")?.clone()).ok()?;
     let entry_payload = obj.get("payload")?.clone();
     let meta = obj
         .get("meta")
@@ -489,7 +489,7 @@ mod tests {
 
         let entry = TapeEntry::new(
             0,
-            "message".into(),
+            TapeEntryKind::Message,
             json!({"content": "hello"}),
             json!({}),
             "2024-01-01T00:00:00Z".into(),
@@ -511,7 +511,7 @@ mod tests {
         for i in 0..3 {
             let entry = TapeEntry::new(
                 0,
-                "event".into(),
+                TapeEntryKind::Event,
                 json!({"name": "step", "data": {"n": i}}),
                 json!({}),
                 "2024-01-01T00:00:00Z".into(),
@@ -534,7 +534,7 @@ mod tests {
 
         let entry = TapeEntry::new(
             0,
-            "message".into(),
+            TapeEntryKind::Message,
             json!({"content": "hi"}),
             json!({}),
             "2024-01-01T00:00:00Z".into(),
@@ -555,7 +555,7 @@ mod tests {
         // list_tapes only returns tapes with __ in the name
         let entry = TapeEntry::new(
             0,
-            "message".into(),
+            TapeEntryKind::Message,
             json!({}),
             json!({}),
             "2024-01-01T00:00:00Z".into(),
@@ -580,7 +580,7 @@ mod tests {
             let store = FileTapeStore::new(dir.clone());
             let entry = TapeEntry::new(
                 0,
-                "message".into(),
+                TapeEntryKind::Message,
                 json!({"content": "persisted"}),
                 json!({}),
                 "2024-01-01T00:00:00Z".into(),
@@ -607,7 +607,7 @@ mod tests {
 
         let entry = TapeEntry::new(
             0,
-            "message".into(),
+            TapeEntryKind::Message,
             json!({"content": "will fail"}),
             json!({}),
             "2024-01-01T00:00:00Z".into(),
@@ -642,7 +642,7 @@ mod tests {
                         "test-tape",
                         &TapeEntry::new(
                             0,
-                            "event".into(),
+                            TapeEntryKind::Event,
                             json!({"name": "step"}),
                             json!({}),
                             "2024-01-01T00:00:00Z".into(),
@@ -655,7 +655,7 @@ mod tests {
                         "test-tape",
                         &TapeEntry::new(
                             0,
-                            "event".into(),
+                            TapeEntryKind::Event,
                             json!({"name": "step2"}),
                             json!({}),
                             "2024-01-01T00:00:00Z".into(),
@@ -683,7 +683,7 @@ mod tests {
                         "test-tape",
                         &TapeEntry::new(
                             0,
-                            "event".into(),
+                            TapeEntryKind::Event,
                             json!({"name": "step"}),
                             json!({}),
                             "2024-01-01T00:00:00Z".into(),
@@ -706,7 +706,7 @@ mod tests {
                 "test-tape",
                 &TapeEntry::new(
                     0,
-                    "event".into(),
+                    TapeEntryKind::Event,
                     json!({"name": "before"}),
                     json!({}),
                     "2024-01-01T00:00:00Z".into(),
@@ -724,7 +724,7 @@ mod tests {
                         "test-tape",
                         &TapeEntry::new(
                             0,
-                            "event".into(),
+                            TapeEntryKind::Event,
                             json!({"name": "inside"}),
                             json!({}),
                             "2024-01-01T00:00:00Z".into(),
@@ -748,7 +748,7 @@ mod tests {
                 "test-tape",
                 &TapeEntry::new(
                     0,
-                    "event".into(),
+                    TapeEntryKind::Event,
                     json!({"name": "before"}),
                     json!({}),
                     "2024-01-01T00:00:00Z".into(),
@@ -766,7 +766,7 @@ mod tests {
                         "test-tape",
                         &TapeEntry::new(
                             0,
-                            "event".into(),
+                            TapeEntryKind::Event,
                             json!({"name": "inside"}),
                             json!({}),
                             "2024-01-01T00:00:00Z".into(),
@@ -791,7 +791,7 @@ mod tests {
                 "test-tape",
                 &TapeEntry::new(
                     0,
-                    "event".into(),
+                    TapeEntryKind::Event,
                     json!({"name": "before"}),
                     json!({}),
                     "2024-01-01T00:00:00Z".into(),
@@ -822,7 +822,7 @@ mod tests {
                         "tape",
                         &TapeEntry::new(
                             0,
-                            "event".into(),
+                            TapeEntryKind::Event,
                             json!({"name": "first"}),
                             json!({}),
                             "2024-01-01T00:00:00Z".into(),
@@ -840,7 +840,7 @@ mod tests {
                         "tape",
                         &TapeEntry::new(
                             0,
-                            "event".into(),
+                            TapeEntryKind::Event,
                             json!({"name": "second"}),
                             json!({}),
                             "2024-01-01T00:00:00Z".into(),
@@ -873,7 +873,7 @@ mod tests {
         });
         let entry = entry_from_payload(&payload).unwrap();
         assert_eq!(entry.id, 1);
-        assert_eq!(entry.kind, "message");
+        assert_eq!(entry.kind, TapeEntryKind::Message);
     }
 
     #[test]
@@ -898,7 +898,7 @@ mod tests {
 
         let entry = TapeEntry::new(
             0,
-            "message".into(),
+            TapeEntryKind::Message,
             json!({"content": "hi"}),
             json!({}),
             "2024-01-01T00:00:00Z".into(),
@@ -918,7 +918,7 @@ mod tests {
 
         let entry = TapeEntry::new(
             0,
-            "message".into(),
+            TapeEntryKind::Message,
             json!({}),
             json!({}),
             "2024-01-01T00:00:00Z".into(),
@@ -937,21 +937,21 @@ mod tests {
         let entries = vec![
             TapeEntry::new(
                 1,
-                "message".into(),
+                TapeEntryKind::Message,
                 json!({"content": "hello world"}),
                 json!({}),
                 "2024-01-01T00:00:00Z".into(),
             ),
             TapeEntry::new(
                 2,
-                "message".into(),
+                TapeEntryKind::Message,
                 json!({"content": "goodbye world"}),
                 json!({}),
                 "2024-01-01T00:00:00Z".into(),
             ),
             TapeEntry::new(
                 3,
-                "message".into(),
+                TapeEntryKind::Message,
                 json!({"content": "unrelated"}),
                 json!({}),
                 "2024-01-01T00:00:00Z".into(),
@@ -965,7 +965,7 @@ mod tests {
     fn test_filter_entries_empty_query_returns_empty() {
         let entries = vec![TapeEntry::new(
             1,
-            "message".into(),
+            TapeEntryKind::Message,
             json!({"content": "hello"}),
             json!({}),
             "2024-01-01T00:00:00Z".into(),
@@ -979,21 +979,21 @@ mod tests {
         let entries = vec![
             TapeEntry::new(
                 1,
-                "message".into(),
+                TapeEntryKind::Message,
                 json!({"content": "match"}),
                 json!({}),
                 "2024-01-01T00:00:00Z".into(),
             ),
             TapeEntry::new(
                 2,
-                "message".into(),
+                TapeEntryKind::Message,
                 json!({"content": "match too"}),
                 json!({}),
                 "2024-01-01T00:00:00Z".into(),
             ),
             TapeEntry::new(
                 3,
-                "message".into(),
+                TapeEntryKind::Message,
                 json!({"content": "match three"}),
                 json!({}),
                 "2024-01-01T00:00:00Z".into(),

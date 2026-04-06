@@ -20,6 +20,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
+use nexil::TapeEntryKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -143,11 +144,17 @@ async fn get_tape_entries(
     let filtered: Vec<&RawEntry> = all_entries
         .iter()
         .filter(|e| {
-            if let Some(ref kind) = params.kind
-                && !kind.is_empty()
-                && e.kind != *kind
+            if let Some(ref kind_str) = params.kind
+                && !kind_str.is_empty()
             {
-                return false;
+                let Ok(filter_kind) =
+                    serde_json::from_value::<TapeEntryKind>(Value::String(kind_str.clone()))
+                else {
+                    return false;
+                };
+                if e.kind != filter_kind {
+                    return false;
+                }
             }
             if let Some(ref q) = params.q
                 && !q.is_empty()
@@ -225,7 +232,11 @@ fn compute_tape_stats(entries: &[RawEntry]) -> TapeStats {
         .iter()
         .enumerate()
         .inspect(|(_, e)| {
-            *kinds.entry(e.kind.clone()).or_default() += 1;
+            let kind_str = serde_json::to_value(e.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| format!("{:?}", e.kind));
+            *kinds.entry(kind_str).or_default() += 1;
             if let Some(rid) = e
                 .parsed
                 .get("meta")
@@ -235,7 +246,7 @@ fn compute_tape_stats(entries: &[RawEntry]) -> TapeStats {
                 *run_ids.entry(rid.to_owned()).or_default() += 1;
             }
         })
-        .filter(|(_, e)| e.kind == "anchor")
+        .filter(|(_, e)| e.kind == TapeEntryKind::Anchor)
         .map(|(i, e)| AnchorInfo {
             index: i,
             name: raw_entry_payload_str(e, "name").to_owned(),
@@ -273,7 +284,7 @@ fn find_last_run_info(entries: &[RawEntry]) -> (Option<Value>, Option<String>) {
     entries
         .iter()
         .rev()
-        .find(|e| e.kind == "event" && raw_entry_payload_str(e, "name") == "run")
+        .find(|e| e.kind == TapeEntryKind::Event && raw_entry_payload_str(e, "name") == "run")
         .map(|e| {
             let data = e.parsed.get("payload").and_then(|p| p.get("data"));
             let usage = data.and_then(|d| d.get("usage")).cloned();
@@ -304,14 +315,14 @@ async fn get_tape_context(
 }
 
 fn build_context_response(entries: &[RawEntry]) -> Value {
-    let last_anchor_idx = entries.iter().rposition(|e| e.kind == "anchor");
+    let last_anchor_idx = entries.iter().rposition(|e| e.kind == TapeEntryKind::Anchor);
     let start = last_anchor_idx.map(|i| i + 1).unwrap_or(0);
     let after_anchor = &entries[start..];
 
     let context_entries: Vec<Value> = after_anchor.iter().map(|e| e.parsed.clone()).collect();
     let messages: Vec<Value> = after_anchor
         .iter()
-        .filter(|e| e.kind == "message")
+        .filter(|e| e.kind == TapeEntryKind::Message)
         .filter_map(|e| e.parsed.get("payload").cloned())
         .collect();
 
@@ -340,7 +351,7 @@ fn build_context_response(entries: &[RawEntry]) -> Value {
 // ---------------------------------------------------------------------------
 
 struct RawEntry {
-    kind: String,
+    kind: TapeEntryKind,
     date: String,
     raw_json: String,
     parsed: Value,
@@ -356,12 +367,11 @@ fn read_jsonl(path: &std::path::Path) -> Vec<RawEntry> {
         .filter(|raw| !raw.trim().is_empty())
         .filter_map(|raw| {
             let parsed: Value = serde_json::from_str(raw.trim()).ok()?;
+            let kind: TapeEntryKind = parsed
+                .get("kind")
+                .and_then(|k| serde_json::from_value(k.clone()).ok())?;
             Some(RawEntry {
-                kind: parsed
-                    .get("kind")
-                    .and_then(|k| k.as_str())
-                    .unwrap_or("unknown")
-                    .to_owned(),
+                kind,
                 date: parsed
                     .get("date")
                     .and_then(|d| d.as_str())

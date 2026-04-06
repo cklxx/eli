@@ -1,7 +1,7 @@
 use super::*;
 use crate::auth::APIKeyResolver;
 use crate::core::results::{StreamEvent, StreamEventKind, ToolExecution};
-use crate::tape::entries::TapeEntry;
+use crate::tape::entries::{TapeEntry, TapeEntryKind};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -342,8 +342,8 @@ async fn test_prepare_messages_with_tape_persists_initial_prompt_and_system_prom
         .await
         .unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].kind, "system");
-    assert_eq!(entries[1].kind, "message");
+    assert_eq!(entries[0].kind, TapeEntryKind::System);
+    assert_eq!(entries[1].kind, TapeEntryKind::Message);
 }
 
 #[tokio::test]
@@ -368,10 +368,10 @@ async fn test_persist_initial_messages_skips_duplicate_system_prompt() {
         .await
         .unwrap();
 
-    let system_count = entries.iter().filter(|e| e.kind == "system").count();
+    let system_count = entries.iter().filter(|e| e.kind == TapeEntryKind::System).count();
     assert_eq!(system_count, 1, "system prompt should only appear once");
 
-    let message_count = entries.iter().filter(|e| e.kind == "message").count();
+    let message_count = entries.iter().filter(|e| e.kind == TapeEntryKind::Message).count();
     assert_eq!(message_count, 2, "both user messages should be persisted");
 }
 
@@ -396,7 +396,7 @@ async fn test_persist_initial_messages_writes_changed_system_prompt() {
         .await
         .unwrap();
 
-    let system_count = entries.iter().filter(|e| e.kind == "system").count();
+    let system_count = entries.iter().filter(|e| e.kind == TapeEntryKind::System).count();
     assert_eq!(system_count, 2, "changed system prompt should be written");
 }
 
@@ -418,8 +418,8 @@ async fn test_persist_initial_messages_no_system_in_msgs() {
         .await
         .unwrap();
 
-    assert_eq!(entries.iter().filter(|e| e.kind == "system").count(), 0);
-    assert_eq!(entries.iter().filter(|e| e.kind == "message").count(), 1);
+    assert_eq!(entries.iter().filter(|e| e.kind == TapeEntryKind::System).count(), 0);
+    assert_eq!(entries.iter().filter(|e| e.kind == TapeEntryKind::Message).count(), 1);
 }
 
 #[tokio::test]
@@ -442,12 +442,12 @@ async fn test_persist_initial_messages_three_calls_same_prompt() {
         .unwrap();
 
     assert_eq!(
-        entries.iter().filter(|e| e.kind == "system").count(),
+        entries.iter().filter(|e| e.kind == TapeEntryKind::System).count(),
         1,
         "system prompt should appear exactly once across 3 calls"
     );
     assert_eq!(
-        entries.iter().filter(|e| e.kind == "message").count(),
+        entries.iter().filter(|e| e.kind == TapeEntryKind::Message).count(),
         3,
         "all 3 user messages should be persisted"
     );
@@ -480,7 +480,7 @@ async fn test_persist_initial_messages_change_then_revert() {
         .unwrap();
 
     assert_eq!(
-        entries.iter().filter(|e| e.kind == "system").count(),
+        entries.iter().filter(|e| e.kind == TapeEntryKind::System).count(),
         3,
         "v1 -> v2 -> v1 should produce 3 system entries"
     );
@@ -1617,7 +1617,7 @@ async fn test_e2e_image_stripped_in_tape_but_full_in_memory() {
     let user_entry = entries
         .iter()
         .find(|e| {
-            e.kind == "message" && e.payload.get("role").and_then(|r| r.as_str()) == Some("user")
+            e.kind == TapeEntryKind::Message && e.payload.get("role").and_then(|r| r.as_str()) == Some("user")
         })
         .unwrap();
     let tape_content = user_entry.payload["content"].as_array().unwrap();
@@ -1758,7 +1758,7 @@ async fn test_e2e_spill_tool_result_in_tape_full_in_memory() {
         .fetch_entries(&llm.async_tape.query_tape(tape))
         .await
         .unwrap();
-    let result_entry = entries.iter().find(|e| e.kind == "tool_result").unwrap();
+    let result_entry = entries.iter().find(|e| e.kind == TapeEntryKind::ToolResult).unwrap();
     let tape_output = result_entry.payload["results"][0]["output"]
         .as_str()
         .unwrap();
@@ -1829,7 +1829,7 @@ async fn test_e2e_spill_tool_args_in_tape_full_in_memory() {
         .fetch_entries(&llm.async_tape.query_tape(tape))
         .await
         .unwrap();
-    let call_entry = entries.iter().find(|e| e.kind == "tool_call").unwrap();
+    let call_entry = entries.iter().find(|e| e.kind == TapeEntryKind::ToolCall).unwrap();
     let tape_args = call_entry.payload["calls"][0]["function"]["arguments"]
         .as_str()
         .unwrap();
@@ -1885,7 +1885,7 @@ async fn test_e2e_small_tool_result_not_spilled() {
         .fetch_entries(&llm.async_tape.query_tape(tape))
         .await
         .unwrap();
-    let result_entry = entries.iter().find(|e| e.kind == "tool_result").unwrap();
+    let result_entry = entries.iter().find(|e| e.kind == TapeEntryKind::ToolResult).unwrap();
     let tape_output = result_entry.payload["results"][0]["output"]
         .as_str()
         .unwrap();
@@ -1932,7 +1932,7 @@ async fn test_e2e_no_spill_dir_passes_through() {
         .fetch_entries(&llm.async_tape.query_tape(tape))
         .await
         .unwrap();
-    let result_entry = entries.iter().find(|e| e.kind == "tool_result").unwrap();
+    let result_entry = entries.iter().find(|e| e.kind == TapeEntryKind::ToolResult).unwrap();
     let tape_output = result_entry.payload["results"][0]["output"]
         .as_str()
         .unwrap();

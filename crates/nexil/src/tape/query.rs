@@ -1,7 +1,7 @@
 //! Query helpers for tape entries.
 
 use crate::core::errors::ConduitError;
-use crate::tape::entries::TapeEntry;
+use crate::tape::entries::{TapeEntry, TapeEntryKind};
 use crate::tape::store::{AsyncTapeStore, TapeStore};
 
 /// Builder for querying tape entries. All setters consume and return `Self` for chaining.
@@ -13,7 +13,7 @@ pub struct TapeQuery {
     pub after_last: bool,
     pub between_anchors: Option<(String, String)>,
     pub between_dates: Option<(String, String)>,
-    pub kinds: Vec<String>,
+    pub kinds: Vec<TapeEntryKind>,
     pub limit: Option<usize>,
 }
 
@@ -71,7 +71,7 @@ impl TapeQuery {
     }
 
     /// Restrict to entries of the given kinds.
-    pub fn kinds(mut self, kinds: Vec<String>) -> Self {
+    pub fn kinds(mut self, kinds: Vec<TapeEntryKind>) -> Self {
         self.kinds = kinds;
         self
     }

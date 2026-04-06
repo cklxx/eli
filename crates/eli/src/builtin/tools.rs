@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use nexil::tools::schema::ToolResult;
 use nexil::{ConduitError, ErrorKind};
-use nexil::{TapeEntry, TapeQuery, Tool, ToolContext};
+use nexil::{TapeEntry, TapeEntryKind, TapeQuery, Tool, ToolContext};
 use serde_json::Value;
 use tempfile::NamedTempFile;
 
@@ -22,6 +22,7 @@ use crate::envelope::ValueExt;
 use crate::sidecar_contract::{SidecarNoticeRequest, SidecarToolRequest, contract_version};
 use crate::skills::discover_skills;
 use crate::tools::{REGISTRY, shorten_text};
+use crate::types::RUNTIME_WORKSPACE_KEY;
 
 const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 10;
@@ -318,7 +319,7 @@ fn resolve_path(state: &HashMap<String, Value>, raw_path: &str) -> Result<PathBu
         return sanitize_path(&path);
     }
     let workspace = state
-        .get("_runtime_workspace")
+        .get(RUNTIME_WORKSPACE_KEY)
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
             ConduitError::new(
@@ -755,10 +756,14 @@ fn render_search_entry(entry: &TapeEntry) -> String {
         .payload
         .get("content")
         .and_then(|v| v.as_str())
-        .filter(|_| matches!(entry.kind.as_str(), "message" | "system"))
+        .filter(|_| matches!(entry.kind, TapeEntryKind::Message | TapeEntryKind::System))
         .map(|content| shorten_text(content, 160))
         .unwrap_or_else(|| shorten_text(&entry.payload.to_string(), 160));
-    format!("#{} [{}] {} {}", entry.id, entry.kind, entry.date, preview)
+    let kind_label = serde_json::to_value(entry.kind)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| format!("{:?}", entry.kind));
+    format!("#{} [{}] {} {}", entry.id, kind_label, entry.date, preview)
 }
 
 // ---------------------------------------------------------------------------
@@ -859,7 +864,7 @@ fn tool_bash() -> Tool {
 
                 let workspace = ctx
                     .as_ref()
-                    .and_then(|c| c.state.get("_runtime_workspace"))
+                    .and_then(|c| c.state.get(RUNTIME_WORKSPACE_KEY))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_owned());
                 let target_cwd = cwd_arg.or(workspace);
@@ -1295,7 +1300,7 @@ fn tool_skill() -> Tool {
                 }
 
                 let workspace = state
-                    .get("_runtime_workspace")
+                    .get(RUNTIME_WORKSPACE_KEY)
                     .and_then(|v| v.as_str())
                     .map(PathBuf::from)
                     .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -1397,11 +1402,13 @@ fn tool_tape_search() -> Tool {
                     .map(|values| {
                         values
                             .iter()
-                            .filter_map(|value| value.as_str().map(|s| s.to_owned()))
+                            .filter_map(|value| {
+                                serde_json::from_value::<TapeEntryKind>(value.clone()).ok()
+                            })
                             .collect::<Vec<_>>()
                     })
                     .filter(|kinds| !kinds.is_empty())
-                    .unwrap_or_else(|| vec!["message".to_owned(), "tool_result".to_owned()]);
+                    .unwrap_or_else(|| vec![TapeEntryKind::Message, TapeEntryKind::ToolResult]);
 
                 let mut query = TapeQuery::new(&tape_name).kinds(kinds);
                 if let (Some(start), Some(end)) =
@@ -1842,7 +1849,7 @@ fn tool_agent() -> Tool {
                     .map(|s| s.to_owned())
                     .or_else(|| {
                         state
-                            .get("_runtime_workspace")
+                            .get(RUNTIME_WORKSPACE_KEY)
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_owned())
                     })

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::core::tool_calls::normalize_message_tool_calls;
-use crate::tape::entries::TapeEntry;
+use crate::tape::entries::{TapeEntry, TapeEntryKind};
 use crate::tape::query::TapeQuery;
 
 /// Selector for which anchor to use when building context.
@@ -85,7 +85,7 @@ pub fn build_messages(entries: &[TapeEntry], context: &TapeContext) -> Vec<Value
 fn default_messages(entries: &[TapeEntry]) -> Vec<Value> {
     entries
         .iter()
-        .filter(|e| e.kind == "message" && e.payload.is_object())
+        .filter(|e| e.kind == TapeEntryKind::Message && e.payload.is_object())
         .map(|e| normalize_message_tool_calls(&e.payload))
         .collect()
 }

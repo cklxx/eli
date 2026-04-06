@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 
 use crate::core::errors::{ConduitError, ErrorKind};
-use crate::tape::entries::TapeEntry;
+use crate::tape::entries::{TapeEntry, TapeEntryKind};
 use crate::tape::query::TapeQuery;
 
 // ---------------------------------------------------------------------------
@@ -40,7 +40,7 @@ pub trait AsyncTapeStore: Send + Sync {
 // ---------------------------------------------------------------------------
 
 fn is_matching_anchor(entry: &TapeEntry, name: Option<&str>) -> bool {
-    entry.kind == "anchor"
+    entry.kind == TapeEntryKind::Anchor
         && name
             .map(|n| entry.payload.get("name").and_then(|v| v.as_str()) == Some(n))
             .unwrap_or(true)
@@ -115,13 +115,7 @@ fn entry_in_datetime_range(
 
 fn entry_matches_query(entry: &TapeEntry, query: &str) -> bool {
     let needle = query.to_lowercase();
-    let haystack_obj = serde_json::json!({
-        "kind": entry.kind,
-        "date": entry.date,
-        "payload": entry.payload,
-        "meta": entry.meta,
-    });
-    let haystack = serde_json::to_string(&haystack_obj)
+    let haystack = serde_json::to_string(entry)
         .unwrap_or_default()
         .to_lowercase();
     haystack.contains(&needle)
@@ -230,7 +224,7 @@ impl InMemoryTapeStore {
     }
 
     pub fn read(&self, tape: &str) -> Option<Vec<TapeEntry>> {
-        let tapes = self.tapes.read().unwrap_or_else(|e| e.into_inner());
+        let tapes = self.tapes.read().expect("lock poisoned");
         tapes
             .get(tape)
             .map(|entries| entries.iter().map(|e| e.copy()).collect())
@@ -245,7 +239,7 @@ impl Default for InMemoryTapeStore {
 
 impl TapeStore for InMemoryTapeStore {
     fn list_tapes(&self) -> Result<Vec<String>, ConduitError> {
-        let tapes = self.tapes.read().unwrap_or_else(|e| e.into_inner());
+        let tapes = self.tapes.read().expect("lock poisoned");
         let mut keys: Vec<String> = tapes.keys().cloned().collect();
         keys.sort_unstable();
         Ok(keys)
@@ -253,9 +247,9 @@ impl TapeStore for InMemoryTapeStore {
 
     fn reset(&self, tape: &str) -> Result<(), ConduitError> {
         // Lock next_ids before tapes — same order as append() to prevent deadlock.
-        let mut ids = self.next_ids.write().unwrap_or_else(|e| e.into_inner());
+        let mut ids = self.next_ids.write().expect("lock poisoned");
         ids.remove(tape);
-        let mut tapes = self.tapes.write().unwrap_or_else(|e| e.into_inner());
+        let mut tapes = self.tapes.write().expect("lock poisoned");
         tapes.remove(tape);
         Ok(())
     }
@@ -266,19 +260,19 @@ impl TapeStore for InMemoryTapeStore {
     }
 
     fn append(&self, tape: &str, entry: &TapeEntry) -> Result<(), ConduitError> {
-        let mut ids = self.next_ids.write().unwrap_or_else(|e| e.into_inner());
+        let mut ids = self.next_ids.write().expect("lock poisoned");
         let next_id = ids.get(tape).copied().unwrap_or(1);
         ids.insert(tape.into(), next_id + 1);
 
         let stored = TapeEntry::new(
             next_id,
-            entry.kind.clone(),
+            entry.kind,
             entry.payload.clone(),
             entry.meta.clone(),
             entry.date.clone(),
         );
 
-        let mut tapes = self.tapes.write().unwrap_or_else(|e| e.into_inner());
+        let mut tapes = self.tapes.write().expect("lock poisoned");
         let entries = tapes.entry(tape.into()).or_default();
         entries.push(stored);
 

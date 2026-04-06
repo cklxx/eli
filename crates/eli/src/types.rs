@@ -16,6 +16,12 @@ pub type State = HashMap<String, Value>;
 /// Internal state key used to carry the resolved system prompt through one turn.
 pub const RUNTIME_SYSTEM_PROMPT_KEY: &str = "_runtime_system_prompt";
 
+/// Internal state key for the workspace path.
+pub const RUNTIME_WORKSPACE_KEY: &str = "_runtime_workspace";
+
+/// Internal state key for the tapes directory path.
+pub const RUNTIME_TAPES_DIR_KEY: &str = "_runtime_tapes_dir";
+
 /// An async message handler that receives inbound envelopes.
 pub type MessageHandler =
     Arc<dyn Fn(Envelope) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;

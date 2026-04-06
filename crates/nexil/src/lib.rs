@@ -42,7 +42,7 @@ pub use crate::llm::{
     collect_active_decisions, inject_decisions_into_system_prompt,
 };
 pub use crate::tape::{
-    AnchorSelector, TapeContext, TapeEntry, TapeManager, TapeQuery, TapeSession,
+    AnchorSelector, TapeContext, TapeEntry, TapeEntryKind, TapeManager, TapeQuery, TapeSession,
 };
 pub use crate::tools::{
     Tool, ToolAction, ToolCallResponse, ToolContext, ToolExecutor, ToolSet, normalize_tools,

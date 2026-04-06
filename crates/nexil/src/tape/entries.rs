@@ -11,11 +11,27 @@ pub fn utc_now() -> String {
     Utc::now().to_rfc3339()
 }
 
+/// The kind of a tape entry, replacing stringly-typed comparisons with
+/// compile-time checked variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TapeEntryKind {
+    Anchor,
+    Message,
+    System,
+    Event,
+    ToolCall,
+    ToolResult,
+    Error,
+    Decision,
+    DecisionRevoked,
+}
+
 pub fn latest_system_content(entries: &[TapeEntry]) -> Option<&str> {
     entries
         .iter()
         .rev()
-        .find(|e| e.kind == "system")
+        .find(|e| e.kind == TapeEntryKind::System)
         .and_then(|e| e.payload.get("content").and_then(|c| c.as_str()))
 }
 
@@ -23,7 +39,7 @@ pub fn latest_system_content(entries: &[TapeEntry]) -> Option<&str> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TapeEntry {
     pub id: i64,
-    pub kind: String,
+    pub kind: TapeEntryKind,
     pub payload: Value,
     pub meta: Value,
     pub date: String,
@@ -31,7 +47,7 @@ pub struct TapeEntry {
 
 impl TapeEntry {
     /// Create a new TapeEntry with the given fields.
-    pub fn new(id: i64, kind: String, payload: Value, meta: Value, date: String) -> Self {
+    pub fn new(id: i64, kind: TapeEntryKind, payload: Value, meta: Value, date: String) -> Self {
         Self {
             id,
             kind,
@@ -45,7 +61,7 @@ impl TapeEntry {
     pub fn copy(&self) -> Self {
         Self {
             id: self.id,
-            kind: self.kind.clone(),
+            kind: self.kind,
             payload: self.payload.clone(),
             meta: self.meta.clone(),
             date: self.date.clone(),
@@ -56,7 +72,7 @@ impl TapeEntry {
     pub fn message(message: Value, meta: Value) -> Self {
         Self {
             id: 0,
-            kind: "message".into(),
+            kind: TapeEntryKind::Message,
             payload: normalize_message_tool_calls(&message),
             meta,
             date: utc_now(),
@@ -68,7 +84,7 @@ impl TapeEntry {
         let payload = serde_json::json!({ "content": content });
         Self {
             id: 0,
-            kind: "system".into(),
+            kind: TapeEntryKind::System,
             payload,
             meta,
             date: utc_now(),
@@ -84,7 +100,7 @@ impl TapeEntry {
         }
         Self {
             id: 0,
-            kind: "anchor".into(),
+            kind: TapeEntryKind::Anchor,
             payload: Value::Object(map),
             meta,
             date: utc_now(),
@@ -108,7 +124,7 @@ impl TapeEntry {
         }
         Self {
             id: 0,
-            kind: "tool_call".into(),
+            kind: TapeEntryKind::ToolCall,
             payload: Value::Object(payload),
             meta,
             date: utc_now(),
@@ -120,7 +136,7 @@ impl TapeEntry {
         let payload = serde_json::json!({ "results": results });
         Self {
             id: 0,
-            kind: "tool_result".into(),
+            kind: TapeEntryKind::ToolResult,
             payload,
             meta,
             date: utc_now(),
@@ -132,7 +148,7 @@ impl TapeEntry {
         let payload = Value::Object(error.as_map());
         Self {
             id: 0,
-            kind: "error".into(),
+            kind: TapeEntryKind::Error,
             payload,
             meta,
             date: utc_now(),
@@ -147,7 +163,7 @@ impl TapeEntry {
         let payload = serde_json::json!({ "text": text });
         Self {
             id: 0,
-            kind: "decision".into(),
+            kind: TapeEntryKind::Decision,
             payload,
             meta,
             date: utc_now(),
@@ -163,7 +179,7 @@ impl TapeEntry {
         let payload = serde_json::json!({ "text": text });
         Self {
             id: 0,
-            kind: "decision_revoked".into(),
+            kind: TapeEntryKind::DecisionRevoked,
             payload,
             meta,
             date: utc_now(),
@@ -179,7 +195,7 @@ impl TapeEntry {
         }
         Self {
             id: 0,
-            kind: "event".into(),
+            kind: TapeEntryKind::Event,
             payload: Value::Object(map),
             meta,
             date: utc_now(),
@@ -195,7 +211,7 @@ mod tests {
     fn test_decision_entry_creation() {
         let meta = serde_json::json!({ "turn": 42 });
         let entry = TapeEntry::decision("Use PostgreSQL for storage", meta);
-        assert_eq!(entry.kind, "decision");
+        assert_eq!(entry.kind, TapeEntryKind::Decision);
         assert_eq!(
             entry.payload.get("text").and_then(|v| v.as_str()),
             Some("Use PostgreSQL for storage")
@@ -208,7 +224,7 @@ mod tests {
     fn test_decision_revoked_entry() {
         let meta = serde_json::json!({});
         let entry = TapeEntry::decision_revoked("Use PostgreSQL for storage", meta);
-        assert_eq!(entry.kind, "decision_revoked");
+        assert_eq!(entry.kind, TapeEntryKind::DecisionRevoked);
         assert_eq!(
             entry.payload.get("text").and_then(|v| v.as_str()),
             Some("Use PostgreSQL for storage")
