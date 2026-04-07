@@ -392,6 +392,10 @@ impl EliFramework {
         inbound: &Envelope,
     ) -> String {
         match rt.call_run_model(prompt, session_id, state).await {
+            Ok(Some(ref output)) if output.is_empty() => {
+                tracing::warn!(session_id, "run_model returned empty output — possible content filter");
+                "(model returned empty response)".to_owned()
+            }
             Ok(Some(output)) => output,
             Ok(None) => {
                 let err = anyhow::anyhow!("no model skill returned output");

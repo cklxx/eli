@@ -225,9 +225,14 @@ fn extract_anthropic_content(response: &Value) -> Option<String> {
 }
 
 fn extract_responses_content(response: &Value) -> Option<String> {
-    response
-        .get("output")?
-        .as_array()?
+    let output = response.get("output")?.as_array()?;
+    // Responses API can return an empty output array when the model completes
+    // but produces no content (e.g., content filter). Treat as empty string.
+    if output.is_empty() {
+        tracing::warn!("Responses API returned empty output array — possible content filter");
+        return Some(String::new());
+    }
+    output
         .iter()
         .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("message"))
         .and_then(|item| {
