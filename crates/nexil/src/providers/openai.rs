@@ -78,8 +78,17 @@ impl OpenAIAdapter {
         let (instructions, input_items) =
             LLMCore::split_messages_for_responses(&request.messages_payload);
 
+        // GPT-5 family models default to reasoning_effort="none" which has a known
+        // bug producing empty output arrays. Default to "low" when not explicitly set.
+        let effective_reasoning = request.reasoning_effort.clone().or_else(|| {
+            if request.model_id.starts_with("gpt-5") {
+                Some(Value::String("low".to_owned()))
+            } else {
+                None
+            }
+        });
         let responses_kwargs =
-            LLMCore::with_responses_reasoning(&request.kwargs, request.reasoning_effort.as_ref());
+            LLMCore::with_responses_reasoning(&request.kwargs, effective_reasoning.as_ref());
         let final_kwargs =
             LLMCore::decide_responses_kwargs(request.max_tokens, &responses_kwargs, true);
 

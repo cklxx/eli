@@ -580,12 +580,13 @@ fn test_extract_content_missing() {
 }
 
 #[test]
-fn test_extract_content_anthropic_empty_content_errors() {
+fn test_extract_content_anthropic_empty_content_returns_empty_string() {
     let response = json!({
         "role": "assistant",
         "content": []
     });
-    assert!(extract_content(&response).is_err());
+    // Empty content array is valid — returns empty string (e.g. tool-use-only response).
+    assert_eq!(extract_content(&response).unwrap(), "");
 }
 
 // ----- extract_tool_calls -----

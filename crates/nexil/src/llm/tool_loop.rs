@@ -370,6 +370,46 @@ impl LLM {
 
         if raw_calls.is_empty() {
             let content = extract_content(&response)?;
+            // Detect empty output with consumed tokens (known GPT-5 bug / content filter).
+            // Retry once before giving up.
+            if content.is_empty() {
+                let used_tokens = response
+                    .get("usage")
+                    .and_then(|u| u.get("output_tokens"))
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                if used_tokens > 0 {
+                    tracing::warn!(
+                        output_tokens = used_tokens,
+                        "empty output with non-zero tokens — retrying once"
+                    );
+                    let retry_response = self
+                        .core
+                        .run_chat(
+                            msgs.to_vec(),
+                            params.schemas.clone(),
+                            params.model,
+                            params.provider,
+                            params.max_tokens,
+                            false,
+                            None,
+                            Default::default(),
+                            |resp: TransportResponse,
+                             _prov: &str,
+                             _model: &str,
+                             _attempt: u32| { Ok(resp.payload) },
+                        )
+                        .await?;
+                    let retry_content = extract_content(&retry_response)?;
+                    let retry_usage = retry_response
+                        .get("usage")
+                        .and_then(|raw| UsageEvent::from_raw(raw, model_name, 0, true));
+                    return Ok(ToolRound {
+                        usage_event: retry_usage,
+                        outcome: ToolRoundOutcome::Text(retry_content),
+                    });
+                }
+            }
             return Ok(ToolRound {
                 usage_event,
                 outcome: ToolRoundOutcome::Text(content),

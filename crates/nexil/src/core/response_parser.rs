@@ -99,17 +99,44 @@ fn parse_completion_sse(buffer: &str) -> Result<Value, ConduitError> {
 }
 
 fn parse_responses_sse(buffer: &str) -> Result<Value, ConduitError> {
+    // Collect output items from streaming events because the response.completed
+    // event can have an empty output array even when items were streamed.
+    let mut streamed_output: Vec<Value> = Vec::new();
+    let mut completed_response: Option<Value> = None;
+
     for event in sse_events(buffer) {
-        if event.get("type").and_then(|t| t.as_str()) == Some("response.completed")
-            && let Some(response) = event.get("response")
-        {
-            return Ok(response.clone());
+        match event.get("type").and_then(|t| t.as_str()) {
+            Some("response.output_item.done") => {
+                if let Some(item) = event.get("item") {
+                    streamed_output.push(item.clone());
+                }
+            }
+            Some("response.completed") => {
+                completed_response = event.get("response").cloned();
+            }
+            _ => {}
         }
     }
-    Err(ConduitError::new(
-        ErrorKind::Provider,
-        "SSE stream ended without response.completed event",
-    ))
+
+    match completed_response {
+        Some(mut response) => {
+            // If the completed response has an empty output but we collected items
+            // from the stream, inject them.
+            if response
+                .get("output")
+                .and_then(|o| o.as_array())
+                .is_some_and(|a| a.is_empty())
+                && !streamed_output.is_empty()
+            {
+                response["output"] = Value::Array(streamed_output);
+            }
+            Ok(response)
+        }
+        None => Err(ConduitError::new(
+            ErrorKind::Provider,
+            "SSE stream ended without response.completed event",
+        )),
+    }
 }
 
 struct MessagesAccumulator {
