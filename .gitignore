@@ -31,3 +31,4 @@ autoresearch-results.tsv
 tiny16mb/
 site/
 .context/
+.claude/worktrees/
