@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PALU 论文详解：低秩投影分解、KV Cache 压缩与工程落地</title>
+  <meta name="description" content="完整拆解 PALU：为什么要做低秩投影分解、它和 LoRA/QLoRA 的区别、怎么在推理系统里落地、适合哪些业务场景。" />
+  <style>
+    :root {
+      --bg: #07111f;
+      --bg2: #0c1830;
+      --panel: rgba(13, 24, 42, 0.84);
+      --panel-2: rgba(16, 31, 54, 0.96);
+      --text: #ebf3ff;
+      --muted: #9eb1cd;
+      --line: rgba(135, 170, 255, 0.18);
+      --blue: #76c8ff;
+      --cyan: #6ef0e8;
+      --green: #8cffb6;
+      --yellow: #ffd76e;
+      --red: #ff8d8d;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+      --radius: 24px;
+      --max: 1180px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(70, 143, 255, 0.16), transparent 30%),
+        radial-gradient(circle at top right, rgba(72, 228, 219, 0.14), transparent 28%),
+        linear-gradient(180deg, var(--bg) 0%, #091426 46%, #07101d 100%);
+      line-height: 1.68;
+    }
+    a { color: inherit; }
+    .wrap { width: min(var(--max), calc(100vw - 32px)); margin: 0 auto; }
+    .hero {
+      padding: 72px 0 28px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 13px;
+      letter-spacing: .02em;
+      color: var(--cyan);
+      background: rgba(110, 240, 232, 0.09);
+      border: 1px solid rgba(110, 240, 232, 0.2);
+    }
+    h1,h2,h3,h4 { margin: 0 0 14px; line-height: 1.15; }
+    h1 { font-size: clamp(38px, 7vw, 74px); letter-spacing: -0.04em; max-width: 980px; }
+    h2 { font-size: clamp(28px, 4vw, 42px); letter-spacing: -0.03em; }
+    h3 { font-size: 22px; }
+    p { margin: 0 0 14px; color: var(--muted); }
+    strong { color: var(--text); }
+    .lead { max-width: 980px; font-size: 18px; }
+    .hero-grid, .grid-2, .grid-3, .grid-4 {
+      display: grid;
+      gap: 18px;
+    }
+    .hero-grid { grid-template-columns: 1.5fr .9fr; margin-top: 28px; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.015));
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 22px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+    .metric {
+      font-size: clamp(28px, 5vw, 46px);
+      font-weight: 800;
+      color: var(--blue);
+      letter-spacing: -0.04em;
+      margin-bottom: 8px;
+    }
+    .sub { max-width: 860px; margin-bottom: 22px; }
+    section { padding: 28px 0; }
+    nav {
+      position: sticky; top: 0; z-index: 20;
+      backdrop-filter: blur(18px);
+      background: rgba(7, 17, 31, 0.78);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    nav .wrap {
+      display: flex; gap: 14px; overflow-x: auto; white-space: nowrap; padding: 14px 0;
+      scrollbar-width: none;
+    }
+    nav a {
+      text-decoration: none; color: var(--muted); font-size: 14px;
+      padding: 8px 12px; border-radius: 999px; border: 1px solid transparent;
+    }
+    nav a:hover { color: var(--text); border-color: var(--line); background: rgba(255,255,255,0.03); }
+    .equation {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 15px; color: #d9e8ff; background: rgba(5, 10, 18, 0.65);
+      border: 1px solid rgba(122, 165, 255, 0.18); border-radius: 16px; padding: 16px; overflow-x: auto;
+    }
+    ul.clean, ol.clean { margin: 0; padding-left: 20px; color: var(--muted); }
+    li { margin: 8px 0; }
+    .flow {
+      display: grid; gap: 14px; margin-top: 10px;
+    }
+    .step {
+      border-left: 3px solid var(--blue); padding: 10px 0 10px 16px;
+      background: linear-gradient(90deg, rgba(118, 200, 255, 0.08), transparent 70%);
+      border-radius: 0 14px 14px 0;
+    }
+    .compare {
+      width: 100%; border-collapse: collapse; margin-top: 8px; overflow: hidden;
+      border-radius: 18px; border: 1px solid var(--line); background: rgba(8, 16, 29, 0.55);
+    }
+    .compare th, .compare td {
+      padding: 14px 16px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.06); vertical-align: top;
+    }
+    .compare th { color: var(--text); background: rgba(255,255,255,0.03); }
+    .badge { display:inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+    .ok { background: rgba(140,255,182,.12); color: var(--green); }
+    .warn { background: rgba(255,215,110,.12); color: var(--yellow); }
+    .risk { background: rgba(255,141,141,.12); color: var(--red); }
+    .note {
+      padding: 16px 18px; border-radius: 16px; border: 1px solid rgba(255,215,110,.18);
+      background: rgba(255,215,110,.07); color: #ffe7aa;
+    }
+    .footer { padding: 42px 0 64px; color: #8ea0bc; font-size: 14px; }
+    @media (max-width: 980px) {
+      .hero-grid, .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <span class="pill">PALU / KV Cache Compression / Low-Rank Projection</span>
+      <h1>PALU 论文低秩投影分解：从数学结构到工程落地，一次讲透</h1>
+      <p class="lead">如果一句话概括 PALU：<strong>它不是在训练时给模型加一个低秩增量</strong>，而是把注意力里的 K/V 投影层做成可分解结构，在推理时<strong>缓存更小的中间低秩状态</strong>，需要时再重建完整的 Key/Value，所以本质上是 <strong>KV Cache 压缩 + 在线重建</strong>，不是 LoRA 那种参数高效微调。</p>
+      <div class="hero-grid">
+        <div class="card">
+          <h3>先说结论</h3>
+          <div class="flow">
+            <div class="step"><strong>为什么值得看：</strong>长上下文推理里，显存最容易先爆的往往不是权重，而是 KV Cache。</div>
+            <div class="step"><strong>PALU 的动作：</strong>把原本的大矩阵投影拆成低秩形式，只存低维 latent，不直接存完整 K/V。</div>
+            <div class="step"><strong>得到的结果：</strong>更低 cache 内存、更大 batch、更长 context，还能和量化叠加。</div>
+            <div class="step"><strong>工程意义：</strong>这玩意更像 serving 系统优化，不是传统 finetune trick。</div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="metric">≈50%</div>
+            <p>论文摘要给出的代表性结论之一：KV Cache 可压缩约一半，同时保持较强精度。</p>
+          </div>
+          <div class="card">
+            <div class="metric">1.89×</div>
+            <p>论文摘要提到在 RoPE-based attention 模块上可见到的加速上界之一。</p>
+          </div>
+          <div class="card">
+            <div class="metric">2.91×</div>
+            <p>与量化联用时，在特定设置下的 RoPE attention 加速上界之一。</p>
+          </div>
+          <div class="card">
+            <div class="metric">Serving</div>
+            <p>最适合放进在线推理、长上下文问答、Agent、多轮对话、RAG 这类缓存成本高的系统。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <nav>
+    <div class="wrap">
+      <a href="#problem">问题背景</a>
+      <a href="#core">核心思想</a>
+      <a href="#math">低秩投影分解</a>
+      <a href="#vs">和 LoRA/QLoRA 区别</a>
+      <a href="#pipeline">推理流程</a>
+      <a href="#eng">工程应用</a>
+      <a href="#practice">落地方案</a>
+      <a href="#risk">风险与边界</a>
+      <a href="#refs">参考</a>
+    </div>
+  </nav>
+
+  <main>
+    <section id="problem">
+      <div class="wrap">
+        <h2>问题背景：为什么大家都盯上 KV Cache</h2>
+        <p class="sub">模型权重可以量化、分片、静态加载，但 KV Cache 是<strong>随请求长度和 batch 动态增长</strong>的。上下文越长、并发越高、输出越长，显存压力就越狠。很多线上系统不是算力先满，而是 KV Cache 先把服务卡死。</p>
+        <div class="grid-3">
+          <div class="card">
+            <h3>痛点 1：显存被上下文长度线性吃掉</h3>
+            <p>每来一个 token，所有层都可能新增 K/V 状态。对长对话、长文档 RAG、代码补全来说，cache 是持续膨胀的。</p>
+          </div>
+          <div class="card">
+            <h3>痛点 2：batch 上不去</h3>
+            <p>单请求 cache 太大，系统可容纳的并发自然下降。吞吐不是被算子打满，而是被内存顶住。</p>
+          </div>
+          <div class="card">
+            <h3>痛点 3：量化不是万能药</h3>
+            <p>KV 做低比特量化能省内存，但它主要压缩的是<strong>数值位宽</strong>，没碰 hidden dimension 里的结构冗余。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="core">
+      <div class="wrap">
+        <h2>PALU 的核心思想：不直接缓存 K/V，缓存更小的低秩中间态</h2>
+        <p class="sub">论文摘要给出的核心描述是：<strong>decompose the linear layers into low-rank matrices, cache compressed intermediate states, and reconstruct the full keys and values on the fly</strong>。这句话几乎就是 PALU 的全貌。</p>
+        <div class="grid-2">
+          <div class="card">
+            <h3>传统做法</h3>
+            <p>输入隐状态 <code>x</code> 经过完整线性层直接得到 <code>K = xWk</code>、<code>V = xWv</code>，然后把完整的 K/V 缓存起来，后续 decode 反复读取。</p>
+          </div>
+          <div class="card">
+            <h3>PALU 做法</h3>
+            <p>把 <code>Wk</code>、<code>Wv</code> 拆成两个更小矩阵的乘积。先投影到低维空间，缓存这个低维表示；在真正做 attention 前，再把它恢复成完整 K/V 或与后续算子融合。</p>
+          </div>
+        </div>
+        <div class="note">这就是它和很多“删 token”“选重要 token”的方法不同的地方：PALU <strong>不是沿着序列长度维度做稀疏化</strong>，而是沿着 <strong>hidden dimension</strong> 做压缩。</div>
+      </div>
+    </section>
+
+    <section id="math">
+      <div class="wrap">
+        <h2>低秩投影分解：它到底分解了什么</h2>
+        <p class="sub">下面是工程上最该抓住的形式。具体符号在不同实现里会略有差异，但结构本质是一样的。</p>
+        <div class="card">
+          <div class="equation">原始：K = xW_k,  V = xW_v
+
+低秩分解后：W_k ≈ A_k B_k,  W_v ≈ A_v B_v
+其中 A ∈ R^{d_model × r}, B ∈ R^{r × d_k 或 d_v}, 且 r << d_model
+
+于是：z_k = xA_k,  K ≈ z_k B_k
+      z_v = xA_v,  V ≈ z_v B_v</div>
+          <p style="margin-top:14px;">PALU 的关键不在“低秩”三个字本身，而在<strong>缓存哪一段</strong>：缓存的不是完整 <code>K/V</code>，而是维度更小的 <code>z_k / z_v</code> 这类中间态，所以内存占用按 rank 比例下降。</p>
+        </div>
+        <div class="grid-3" style="margin-top:18px;">
+          <div class="card">
+            <h3>为什么可压缩</h3>
+            <p>原论文的出发点是：K/V 在 hidden 维度存在冗余，完整存下来浪费。既然线性投影本身可近似为低秩，就没必要把高维结果整块缓存。</p>
+          </div>
+          <div class="card">
+            <h3>为什么还能保精度</h3>
+            <p>rank 不是拍脑袋固定，而是要搜索；而且论文还提了 <strong>medium-grained low-rank decomposition</strong> 和 <strong>efficient rank search</strong>，意思是它不是简单粗暴地全层统一砍维。</p>
+          </div>
+          <div class="card">
+            <h3>为什么比单纯量化更有意思</h3>
+            <p>量化压的是数值精度，PALU 压的是表示维度。两者方向正交，所以理论上更容易叠加。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="vs">
+      <div class="wrap">
+        <h2>PALU 和 LoRA / QLoRA / 常见低秩方法有什么本质区别</h2>
+        <table class="compare">
+          <thead>
+            <tr>
+              <th>方法</th>
+              <th>优化对象</th>
+              <th>发生阶段</th>
+              <th>主要收益</th>
+              <th>和 PALU 的关系</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>LoRA</strong></td>
+              <td>参数更新增量 ΔW</td>
+              <td>训练 / 微调</td>
+              <td>少训参数、降训练成本</td>
+              <td>LoRA 是为了学得更便宜；PALU 是为了推得更便宜。</td>
+            </tr>
+            <tr>
+              <td><strong>QLoRA</strong></td>
+              <td>低比特权重 + LoRA 训练</td>
+              <td>训练 / 微调</td>
+              <td>更低微调显存</td>
+              <td>核心还是 finetune 路线，不是 KV Cache 路线。</td>
+            </tr>
+            <tr>
+              <td><strong>KV Quantization</strong></td>
+              <td>K/V 数值位宽</td>
+              <td>推理</td>
+              <td>省 cache 内存</td>
+              <td>和 PALU 可叠加，一个压 bit，一个压 hidden dim。</td>
+            </tr>
+            <tr>
+              <td><strong>Token Eviction / Selection</strong></td>
+              <td>序列长度维度</td>
+              <td>推理</td>
+              <td>少存 token</td>
+              <td>它沿 sequence 砍，PALU 沿 feature 砍。</td>
+            </tr>
+            <tr>
+              <td><strong>PALU</strong></td>
+              <td>投影层结构 + KV 中间表示</td>
+              <td>推理</td>
+              <td>省显存、提吞吐、适配长上下文</td>
+              <td>更接近 serving infra 技术栈。</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="grid-2" style="margin-top:18px;">
+          <div class="card">
+            <h3>一句话区分 LoRA 和 PALU</h3>
+            <p><strong>LoRA：</strong>我不想改那么多参数，所以把“要学的更新”做成低秩。<br/><strong>PALU：</strong>我不想缓存那么大的 K/V，所以把“生成 K/V 的投影”做成低秩。</p>
+          </div>
+          <div class="card">
+            <h3>一句话区分 QLoRA 和 PALU</h3>
+            <p><strong>QLoRA：</strong>为训练内存服务。<br/><strong>PALU：</strong>���推理缓存内存服务。方向不同，系统位置也不同。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="pipeline">
+      <div class="wrap">
+        <h2>把它放进一次真实推理流程里看</h2>
+        <div class="grid-2">
+          <div class="card">
+            <h3>Prefill 阶段</h3>
+            <ol class="clean">
+              <li>输入 token 过 embedding 和前面若干层。</li>
+              <li>到 attention 层时，不直接生成完整 K/V 并缓存。</li>
+              <li>先计算低维 latent 表示，比如 <code>z_k = xA_k</code>、<code>z_v = xA_v</code>。</li>
+              <li>缓存的是这些低维表示，因此每个 token 的 cache footprint 变小。</li>
+            </ol>
+          </div>
+          <div class="card">
+            <h3>Decode 阶段</h3>
+            <ol class="clean">
+              <li>新 token 到来，需要和历史 cache 做 attention。</li>
+              <li>系统读取压缩态 <code>z</code>，再通过后半段矩阵 <code>B</code> 重建 K/V，或者与 attention kernel 融合计算。</li>
+              <li>如果 kernel 融合做得好，就不一定显式 materialize 全量 K/V。</li>
+              <li>因此论文里才会强调 optimized GPU kernel with matrix fusion。</li>
+            </ol>
+          </div>
+        </div>
+        <div class="card" style="margin-top:18px;">
+          <h3>为什么 GPU kernel 很关键</h3>
+          <p>光有“低秩分解”还不够。你要是把它写成很多零碎小矩阵乘，省下来的显存可能会被 kernel launch、内存搬运、reconstruction overhead 吃回去。所以 PALU 论文把 <strong>矩阵融合</strong> 单独拎出来，说明作者知道这不是纯算法题，而是个系统题。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="eng">
+      <div class="wrap">
+        <h2>工程上怎么应用：哪些系统最适合吃到 PALU 红利</h2>
+        <div class="grid-4">
+          <div class="card">
+            <span class="badge ok">高价值</span>
+            <h3>长上下文 Chat / Agent</h3>
+            <p>多轮对话、工具调用、系统提示重、输出还长，这类业务最容易让 cache 撑爆显存。</p>
+          </div>
+          <div class="card">
+            <span class="badge ok">高价值</span>
+            <h3>RAG / 文档问答</h3>
+            <p>检索回来的上下文长，prefill 成本高，缓存驻留时间也长，特别适合。</p>
+          </div>
+          <div class="card">
+            <span class="badge ok">高价值</span>
+            <h3>代码生成</h3>
+            <p>上下文和输出都容易很长，还常常需要大 batch 才划算。</p>
+          </div>
+          <div class="card">
+            <span class="badge warn">中价值</span>
+            <h3>短请求分类/抽取</h3>
+            <p>上下文短、decode 短的任务，cache 本来就不大，PALU 收益可能没那么大。</p>
+          </div>
+        </div>
+        <div class="grid-2" style="margin-top:18px;">
+          <div class="card">
+            <h3>在 serving 里的直接收益</h3>
+            <ul class="clean">
+              <li>单卡可承载更大 batch。</li>
+              <li>可支持更长 context window，而不必立刻堆更多卡。</li>
+              <li>prefill/decode 阶段的内存压力下降，更容易稳定调度。</li>
+              <li>和 paged KV cache、prefix cache、continuous batching 不是冲突关系，能组合。</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>在成本上的意义</h3>
+            <ul class="clean">
+              <li>同等 SLA 下减少显存瓶颈，提升 GPU 利用率。</li>
+              <li>同样硬件预算下放更多并发。</li>
+              <li>对长上下文业务，单位请求成本更容易压下去。</li>
+              <li>如果本来就是 memory-bound 服务，收益通常比 compute-bound 场景更明显。</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="practice">
+      <div class="wrap">
+        <h2>怎么落地：给工程团队的实际接入路线</h2>
+        <div class="grid-3">
+          <div class="card">
+            <h3>路线 A：做成模型变体</h3>
+            <p>直接把 attention 的 K/V projection 按 PALU 形式改写，导出一套专门用于 serving 的权重和计算图。这条路线收益最大，但需要模型转换和 kernel 配合。</p>
+          </div>
+          <div class="card">
+            <h3>路线 B：先离线 rank search</h3>
+            <p>先对每层/每组头离线分析可压缩性，拿到 rank 配置，再把 serving runtime 改造成读取压缩 cache。这个更现实。</p>
+          </div>
+          <div class="card">
+            <h3>路线 C：先和量化联用</h3>
+            <p>如果你们线上已经有 KV quantization，可以把 PALU 作为第二层压缩。这样迭代更有连续性，也更方便做 A/B。</p>
+          </div>
+        </div>
+        <div class="card" style="margin-top:18px;">
+          <h3>一套靠谱的实施顺序</h3>
+          <ol class="clean">
+            <li><strong>先做画像：</strong>确认服务到底是 memory-bound 还是 compute-bound。不是所有模型都值得上。</li>
+            <li><strong>抽样分析层敏感度：</strong>不同层、不同 head、不同 rank，对精度影响不一样，别一刀切。</li>
+            <li><strong>做离线评测：</strong>perplexity、长文本 QA、RAG recall、代码 pass@k，这些都要看，不要只看单一 benchmark。</li>
+            <li><strong>做系统评测：</strong>prefill latency、decode throughput、显存峰值、batch 上限、尾延迟 P95/P99。</li>
+            <li><strong>再做 kernel 融合：</strong>如果没有 fused kernel，理论收益会被打折。</li>
+            <li><strong>最后灰度：</strong>优先灰度在长上下文占比高的流量池。</li>
+          </ol>
+        </div>
+        <div class="grid-2" style="margin-top:18px;">
+          <div class="card">
+            <h3>在 vLLM / SGLang / 自研引擎里怎么想</h3>
+            <p>落点一般不在 scheduler，而在 <strong>attention backend + cache manager + model runner</strong> 三处：</p>
+            <ul class="clean">
+              <li>模型 runner 知道如何生成压缩态。</li>
+              <li>cache manager 知道如何存这种压缩态。</li>
+              <li>attention kernel 知道如何从压缩态恢复或直接消费。</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>对线上观测要补哪些指标</h3>
+            <ul class="clean">
+              <li>每 token 平均 cache bytes。</li>
+              <li>各层 rank 配置与命中率。</li>
+              <li>重建开销占 attention 时间比例。</li>
+              <li>开启 PALU 前后 batch 上限变化。</li>
+              <li>长请求 vs 短请求的收益分层。</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="risk">
+      <div class="wrap">
+        <h2>风险、边界和别踩的坑</h2>
+        <div class="grid-3">
+          <div class="card">
+            <span class="badge risk">风险 1</span>
+            <h3>不是所有层都适合压同一个 rank</h3>
+            <p>如果全模型一刀切，通常不是精度掉得快，就是收益没吃满。所以论文才提 rank search。</p>
+          </div>
+          <div class="card">
+            <span class="badge risk">风险 2</span>
+            <h3>没有 fused kernel，收益会缩水</h3>
+            <p>省了存储，不代表总时延一定降。重建 K/V 的额外算子如果没融合，可能让收益打折。</p>
+          </div>
+          <div class="card">
+            <span class="badge risk">风险 3</span>
+            <h3>精度评估不能只看 perplexity</h3>
+            <p>长链路任务里，微小表征误差会在长上下文、多跳检索、代码生成里被放大。</p>
+          </div>
+        </div>
+        <div class="grid-2" style="margin-top:18px;">
+          <div class="card">
+            <h3>什么时候不建议优先上 PALU</h3>
+            <ul class="clean">
+              <li>业务以短 prompt、短 output 为主。</li>
+              <li>当前瓶颈主要在算力，而不是显存。</li>
+              <li>团队还没有能力维护自定义 attention kernel。</li>
+              <li>线上模型版本切换非常频繁，模型转换链太重。</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>什么时候特别值得试</h3>
+            <ul class="clean">
+              <li>GPU 显存总是先顶满。</li>
+              <li>长上下文请求占比较高。</li>
+              <li>已经在做 KV quantization，还想继续挖空间。</li>
+              <li>服务端用了连续 batching，但 batch 上限依然被 cache 限住。</li>
+            </ul>
+          </div>
+        </div>
+        <div class="note" style="margin-top:18px;">置信度说明：本页关于 <strong>PALU 的核心机制、定位、与量化联用、摘要中给出的代表性数字</strong> 置信度高；关于具体公式符号、层级粒度、内核实现细节，我是基于论文摘要与常见低秩实现方式做了工程化抽象，适合用于理解和设计方案，但你要做 production implementation 时，最好再对着原论文正文和官方代码逐项校对。</div>
+      </div>
+    </section>
+
+    <section id="refs">
+      <div class="wrap">
+        <h2>参考与出处</h2>
+        <div class="card">
+          <ul class="clean">
+            <li><strong>OpenReview 论文页：</strong>Palu: KV-Cache Compression with Low-Rank Projection。</li>
+            <li><strong>论文摘要关键信息：</strong>低秩分解线性层、缓存压缩中间态、在线重建完整 K/V、medium-grained decomposition、rank search、量化友好、GPU fused kernel。</li>
+            <li><strong>工程解读基线：</strong>LoRA / QLoRA / KV quantization / serving cache manager / attention kernel 常见实现范式。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap">如果你要，我下一步可以直接继续做两件事里的任意一个：<strong>1）补一页 PALU vs MLA / LoRA / KV Quant 对照图</strong>；<strong>2）按 vLLM / SGLang 视角写一版“如何改代码接入 PALU”的工程蓝图</strong>。</div>
+  </footer>
+</body>
+</html>
