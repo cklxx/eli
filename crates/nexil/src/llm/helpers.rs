@@ -184,31 +184,44 @@ pub(super) fn extract_content(response: &Value) -> Result<String, ConduitError> 
     extract_completion_content(response)
         .or_else(|| extract_anthropic_content(response))
         .or_else(|| extract_responses_content(response))
-        .ok_or_else(|| ConduitError::new(ErrorKind::Provider, "Response missing content"))
+        .ok_or_else(|| {
+            // Truncate to avoid flooding logs with large payloads
+            let snippet = {
+                let s = response.to_string();
+                if s.len() > 500 {
+                    format!("{}…", &s[..500])
+                } else {
+                    s
+                }
+            };
+            tracing::warn!(response = %snippet, "extract_content: no content found in response");
+            ConduitError::new(ErrorKind::Provider, "Response missing content")
+        })
 }
 
 fn extract_completion_content(response: &Value) -> Option<String> {
-    response
-        .get("choices")?
-        .get(0)?
-        .get("message")?
-        .get("content")?
-        .as_str()
-        .map(str::to_owned)
+    let content = response.get("choices")?.get(0)?.get("message")?.get("content")?;
+    // OpenAI returns `"content": null` when the response has only tool calls.
+    // Treat null as empty string so we don't fall through to "Response missing content".
+    if content.is_null() {
+        return Some(String::new());
+    }
+    content.as_str().map(str::to_owned)
 }
 
 fn extract_anthropic_content(response: &Value) -> Option<String> {
     if response.get("role").and_then(|r| r.as_str()) != Some("assistant") {
         return None;
     }
-    let text: String = response
-        .get("content")?
-        .as_array()?
+    let content_arr = response.get("content")?.as_array()?;
+    let text: String = content_arr
         .iter()
         .filter(|block| block.get("type").and_then(|t| t.as_str()) == Some("text"))
         .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
         .collect();
-    if text.is_empty() { None } else { Some(text) }
+    // An empty content array or all-tool_use blocks is valid — return empty string
+    // so we don't fall through to "Response missing content".
+    Some(text)
 }
 
 fn extract_responses_content(response: &Value) -> Option<String> {
