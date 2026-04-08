@@ -71,7 +71,9 @@ pub(super) fn slice_entries_by_anchor(
 ) -> Vec<TapeEntry> {
     let anchor_pos = match anchor {
         AnchorSelector::None => return entries.to_vec(),
-        AnchorSelector::LastAnchor => entries.iter().rposition(|e| e.kind == TapeEntryKind::Anchor),
+        AnchorSelector::LastAnchor => entries
+            .iter()
+            .rposition(|e| e.kind == TapeEntryKind::Anchor),
         AnchorSelector::Named(name) => entries.iter().rposition(|e| {
             e.kind == TapeEntryKind::Anchor
                 && e.payload.get("name").and_then(|v| v.as_str()) == Some(name.as_str())
@@ -200,7 +202,11 @@ pub(super) fn extract_content(response: &Value) -> Result<String, ConduitError> 
 }
 
 fn extract_completion_content(response: &Value) -> Option<String> {
-    let content = response.get("choices")?.get(0)?.get("message")?.get("content")?;
+    let content = response
+        .get("choices")?
+        .get(0)?
+        .get("message")?
+        .get("content")?;
     // OpenAI returns `"content": null` when the response has only tool calls.
     // Treat null as empty string so we don't fall through to "Response missing content".
     if content.is_null() {

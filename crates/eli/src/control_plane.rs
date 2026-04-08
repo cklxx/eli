@@ -7,7 +7,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use nexil::{CancellationToken, Tool};
 use serde_json::Value;
@@ -104,19 +104,14 @@ pub fn record_turn_usage(input_tokens: u64, output_tokens: u64) {
 /// Events are accumulated during the turn and flushed by the `save_state` hook.
 pub fn push_save_event(name: &str, data: Value) {
     let _ = TURN_CTX.try_with(|ctx| {
-        ctx.save_events
-            .lock()
-            .expect("lock poisoned")
-            .push((name.to_owned(), data));
+        ctx.save_events.lock().push((name.to_owned(), data));
     });
 }
 
 /// Drain all accumulated save events from the current turn context.
 pub fn drain_save_events() -> Vec<(String, Value)> {
     TURN_CTX
-        .try_with(|ctx| {
-            std::mem::take(&mut *ctx.save_events.lock().expect("lock poisoned"))
-        })
+        .try_with(|ctx| std::mem::take(&mut *ctx.save_events.lock()))
         .unwrap_or_default()
 }
 
@@ -132,19 +127,14 @@ pub async fn dispatch_mid_turn(envelope: Value) {
 /// Push a media item for outbound delivery in the current turn.
 pub fn push_outbound_media(media: OutboundMedia) {
     let _ = TURN_CTX.try_with(|ctx| {
-        ctx.outbound_media
-            .lock()
-            .expect("lock poisoned")
-            .push(media);
+        ctx.outbound_media.lock().push(media);
     });
 }
 
 /// Drain all accumulated outbound media from the current turn context.
 pub fn drain_outbound_media() -> Vec<OutboundMedia> {
     TURN_CTX
-        .try_with(|ctx| {
-            std::mem::take(&mut *ctx.outbound_media.lock().expect("lock poisoned"))
-        })
+        .try_with(|ctx| std::mem::take(&mut *ctx.outbound_media.lock()))
         .unwrap_or_default()
 }
 
@@ -194,20 +184,17 @@ pub fn turn_wrap_tools() -> Option<WrapToolsFn> {
 pub type InjectInboundFn =
     Arc<dyn Fn(Value) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
 
-static INBOUND_INJECTOR: std::sync::LazyLock<std::sync::Mutex<Option<InjectInboundFn>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+static INBOUND_INJECTOR: std::sync::LazyLock<Mutex<Option<InjectInboundFn>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
 
 /// Register the global inbound injector. Called once at startup.
 pub fn set_inbound_injector(f: InjectInboundFn) {
-    *INBOUND_INJECTOR.lock().expect("lock poisoned") = Some(f);
+    *INBOUND_INJECTOR.lock() = Some(f);
 }
 
 /// Clone the current inbound injector, if set.
 pub fn inbound_injector() -> Option<InjectInboundFn> {
-    INBOUND_INJECTOR
-        .lock()
-        .expect("lock poisoned")
-        .clone()
+    INBOUND_INJECTOR.lock().clone()
 }
 
 /// Inject a synthetic inbound envelope into the framework pipeline.

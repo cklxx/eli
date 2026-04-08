@@ -54,11 +54,11 @@ struct CliInfo {
 /// Ordered list of coding CLIs to probe.
 const CLI_CANDIDATES: &[&str] = &["claude", "codex", "kimi"];
 
-static DETECTED_CLI: std::sync::LazyLock<std::sync::Mutex<Option<CliInfo>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+static DETECTED_CLI: std::sync::LazyLock<parking_lot::Mutex<Option<CliInfo>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
 
 fn detect_cli() -> Option<CliInfo> {
-    let mut cache = DETECTED_CLI.lock().expect("lock poisoned");
+    let mut cache = DETECTED_CLI.lock();
     if let Some(ref info) = *cache {
         return Some(info.clone());
     }
@@ -264,7 +264,7 @@ tokio::task_local! {
 
 /// Register all builtin tools into the global `REGISTRY`.
 pub fn register_builtin_tools() {
-    let mut reg = REGISTRY.lock().expect("lock poisoned");
+    let mut reg = REGISTRY.lock();
     reg.extend(builtin_tools().into_iter().map(|t| (t.name.clone(), t)));
 }
 
@@ -303,11 +303,7 @@ fn builtin_tools() -> Vec<Tool> {
         tool_help(),
         tool_quit(),
     ];
-    if crate::tools::SIDECAR_URL
-        .lock()
-        .expect("lock poisoned")
-        .is_some()
-    {
+    if crate::tools::SIDECAR_URL.lock().is_some() {
         tools.push(tool_sidecar());
     }
     tools
@@ -677,10 +673,7 @@ fn extract_notice_params(
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())?
         .to_owned();
-    let url = crate::tools::SIDECAR_URL
-        .lock()
-        .expect("lock poisoned")
-        .clone()?;
+    let url = crate::tools::SIDECAR_URL.lock().clone()?;
     let notice = auto_notice(tool_name, args);
     Some((notice, session_id, url))
 }
@@ -2451,9 +2444,7 @@ fn tool_sidecar() -> Tool {
                 let params = args.get("params").cloned().unwrap_or(serde_json::json!({}));
 
                 let url = {
-                    let u = crate::tools::SIDECAR_URL
-                        .lock()
-                        .expect("lock poisoned");
+                    let u = crate::tools::SIDECAR_URL.lock();
                     u.clone().unwrap_or_default()
                 };
                 if url.is_empty() {

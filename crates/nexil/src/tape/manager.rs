@@ -398,8 +398,8 @@ impl AsyncTapeManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tape::store::InMemoryTapeStore;
     use crate::tape::entries::TapeEntryKind;
+    use crate::tape::store::InMemoryTapeStore;
     use serde_json::json;
 
     #[test]
@@ -443,8 +443,14 @@ mod tests {
             .unwrap();
 
         let entries = store.read(tape).unwrap();
-        let system_count = entries.iter().filter(|e| e.kind == TapeEntryKind::System).count();
-        let message_count = entries.iter().filter(|e| e.kind == TapeEntryKind::Message).count();
+        let system_count = entries
+            .iter()
+            .filter(|e| e.kind == TapeEntryKind::System)
+            .count();
+        let message_count = entries
+            .iter()
+            .filter(|e| e.kind == TapeEntryKind::Message)
+            .count();
 
         assert_eq!(system_count, 1);
         assert_eq!(latest_system_content(&entries), Some("system prompt"));
@@ -497,8 +503,14 @@ mod tests {
             .unwrap();
 
         let entries = store.read(tape).unwrap();
-        let system_count = entries.iter().filter(|e| e.kind == TapeEntryKind::System).count();
-        let message_count = entries.iter().filter(|e| e.kind == TapeEntryKind::Message).count();
+        let system_count = entries
+            .iter()
+            .filter(|e| e.kind == TapeEntryKind::System)
+            .count();
+        let message_count = entries
+            .iter()
+            .filter(|e| e.kind == TapeEntryKind::Message)
+            .count();
 
         assert_eq!(system_count, 1);
         assert_eq!(latest_system_content(&entries), Some("system prompt"));
@@ -581,7 +593,13 @@ mod tests {
             .await
             .unwrap();
         let entries = store.read("t").unwrap();
-        assert_eq!(entries.iter().filter(|e| e.kind == TapeEntryKind::System).count(), 0);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.kind == TapeEntryKind::System)
+                .count(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -609,7 +627,13 @@ mod tests {
             .await
             .unwrap();
         let entries = store.read("t").unwrap();
-        assert_eq!(entries.iter().filter(|e| e.kind == TapeEntryKind::System).count(), 0);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.kind == TapeEntryKind::System)
+                .count(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -654,7 +678,13 @@ mod tests {
             .await
             .unwrap();
         let entries = store.read("t").unwrap();
-        assert_eq!(entries.iter().filter(|e| e.kind == TapeEntryKind::System).count(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.kind == TapeEntryKind::System)
+                .count(),
+            2
+        );
         assert_eq!(latest_system_content(&entries), Some("v2"));
     }
 
@@ -685,8 +715,20 @@ mod tests {
                 .unwrap();
         }
         let entries = store.read("t").unwrap();
-        assert_eq!(entries.iter().filter(|e| e.kind == TapeEntryKind::System).count(), 1);
-        assert_eq!(entries.iter().filter(|e| e.kind == TapeEntryKind::Message).count(), 6);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.kind == TapeEntryKind::System)
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.kind == TapeEntryKind::Message)
+                .count(),
+            6
+        );
     }
 
     #[test]
@@ -752,7 +794,13 @@ mod tests {
             )
             .unwrap();
         let entries = store.read("t").unwrap();
-        assert_eq!(entries.iter().filter(|e| e.kind == TapeEntryKind::System).count(), 0);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.kind == TapeEntryKind::System)
+                .count(),
+            0
+        );
     }
 
     #[test]
@@ -776,7 +824,13 @@ mod tests {
             )
             .unwrap();
         let entries = store.read("t").unwrap();
-        assert_eq!(entries.iter().filter(|e| e.kind == TapeEntryKind::System).count(), 0);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.kind == TapeEntryKind::System)
+                .count(),
+            0
+        );
     }
 
     #[test]
@@ -816,7 +870,13 @@ mod tests {
             )
             .unwrap();
         let entries = store.read("t").unwrap();
-        assert_eq!(entries.iter().filter(|e| e.kind == TapeEntryKind::System).count(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.kind == TapeEntryKind::System)
+                .count(),
+            2
+        );
         assert_eq!(latest_system_content(&entries), Some("v2"));
     }
 
@@ -894,7 +954,19 @@ mod tests {
                 .unwrap();
         }
         let entries = store.read("t").unwrap();
-        assert_eq!(entries.iter().filter(|e| e.kind == TapeEntryKind::System).count(), 1);
-        assert_eq!(entries.iter().filter(|e| e.kind == TapeEntryKind::Message).count(), 6); // 3 user + 3 assistant
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.kind == TapeEntryKind::System)
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.kind == TapeEntryKind::Message)
+                .count(),
+            6
+        ); // 3 user + 3 assistant
     }
 }

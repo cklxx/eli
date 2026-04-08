@@ -60,7 +60,7 @@ pub(super) fn build_tool_context(
 }
 
 pub(super) fn lookup_registered_tool(name: &str) -> Option<Tool> {
-    let reg = REGISTRY.lock().expect("lock poisoned");
+    let reg = REGISTRY.lock();
     reg.get(name)
         .cloned()
         .or_else(|| {
@@ -257,7 +257,7 @@ pub(super) async fn run_tools_once(
 ) -> Result<ToolAutoResult, ConduitError> {
     let has_filter = allowed_tools.is_some();
     let mut tools: Vec<Tool> = {
-        let reg = REGISTRY.lock().expect("lock poisoned");
+        let reg = REGISTRY.lock();
         if let Some(allowed) = allowed_tools {
             reg.values()
                 .filter(|t| allowed.contains(&t.name.to_lowercase()))

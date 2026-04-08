@@ -315,7 +315,9 @@ async fn get_tape_context(
 }
 
 fn build_context_response(entries: &[RawEntry]) -> Value {
-    let last_anchor_idx = entries.iter().rposition(|e| e.kind == TapeEntryKind::Anchor);
+    let last_anchor_idx = entries
+        .iter()
+        .rposition(|e| e.kind == TapeEntryKind::Anchor);
     let start = last_anchor_idx.map(|i| i + 1).unwrap_or(0);
     let after_anchor = &entries[start..];
 

@@ -28,6 +28,7 @@ sha2 = "0.10"
 hex = "0.4"
 url = "2"
 dirs = "6"
+parking_lot = "0.12"
 tokio-util = { version = "0.7", features = ["rt"] }
 open = "5"
 

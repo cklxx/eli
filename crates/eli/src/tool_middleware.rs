@@ -4,8 +4,10 @@
 //! without modifying the conduit crate.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use futures::future::BoxFuture;
 use nexil::Tool;
@@ -68,7 +70,7 @@ impl CircuitBreaker {
     }
 
     fn is_tripped(&self, tool_name: &str) -> bool {
-        let states = self.states.lock().expect("lock poisoned");
+        let states = self.states.lock();
         if let Some(state) = states.get(tool_name)
             && let Some(tripped_at) = state.tripped_at
         {
@@ -100,7 +102,7 @@ impl ToolMiddleware for CircuitBreaker {
         let fut = next(args, ctx);
         Box::pin(async move {
             let result = fut.await;
-            let mut s = states.lock().expect("lock poisoned");
+            let mut s = states.lock();
             match &result {
                 Ok(_) => {
                     s.insert(name, CircuitState::default());
@@ -167,7 +169,7 @@ impl ToolMiddleware for MetricsCollector {
             let result = fut.await;
             let duration_ms = start.elapsed().as_millis() as u64;
 
-            let mut map = stats.lock().expect("lock poisoned");
+            let mut map = stats.lock();
             let metrics = map.entry(name).or_default();
             metrics.call_count += 1;
             metrics.total_duration_ms += duration_ms;
@@ -317,7 +319,7 @@ mod tests {
         let _ = handler(json!({}), None).await;
         let _ = handler(json!({}), None).await;
 
-        let stats = metrics.stats.lock().expect("lock poisoned");
+        let stats = metrics.stats.lock();
         let m = stats.get("test_ok").unwrap();
         assert_eq!(m.call_count, 2);
         assert_eq!(m.success_count, 2);

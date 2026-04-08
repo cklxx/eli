@@ -44,7 +44,7 @@ fn init_tracing() -> anyhow::Result<()> {
             .with_target(false)
             .with_filter(console_filter);
 
-        let trace_file_for_writer = std::sync::Arc::new(std::sync::Mutex::new(trace_file));
+        let trace_file_for_writer = std::sync::Arc::new(parking_lot::Mutex::new(trace_file));
         let file_layer = tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_target(false)
@@ -72,15 +72,15 @@ fn init_tracing() -> anyhow::Result<()> {
 
 /// Thread-safe writer that wraps an `Arc<Mutex<File>>`, avoiding
 /// `File::try_clone` (which can panic under fd pressure).
-struct ArcMutexWriter(std::sync::Arc<std::sync::Mutex<std::fs::File>>);
+struct ArcMutexWriter(std::sync::Arc<parking_lot::Mutex<std::fs::File>>);
 
 impl std::io::Write for ArcMutexWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut f = self.0.lock().expect("lock poisoned");
+        let mut f = self.0.lock();
         f.write(buf)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        let mut f = self.0.lock().expect("lock poisoned");
+        let mut f = self.0.lock();
         f.flush()
     }
 }

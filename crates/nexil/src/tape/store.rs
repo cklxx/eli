@@ -1,7 +1,9 @@
 //! Tape stores for Conduit.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
@@ -224,7 +226,7 @@ impl InMemoryTapeStore {
     }
 
     pub fn read(&self, tape: &str) -> Option<Vec<TapeEntry>> {
-        let tapes = self.tapes.read().expect("lock poisoned");
+        let tapes = self.tapes.read();
         tapes
             .get(tape)
             .map(|entries| entries.iter().map(|e| e.copy()).collect())
@@ -239,7 +241,7 @@ impl Default for InMemoryTapeStore {
 
 impl TapeStore for InMemoryTapeStore {
     fn list_tapes(&self) -> Result<Vec<String>, ConduitError> {
-        let tapes = self.tapes.read().expect("lock poisoned");
+        let tapes = self.tapes.read();
         let mut keys: Vec<String> = tapes.keys().cloned().collect();
         keys.sort_unstable();
         Ok(keys)
@@ -247,9 +249,9 @@ impl TapeStore for InMemoryTapeStore {
 
     fn reset(&self, tape: &str) -> Result<(), ConduitError> {
         // Lock next_ids before tapes — same order as append() to prevent deadlock.
-        let mut ids = self.next_ids.write().expect("lock poisoned");
+        let mut ids = self.next_ids.write();
         ids.remove(tape);
-        let mut tapes = self.tapes.write().expect("lock poisoned");
+        let mut tapes = self.tapes.write();
         tapes.remove(tape);
         Ok(())
     }
@@ -260,7 +262,7 @@ impl TapeStore for InMemoryTapeStore {
     }
 
     fn append(&self, tape: &str, entry: &TapeEntry) -> Result<(), ConduitError> {
-        let mut ids = self.next_ids.write().expect("lock poisoned");
+        let mut ids = self.next_ids.write();
         let next_id = ids.get(tape).copied().unwrap_or(1);
         ids.insert(tape.into(), next_id + 1);
 
@@ -272,7 +274,7 @@ impl TapeStore for InMemoryTapeStore {
             entry.date.clone(),
         );
 
-        let mut tapes = self.tapes.write().expect("lock poisoned");
+        let mut tapes = self.tapes.write();
         let entries = tapes.entry(tape.into()).or_default();
         entries.push(stored);
 

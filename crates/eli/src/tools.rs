@@ -1,7 +1,8 @@
 //! Tool registry and helpers for the eli crate.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 use nexil::Tool;
 
@@ -17,7 +18,7 @@ static MODEL_TOOLS_CACHE: std::sync::LazyLock<Mutex<Vec<Tool>>> =
 /// Populate the model-tools cache from the current REGISTRY contents.
 /// Should be called once after `register_builtin_tools()`.
 pub fn populate_model_tools_cache() {
-    let reg = REGISTRY.lock().expect("lock poisoned");
+    let reg = REGISTRY.lock();
     let cached: Vec<Tool> = reg
         .values()
         .map(|tool| {
@@ -26,18 +27,18 @@ pub fn populate_model_tools_cache() {
             cloned
         })
         .collect();
-    let mut cache = MODEL_TOOLS_CACHE.lock().expect("lock poisoned");
+    let mut cache = MODEL_TOOLS_CACHE.lock();
     *cache = cached;
 }
 
 /// Return the cached model-ready tool list. Falls back to dynamic generation
 /// if the cache is empty (e.g. in tests that don't call registration).
 pub fn model_tools_cached() -> Vec<Tool> {
-    let cache = MODEL_TOOLS_CACHE.lock().expect("lock poisoned");
+    let cache = MODEL_TOOLS_CACHE.lock();
     if cache.is_empty() {
         drop(cache);
         // Fallback: build from current registry.
-        let reg = REGISTRY.lock().expect("lock poisoned");
+        let reg = REGISTRY.lock();
         model_tools(&reg.values().cloned().collect::<Vec<_>>())
     } else {
         cache.clone()
@@ -134,10 +135,10 @@ mod tests {
     fn test_registry_insert_and_lookup() {
         let tool = make_tool("test.registry_tool", "a tool");
         {
-            let mut reg = REGISTRY.lock().expect("lock poisoned");
+            let mut reg = REGISTRY.lock();
             reg.insert("test.registry_tool".into(), tool.clone());
         }
-        let reg = REGISTRY.lock().expect("lock poisoned");
+        let reg = REGISTRY.lock();
         assert!(reg.contains_key("test.registry_tool"));
         assert_eq!(reg["test.registry_tool"].name, "test.registry_tool");
     }

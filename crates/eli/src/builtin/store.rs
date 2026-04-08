@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use async_trait::async_trait;
 use nexil::tape::store::fetch_all_in_memory;
@@ -197,7 +199,7 @@ impl FileTapeStore {
     where
         F: FnOnce(&mut TapeFile) -> R,
     {
-        let mut files = self.tape_files.lock().expect("lock poisoned");
+        let mut files = self.tape_files.lock();
         let tf = files
             .entry(tape.to_owned())
             .or_insert_with(|| TapeFile::new(self.tape_file_path(tape)));

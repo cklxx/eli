@@ -394,10 +394,9 @@ impl LLM {
                             false,
                             None,
                             Default::default(),
-                            |resp: TransportResponse,
-                             _prov: &str,
-                             _model: &str,
-                             _attempt: u32| { Ok(resp.payload) },
+                            |resp: TransportResponse, _prov: &str, _model: &str, _attempt: u32| {
+                                Ok(resp.payload)
+                            },
                         )
                         .await?;
                     let retry_content = extract_content(&retry_response)?;

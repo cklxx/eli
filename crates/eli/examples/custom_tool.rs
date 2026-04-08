@@ -49,7 +49,7 @@ async fn main() {
         },
     );
     {
-        let mut reg = eli::tools::REGISTRY.lock().expect("registry lock");
+        let mut reg = eli::tools::REGISTRY.lock();
         reg.insert(tool.name.clone(), tool);
     }
 

@@ -52,9 +52,7 @@ pub async fn run_in_process(
     // Block the agent/subagent tools to prevent recursion.
     let blocked = HashSet::from(["agent".to_owned(), "subagent".to_owned()]);
     let all_tools: HashSet<String> = {
-        let reg = crate::tools::REGISTRY
-            .lock()
-            .expect("lock poisoned");
+        let reg = crate::tools::REGISTRY.lock();
         reg.keys()
             .filter(|k| !blocked.contains(k.as_str()))
             .cloned()

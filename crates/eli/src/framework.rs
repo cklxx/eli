@@ -15,9 +15,8 @@ use crate::control_plane::{BudgetLedger, DispatchFn, TurnContext, turn_usage, wi
 use crate::envelope::{ValueExt, unpack_batch_vec};
 use crate::hooks::{ChannelHook, EliHookSpec, HookRuntime, TapeStoreKind};
 use crate::types::{
-    Envelope, MessageHandler, PromptValue, RUNTIME_SYSTEM_PROMPT_KEY, RUNTIME_WORKSPACE_KEY,
-    State, TurnResult,
-    TurnUsageInfo,
+    Envelope, MessageHandler, PromptValue, RUNTIME_SYSTEM_PROMPT_KEY, RUNTIME_WORKSPACE_KEY, State,
+    TurnResult, TurnUsageInfo,
 };
 
 // ---------------------------------------------------------------------------
@@ -393,7 +392,10 @@ impl EliFramework {
     ) -> String {
         match rt.call_run_model(prompt, session_id, state).await {
             Ok(Some(ref output)) if output.is_empty() => {
-                tracing::warn!(session_id, "run_model returned empty output — possible content filter");
+                tracing::warn!(
+                    session_id,
+                    "run_model returned empty output — possible content filter"
+                );
                 "(model returned empty response)".to_owned()
             }
             Ok(Some(output)) => output,

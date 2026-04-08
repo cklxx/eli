@@ -46,14 +46,14 @@ const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Default hook implementations for basic runtime operations.
 pub struct BuiltinImpl {
-    agents: std::sync::RwLock<HashMap<String, Arc<Mutex<Agent>>>>,
-    last_active: std::sync::RwLock<HashMap<String, Instant>>,
+    agents: parking_lot::RwLock<HashMap<String, Arc<Mutex<Agent>>>>,
+    last_active: parking_lot::RwLock<HashMap<String, Instant>>,
     home: PathBuf,
     router: SmartRouter,
     middleware_chain: MiddlewareChain,
     tape_service: std::sync::OnceLock<TapeService>,
     /// Channels for outbound dispatch (populated by gateway; empty in CLI mode).
-    channels: std::sync::RwLock<HashMap<String, Arc<dyn Channel>>>,
+    channels: parking_lot::RwLock<HashMap<String, Arc<dyn Channel>>>,
     session_ttl: Duration,
 }
 
@@ -71,13 +71,13 @@ impl BuiltinImpl {
                 .unwrap_or(DEFAULT_SESSION_TTL_SECS),
         );
         Self {
-            agents: std::sync::RwLock::new(HashMap::new()),
-            last_active: std::sync::RwLock::new(HashMap::new()),
+            agents: parking_lot::RwLock::new(HashMap::new()),
+            last_active: parking_lot::RwLock::new(HashMap::new()),
             home,
             router: SmartRouter::new(),
             middleware_chain: MiddlewareChain::with_defaults(),
             tape_service: std::sync::OnceLock::new(),
-            channels: std::sync::RwLock::new(HashMap::new()),
+            channels: parking_lot::RwLock::new(HashMap::new()),
             session_ttl,
         }
     }
@@ -86,17 +86,17 @@ impl BuiltinImpl {
     fn get_or_create_agent(&self, session_id: &str) -> Arc<Mutex<Agent>> {
         // Update last-active timestamp.
         {
-            let mut active = self.last_active.write().expect("lock poisoned");
+            let mut active = self.last_active.write();
             active.insert(session_id.to_owned(), Instant::now());
         }
 
         {
-            let agents = self.agents.read().expect("lock poisoned");
+            let agents = self.agents.read();
             if let Some(agent) = agents.get(session_id) {
                 return Arc::clone(agent);
             }
         }
-        let mut agents = self.agents.write().expect("lock poisoned");
+        let mut agents = self.agents.write();
         agents
             .entry(session_id.to_owned())
             .or_insert_with(|| Arc::new(Mutex::new(Agent::new())))
@@ -121,7 +121,7 @@ impl BuiltinImpl {
     fn sweep_stale_sessions(&self) {
         let now = Instant::now();
         let stale_keys: Vec<String> = {
-            let active = self.last_active.read().expect("lock poisoned");
+            let active = self.last_active.read();
             active
                 .iter()
                 .filter(|(_, ts)| now.duration_since(**ts) > self.session_ttl)
@@ -134,7 +134,7 @@ impl BuiltinImpl {
         }
 
         // Check which stale sessions are not currently locked (active).
-        let agents = self.agents.read().expect("lock poisoned");
+        let agents = self.agents.read();
         let evictable: Vec<String> = stale_keys
             .into_iter()
             .filter(|key| {
@@ -150,8 +150,8 @@ impl BuiltinImpl {
             return;
         }
 
-        let mut agents = self.agents.write().expect("lock poisoned");
-        let mut active = self.last_active.write().expect("lock poisoned");
+        let mut agents = self.agents.write();
+        let mut active = self.last_active.write();
 
         for key in &evictable {
             agents.remove(key);
@@ -223,7 +223,7 @@ impl BuiltinImpl {
 
     /// Populate channels for gateway-mode outbound dispatch.
     pub fn set_channels(&self, channels: HashMap<String, Arc<dyn Channel>>) {
-        let mut chs = self.channels.write().expect("lock poisoned");
+        let mut chs = self.channels.write();
         *chs = channels;
     }
 
@@ -535,7 +535,7 @@ impl EliHookSpec for BuiltinImpl {
 
         // Resolve channel under the lock, then drop it before any await.
         let resolved = {
-            let channels = self.channels.read().expect("lock poisoned");
+            let channels = self.channels.read();
             if channels.is_empty() {
                 None // CLI mode
             } else {
@@ -1094,13 +1094,13 @@ mod tests {
         tools::register_builtin_tools();
         let home = settings::AgentSettings::from_env().home;
         BuiltinImpl {
-            agents: std::sync::RwLock::new(HashMap::new()),
-            last_active: std::sync::RwLock::new(HashMap::new()),
+            agents: parking_lot::RwLock::new(HashMap::new()),
+            last_active: parking_lot::RwLock::new(HashMap::new()),
             home,
             router: SmartRouter::new(),
             middleware_chain: MiddlewareChain::with_defaults(),
             tape_service: std::sync::OnceLock::new(),
-            channels: std::sync::RwLock::new(HashMap::new()),
+            channels: parking_lot::RwLock::new(HashMap::new()),
             session_ttl: ttl,
         }
     }
@@ -1112,7 +1112,7 @@ mod tests {
         // TTL is 0ms, so the session is immediately stale.
         std::thread::sleep(Duration::from_millis(1));
         builtin.sweep_stale_sessions();
-        let agents = builtin.agents.read().unwrap();
+        let agents = builtin.agents.read();
         assert!(agents.is_empty(), "stale session should have been evicted");
     }
 
@@ -1121,7 +1121,7 @@ mod tests {
         let builtin = builtin_with_ttl(Duration::from_secs(3600));
         builtin.get_or_create_agent("active:1");
         builtin.sweep_stale_sessions();
-        let agents = builtin.agents.read().unwrap();
+        let agents = builtin.agents.read();
         assert_eq!(agents.len(), 1, "active session should be preserved");
     }
 
@@ -1146,7 +1146,7 @@ mod tests {
         let _guard = agent.lock().await;
         std::thread::sleep(Duration::from_millis(1));
         builtin.sweep_stale_sessions();
-        let agents = builtin.agents.read().unwrap();
+        let agents = builtin.agents.read();
         assert_eq!(
             agents.len(),
             1,
