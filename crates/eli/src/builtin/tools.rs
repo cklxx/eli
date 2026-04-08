@@ -2640,6 +2640,13 @@ fn tool_task_create() -> Tool {
                     }
                 }
 
+                let prompt_preview = if prompt.len() > 80 {
+                    format!("{}...", &prompt[..prompt.floor_char_boundary(80)])
+                } else {
+                    prompt.clone()
+                };
+                let kind_label = kind.clone();
+
                 let new_task = crate::taskboard::NewTask {
                     kind,
                     session_origin: session,
@@ -2648,14 +2655,22 @@ fn tool_task_create() -> Tool {
                     priority,
                     metadata: serde_json::Value::Null,
                 };
+
                 let id = store
                     .create(new_task)
                     .await
                     .map_err(|e| ConduitError::new(ErrorKind::Tool, e.to_string()))?;
 
+                let short_id = &id.to_string()[..8];
                 Ok(serde_json::json!({
+                    "ok": true,
                     "task_id": id.to_string(),
-                    "status": "created"
+                    "kind": kind_label,
+                    "priority": priority,
+                    "status": "todo",
+                    "prompt": prompt_preview,
+                    "active_tasks": active + 1,
+                    "message": format!("Task {short_id} created [{kind_label}] p{priority}")
                 }))
             })
         },
@@ -2682,18 +2697,43 @@ fn tool_task_status() -> Tool {
                 })?;
 
                 match store.get(id).await {
-                    Some(task) => Ok(serde_json::json!({
-                        "task_id": task.id.to_string(),
-                        "kind": task.kind,
-                        "status": task.status.label(),
-                        "created_at": task.created_at.to_rfc3339(),
-                        "updated_at": task.updated_at.to_rfc3339(),
-                        "assigned_to": task.assigned_to,
-                        "priority": task.priority,
-                        "context": task.context,
-                        "result": task.result,
-                        "parent": task.parent.map(|p| p.to_string()),
-                    })),
+                    Some(task) => {
+                        let mut result = serde_json::json!({
+                            "ok": true,
+                            "task_id": task.id.to_string(),
+                            "kind": task.kind,
+                            "status": task.status.label(),
+                            "priority": task.priority,
+                            "created_at": task.created_at.to_rfc3339(),
+                            "updated_at": task.updated_at.to_rfc3339(),
+                            "prompt": task.context.get("prompt").and_then(|v| v.as_str()).unwrap_or(""),
+                        });
+                        let obj = result.as_object_mut().unwrap();
+                        if let Some(ref agent) = task.assigned_to {
+                            obj.insert("assigned_to".into(), serde_json::json!(agent));
+                        }
+                        if let Some(ref r) = task.result {
+                            obj.insert("result".into(), r.clone());
+                        }
+                        if let Some(p) = task.parent {
+                            obj.insert("parent".into(), serde_json::json!(p.to_string()));
+                        }
+                        // Include failure details
+                        if let crate::taskboard::Status::Failed {
+                            ref error,
+                            retries,
+                            ref suggested_fix,
+                            ..
+                        } = task.status
+                        {
+                            obj.insert("error".into(), serde_json::json!(error));
+                            obj.insert("retries".into(), serde_json::json!(retries));
+                            if let Some(fix) = suggested_fix {
+                                obj.insert("suggested_fix".into(), serde_json::json!(fix));
+                            }
+                        }
+                        Ok(result)
+                    }
                     None => Err(ConduitError::new(
                         ErrorKind::NotFound,
                         format!("task '{id_str}' not found"),
@@ -2727,6 +2767,7 @@ fn tool_task_list() -> Tool {
         }),
         |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
+                tracing::debug!(args = %args, "task.list called");
                 let store = require_task_store()?;
                 let filter = crate::taskboard::TaskFilter {
                     status: args
@@ -2739,11 +2780,7 @@ fn tool_task_list() -> Tool {
                 };
 
                 let tasks = store.list(filter).await;
-                if tasks.is_empty() {
-                    return ok_val("No tasks found.");
-                }
-
-                let lines: Vec<String> = tasks
+                let items: Vec<serde_json::Value> = tasks
                     .iter()
                     .map(|t| {
                         let prompt = t
@@ -2751,23 +2788,28 @@ fn tool_task_list() -> Tool {
                             .get("prompt")
                             .and_then(|v| v.as_str())
                             .unwrap_or("(no prompt)");
-                        let prompt_short = if prompt.len() > 60 {
-                            format!("{}...", &prompt[..prompt.floor_char_boundary(60)])
-                        } else {
-                            prompt.to_string()
-                        };
-                        format!(
-                            "{} {} [{}] p{} {}",
-                            &t.id.to_string()[..8],
-                            t.status.label(),
-                            t.kind,
-                            t.priority,
-                            prompt_short
-                        )
+                        serde_json::json!({
+                            "task_id": t.id.to_string(),
+                            "kind": t.kind,
+                            "status": t.status.label(),
+                            "priority": t.priority,
+                            "prompt": prompt,
+                            "assigned_to": t.assigned_to,
+                            "created_at": t.created_at.to_rfc3339(),
+                        })
                     })
                     .collect();
 
-                ok_val(format!("{} task(s):\n{}", tasks.len(), lines.join("\n")))
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "count": items.len(),
+                    "tasks": items,
+                    "message": if items.is_empty() {
+                        "No tasks found.".to_string()
+                    } else {
+                        format!("{} task(s) on the board.", items.len())
+                    }
+                }))
             })
         },
     )
@@ -2798,12 +2840,31 @@ fn tool_task_cancel() -> Tool {
                     .unwrap_or("cancelled by user")
                     .to_string();
 
+                // Get task info before cancelling for the response
+                let task_before = store.get(id).await;
+                let prev_status = task_before
+                    .as_ref()
+                    .map(|t| t.status.label())
+                    .unwrap_or("unknown");
+                let kind = task_before
+                    .as_ref()
+                    .map(|t| t.kind.as_str())
+                    .unwrap_or("unknown");
+
                 store
-                    .cancel(id, reason)
+                    .cancel(id, reason.clone())
                     .await
                     .map_err(|e| ConduitError::new(ErrorKind::Tool, e.to_string()))?;
 
-                ok_val(format!("Task {id_str} cancelled."))
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "task_id": id_str,
+                    "kind": kind,
+                    "previous_status": prev_status,
+                    "status": "cancelled",
+                    "reason": reason,
+                    "message": format!("Task {} cancelled (was {}).", &id_str[..8.min(id_str.len())], prev_status)
+                }))
             })
         },
     )
@@ -2831,12 +2892,24 @@ fn tool_task_update() -> Tool {
                     ConduitError::new(ErrorKind::InvalidInput, format!("invalid task ID: {e}"))
                 })?;
 
+                let task_before = store.get(id).await;
+                let prev_status = task_before
+                    .as_ref()
+                    .map(|t| t.status.label().to_string())
+                    .unwrap_or_else(|| "unknown".into());
+
                 if let Some(result) = args.get("result").and_then(|v| v.as_str()) {
                     store
                         .complete(id, serde_json::json!({"output": result}))
                         .await
                         .map_err(|e| ConduitError::new(ErrorKind::Tool, e.to_string()))?;
-                    return ok_val(format!("Task {id_str} completed."));
+                    return Ok(serde_json::json!({
+                        "ok": true,
+                        "task_id": id_str,
+                        "previous_status": prev_status,
+                        "status": "done",
+                        "message": format!("Task {} completed (was {}).", &id_str[..8.min(id_str.len())], prev_status)
+                    }));
                 }
 
                 if let Some(error) = args.get("error").and_then(|v| v.as_str()) {
@@ -2844,7 +2917,14 @@ fn tool_task_update() -> Tool {
                         .fail(id, error.to_string())
                         .await
                         .map_err(|e| ConduitError::new(ErrorKind::Tool, e.to_string()))?;
-                    return ok_val(format!("Task {id_str} marked as failed."));
+                    return Ok(serde_json::json!({
+                        "ok": true,
+                        "task_id": id_str,
+                        "previous_status": prev_status,
+                        "status": "failed",
+                        "error": error,
+                        "message": format!("Task {} failed: {}", &id_str[..8.min(id_str.len())], error)
+                    }));
                 }
 
                 if let Some(progress) = args.get("progress").and_then(|v| v.as_f64()) {
@@ -2858,7 +2938,14 @@ fn tool_task_update() -> Tool {
                         )
                         .await
                         .map_err(|e| ConduitError::new(ErrorKind::Tool, e.to_string()))?;
-                    return ok_val(format!("Task {id_str} progress: {:.0}%", progress * 100.0));
+                    return Ok(serde_json::json!({
+                        "ok": true,
+                        "task_id": id_str,
+                        "previous_status": prev_status,
+                        "status": "running",
+                        "progress": progress,
+                        "message": format!("Task {} progress: {:.0}%", &id_str[..8.min(id_str.len())], progress * 100.0)
+                    }));
                 }
 
                 Err(ConduitError::new(

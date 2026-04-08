@@ -396,6 +396,12 @@ fn get_task(conn: &rusqlite::Connection, id: TaskId) -> Option<Task> {
 }
 
 fn list_tasks(conn: &rusqlite::Connection, filter: &TaskFilter) -> Vec<Task> {
+    debug!(
+        status = ?filter.status,
+        kind = ?filter.kind,
+        limit = ?filter.limit,
+        "taskboard list query"
+    );
     let mut sql = String::from(
         "SELECT id, kind, status_json, parent, session_origin, context_json, result_json, assigned_to, created_at, updated_at, priority, metadata_json FROM tasks WHERE 1=1",
     );
@@ -433,6 +439,12 @@ fn list_tasks(conn: &rusqlite::Connection, filter: &TaskFilter) -> Vec<Task> {
             return vec![];
         }
     };
+    // Log total row count for debugging
+    let total: usize = conn
+        .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+        .unwrap_or(0);
+    debug!(total_tasks = total, sql = %sql, "taskboard query");
+
     let rows = match stmt.query_map(param_refs.as_slice(), |row| Ok(row_to_task(row))) {
         Ok(r) => r,
         Err(e) => {
