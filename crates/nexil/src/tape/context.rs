@@ -117,7 +117,17 @@ pub fn apply_context_budget(messages: &mut Vec<Value>) {
         MAX_TOTAL_CONTEXT_CHARS
     };
     if total_chars > threshold {
+        let before_count = messages.len();
         aggressive_trim(messages);
+        let dropped = before_count.saturating_sub(messages.len());
+        if dropped > 0 {
+            tracing::warn!(
+                dropped_messages = dropped,
+                total_chars = total_chars,
+                threshold = threshold,
+                "context budget exceeded, trimmed conversation history"
+            );
+        }
     }
 }
 
