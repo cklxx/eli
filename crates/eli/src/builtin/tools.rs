@@ -302,6 +302,11 @@ fn builtin_tools() -> Vec<Tool> {
         tool_message_send(),
         tool_help(),
         tool_quit(),
+        tool_task_create(),
+        tool_task_status(),
+        tool_task_list(),
+        tool_task_cancel(),
+        tool_task_update(),
     ];
     if crate::tools::SIDECAR_URL.lock().is_some() {
         tools.push(tool_sidecar());
@@ -2532,6 +2537,337 @@ fn normalized_session_id(session_id: &str) -> Option<String> {
     } else {
         Some(session_id.to_owned())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task tools — persistent, queryable work units
+// ---------------------------------------------------------------------------
+
+/// Max tasks per session per minute.
+const TASK_RATE_LIMIT: usize = 20;
+/// Max total active (non-terminal) tasks.
+const TASK_MAX_ACTIVE: usize = 100;
+/// Max parent→child nesting depth.
+const TASK_MAX_DEPTH: u32 = 5;
+
+fn require_task_store() -> Result<&'static crate::taskboard::store::TaskStore, ConduitError> {
+    crate::taskboard::task_store().ok_or_else(|| {
+        ConduitError::new(
+            ErrorKind::Tool,
+            "taskboard not initialized — run `eli gateway` or `eli chat` first",
+        )
+    })
+}
+
+fn tool_task_create() -> Tool {
+    Tool::new(
+        "task.create",
+        "Create a persistent task on the task board. Tasks are tracked, queryable, and can be consumed by background workers.\n\nUse for work that needs persistence and status tracking. For quick one-off background jobs, use `agent` instead.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "description": "Task kind (e.g. 'explore', 'implement', 'review', 'test', 'research')."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Task description / prompt."
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "Priority: 0=low, 1=normal (default), 2=high, 3=urgent."
+                },
+                "parent": {
+                    "type": "string",
+                    "description": "Parent task ID for sub-task decomposition."
+                }
+            },
+            "required": ["kind", "prompt"]
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move {
+                let store = require_task_store()?;
+                let kind = args
+                    .require_str_field("kind")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                let prompt = args
+                    .require_str_field("prompt")
+                    .map_err(invalid_input)?
+                    .to_owned();
+                let priority = args.get("priority").and_then(|v| v.as_u64()).unwrap_or(1) as u8;
+                let parent = args
+                    .get("parent")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok());
+
+                let session = ctx
+                    .as_ref()
+                    .and_then(|c| c.tape.clone())
+                    .unwrap_or_else(|| "unknown".into());
+
+                // Rate limit: max tasks per session per minute
+                let recent = store.count_recent(&session, 60).await;
+                if recent >= TASK_RATE_LIMIT {
+                    return Err(ConduitError::new(
+                        ErrorKind::InvalidInput,
+                        format!("rate limit: max {TASK_RATE_LIMIT} tasks per minute per session"),
+                    ));
+                }
+
+                // Active task limit
+                let active = store.active_count().await;
+                if active >= TASK_MAX_ACTIVE {
+                    return Err(ConduitError::new(
+                        ErrorKind::InvalidInput,
+                        format!(
+                            "max {TASK_MAX_ACTIVE} active tasks — complete or cancel existing tasks first"
+                        ),
+                    ));
+                }
+
+                // Depth limit
+                if let Some(parent_id) = parent {
+                    let depth = store.task_depth(parent_id).await;
+                    if depth >= TASK_MAX_DEPTH {
+                        return Err(ConduitError::new(
+                            ErrorKind::InvalidInput,
+                            format!(
+                                "max nesting depth is {TASK_MAX_DEPTH} — cannot create deeper sub-tasks"
+                            ),
+                        ));
+                    }
+                }
+
+                let new_task = crate::taskboard::NewTask {
+                    kind,
+                    session_origin: session,
+                    context: serde_json::json!({"prompt": prompt}),
+                    parent,
+                    priority,
+                    metadata: serde_json::Value::Null,
+                };
+                let id = store
+                    .create(new_task)
+                    .await
+                    .map_err(|e| ConduitError::new(ErrorKind::Tool, e.to_string()))?;
+
+                Ok(serde_json::json!({
+                    "task_id": id.to_string(),
+                    "status": "created"
+                }))
+            })
+        },
+    )
+}
+
+fn tool_task_status() -> Tool {
+    Tool::new(
+        "task.status",
+        "Get the status and details of a task by ID.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Task UUID."}
+            },
+            "required": ["task_id"]
+        }),
+        |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move {
+                let store = require_task_store()?;
+                let id_str = args.require_str_field("task_id").map_err(invalid_input)?;
+                let id = uuid::Uuid::parse_str(id_str).map_err(|e| {
+                    ConduitError::new(ErrorKind::InvalidInput, format!("invalid task ID: {e}"))
+                })?;
+
+                match store.get(id).await {
+                    Some(task) => Ok(serde_json::json!({
+                        "task_id": task.id.to_string(),
+                        "kind": task.kind,
+                        "status": task.status.label(),
+                        "created_at": task.created_at.to_rfc3339(),
+                        "updated_at": task.updated_at.to_rfc3339(),
+                        "assigned_to": task.assigned_to,
+                        "priority": task.priority,
+                        "context": task.context,
+                        "result": task.result,
+                        "parent": task.parent.map(|p| p.to_string()),
+                    })),
+                    None => Err(ConduitError::new(
+                        ErrorKind::NotFound,
+                        format!("task '{id_str}' not found"),
+                    )),
+                }
+            })
+        },
+    )
+}
+
+fn tool_task_list() -> Tool {
+    Tool::new(
+        "task.list",
+        "List tasks on the board, optionally filtered by status or kind.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Filter by status: todo, claimed, running, done, failed, blocked, cancelled."
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Filter by task kind."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results (default 20)."
+                }
+            }
+        }),
+        |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move {
+                let store = require_task_store()?;
+                let filter = crate::taskboard::TaskFilter {
+                    status: args
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    kind: args.get("kind").and_then(|v| v.as_str()).map(String::from),
+                    limit: Some(args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize),
+                    ..Default::default()
+                };
+
+                let tasks = store.list(filter).await;
+                if tasks.is_empty() {
+                    return ok_val("No tasks found.");
+                }
+
+                let lines: Vec<String> = tasks
+                    .iter()
+                    .map(|t| {
+                        let prompt = t
+                            .context
+                            .get("prompt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(no prompt)");
+                        let prompt_short = if prompt.len() > 60 {
+                            format!("{}...", &prompt[..prompt.floor_char_boundary(60)])
+                        } else {
+                            prompt.to_string()
+                        };
+                        format!(
+                            "{} {} [{}] p{} {}",
+                            &t.id.to_string()[..8],
+                            t.status.label(),
+                            t.kind,
+                            t.priority,
+                            prompt_short
+                        )
+                    })
+                    .collect();
+
+                ok_val(format!("{} task(s):\n{}", tasks.len(), lines.join("\n")))
+            })
+        },
+    )
+}
+
+fn tool_task_cancel() -> Tool {
+    Tool::new(
+        "task.cancel",
+        "Cancel a task by ID. Only non-terminal tasks can be cancelled.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Task UUID."},
+                "reason": {"type": "string", "description": "Cancellation reason."}
+            },
+            "required": ["task_id"]
+        }),
+        |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move {
+                let store = require_task_store()?;
+                let id_str = args.require_str_field("task_id").map_err(invalid_input)?;
+                let id = uuid::Uuid::parse_str(id_str).map_err(|e| {
+                    ConduitError::new(ErrorKind::InvalidInput, format!("invalid task ID: {e}"))
+                })?;
+                let reason = args
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("cancelled by user")
+                    .to_string();
+
+                store
+                    .cancel(id, reason)
+                    .await
+                    .map_err(|e| ConduitError::new(ErrorKind::Tool, e.to_string()))?;
+
+                ok_val(format!("Task {id_str} cancelled."))
+            })
+        },
+    )
+}
+
+fn tool_task_update() -> Tool {
+    Tool::new(
+        "task.update",
+        "Update a task's progress or mark it complete/failed.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Task UUID."},
+                "progress": {"type": "number", "description": "Progress 0.0 to 1.0."},
+                "result": {"type": "string", "description": "Set result and mark task as done."},
+                "error": {"type": "string", "description": "Set error and mark task as failed."}
+            },
+            "required": ["task_id"]
+        }),
+        |args: Value, _ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move {
+                let store = require_task_store()?;
+                let id_str = args.require_str_field("task_id").map_err(invalid_input)?;
+                let id = uuid::Uuid::parse_str(id_str).map_err(|e| {
+                    ConduitError::new(ErrorKind::InvalidInput, format!("invalid task ID: {e}"))
+                })?;
+
+                if let Some(result) = args.get("result").and_then(|v| v.as_str()) {
+                    store
+                        .complete(id, serde_json::json!({"output": result}))
+                        .await
+                        .map_err(|e| ConduitError::new(ErrorKind::Tool, e.to_string()))?;
+                    return ok_val(format!("Task {id_str} completed."));
+                }
+
+                if let Some(error) = args.get("error").and_then(|v| v.as_str()) {
+                    store
+                        .fail(id, error.to_string())
+                        .await
+                        .map_err(|e| ConduitError::new(ErrorKind::Tool, e.to_string()))?;
+                    return ok_val(format!("Task {id_str} marked as failed."));
+                }
+
+                if let Some(progress) = args.get("progress").and_then(|v| v.as_f64()) {
+                    store
+                        .update_status(
+                            id,
+                            crate::taskboard::Status::Running {
+                                progress: progress as f32,
+                                last_heartbeat: chrono::Utc::now(),
+                            },
+                        )
+                        .await
+                        .map_err(|e| ConduitError::new(ErrorKind::Tool, e.to_string()))?;
+                    return ok_val(format!("Task {id_str} progress: {:.0}%", progress * 100.0));
+                }
+
+                Err(ConduitError::new(
+                    ErrorKind::InvalidInput,
+                    "provide one of: progress, result, or error",
+                ))
+            })
+        },
+    )
 }
 
 #[cfg(test)]

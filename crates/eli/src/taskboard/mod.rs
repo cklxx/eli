@@ -11,6 +11,29 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use self::store::TaskStore;
+
+/// Global task store singleton.
+static TASK_STORE: std::sync::OnceLock<TaskStore> = std::sync::OnceLock::new();
+
+/// Initialize the global task store. Call once at startup.
+pub fn init_task_store(eli_home: &std::path::Path) {
+    let db_path = eli_home.join("taskboard.db");
+    match TaskStore::open(db_path) {
+        Ok(store) => {
+            let _ = TASK_STORE.set(store);
+        }
+        Err(e) => {
+            tracing::error!("failed to initialize taskboard: {e}");
+        }
+    }
+}
+
+/// Get the global task store. Returns None if not initialized.
+pub fn task_store() -> Option<&'static TaskStore> {
+    TASK_STORE.get()
+}
+
 /// Unique task identifier.
 pub type TaskId = Uuid;
 

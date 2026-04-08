@@ -64,6 +64,7 @@ impl BuiltinImpl {
         tools::register_builtin_tools();
         crate::tools::populate_model_tools_cache();
         let home = settings::AgentSettings::from_env().home;
+        crate::taskboard::init_task_store(&home);
         let session_ttl = Duration::from_secs(
             std::env::var("ELI_SESSION_TTL_SECS")
                 .ok()

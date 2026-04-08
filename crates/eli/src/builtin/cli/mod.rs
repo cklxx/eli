@@ -9,6 +9,7 @@ mod profile;
 mod run;
 #[cfg(feature = "tape-viewer")]
 mod tape;
+mod task;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -100,6 +101,11 @@ pub enum CliCommand {
         #[command(subcommand)]
         action: DecisionAction,
     },
+    /// Manage the task board.
+    Task {
+        #[command(subcommand)]
+        action: TaskAction,
+    },
 }
 
 /// Decision management actions.
@@ -114,6 +120,54 @@ pub enum DecisionAction {
     },
     /// Export decisions as markdown.
     Export,
+}
+
+/// Task board management actions.
+#[derive(Debug, Subcommand)]
+pub enum TaskAction {
+    /// Add a new task to the board.
+    Add {
+        /// Task description.
+        description: String,
+        /// Task kind (e.g. explore, implement, review).
+        #[arg(long, short)]
+        kind: Option<String>,
+        /// Priority: 0=low, 1=normal, 2=high, 3=urgent.
+        #[arg(long, short, default_value_t = 1)]
+        priority: u8,
+        /// Parent task ID for sub-task decomposition.
+        #[arg(long)]
+        parent: Option<String>,
+    },
+    /// List tasks on the board.
+    List {
+        /// Filter by status (todo, running, done, failed, ...).
+        #[arg(long, short)]
+        status: Option<String>,
+        /// Filter by task kind.
+        #[arg(long, short)]
+        kind: Option<String>,
+        /// Max results.
+        #[arg(long, short, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show task details by ID.
+    Show {
+        /// Task ID (full UUID or first 8 chars).
+        task_id: String,
+    },
+    /// Cancel a task.
+    Cancel {
+        /// Task ID.
+        task_id: String,
+        /// Cancellation reason.
+        #[arg(long, short)]
+        reason: Option<String>,
+    },
+    /// Show kanban-style board view.
+    Board,
+    /// Show task board statistics.
+    Stats,
 }
 
 /// Execute a CLI command.
@@ -153,6 +207,28 @@ pub async fn execute(cmd: CliCommand) -> anyhow::Result<()> {
             DecisionAction::Remove { index } => decisions::remove_command(index).await,
             DecisionAction::Export => decisions::export_command().await,
         },
+        CliCommand::Task { action } => {
+            crate::taskboard::init_task_store(&crate::builtin::config::eli_home());
+            match action {
+                TaskAction::Add {
+                    description,
+                    kind,
+                    priority,
+                    parent,
+                } => task::add_command(description, kind, priority, parent).await,
+                TaskAction::List {
+                    status,
+                    kind,
+                    limit,
+                } => task::list_command(status, kind, limit).await,
+                TaskAction::Show { task_id } => task::show_command(task_id).await,
+                TaskAction::Cancel { task_id, reason } => {
+                    task::cancel_command(task_id, reason).await
+                }
+                TaskAction::Board => task::board_command().await,
+                TaskAction::Stats => task::stats_command().await,
+            }
+        }
     }
 }
 
