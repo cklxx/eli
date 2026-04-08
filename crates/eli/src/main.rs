@@ -5,7 +5,6 @@
 
 use clap::Parser;
 use std::fs::{self, OpenOptions};
-use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::filter_fn;
@@ -13,6 +12,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use eli::builtin::cli::{CliCommand, execute};
+use eli::builtin::config::eli_home;
 
 /// Eli — a developer-first AI agent framework.
 #[derive(Parser, Debug)]
@@ -20,14 +20,6 @@ use eli::builtin::cli::{CliCommand, execute};
 struct Cli {
     #[command(subcommand)]
     command: CliCommand,
-}
-
-fn eli_home() -> PathBuf {
-    std::env::var("ELI_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".eli")))
-        .unwrap_or_else(|| PathBuf::from(".eli"))
 }
 
 fn init_tracing() -> anyhow::Result<()> {
