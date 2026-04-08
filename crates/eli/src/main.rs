@@ -95,6 +95,9 @@ impl std::io::Write for ArcMutexWriter {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env once, before anything else reads env vars.
+    let _ = dotenvy::dotenv();
+
     init_tracing()?;
 
     let cli = Cli::parse();

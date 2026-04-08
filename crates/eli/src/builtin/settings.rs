@@ -220,8 +220,6 @@ impl AgentSettings {
     /// Per-provider API keys are detected via `ELI_<PROVIDER>_API_KEY` and
     /// `ELI_<PROVIDER>_API_BASE` patterns, matching the Python implementation.
     pub fn from_env() -> Self {
-        let _ = dotenvy::dotenv();
-
         let home = env::var("ELI_HOME")
             .ok()
             .map(PathBuf::from)

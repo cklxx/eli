@@ -7,7 +7,6 @@ use crate::builtin::tape::TapeService;
 
 /// Resolve the default tape service and tape name for the CLI.
 fn default_tape_service() -> anyhow::Result<(TapeService, String)> {
-    let _ = dotenvy::dotenv();
     let tapes_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".eli")

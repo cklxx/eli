@@ -387,9 +387,6 @@ pub(crate) async fn gateway_command() -> anyhow::Result<()> {
     use crate::channels::webhook::{WebhookChannel, WebhookSettings};
     use tokio_util::sync::CancellationToken;
 
-    // Load .env so ELI_TELEGRAM_TOKEN (and others) are available.
-    let _ = dotenvy::dotenv();
-
     // Acquire a PID lock to prevent concurrent gateway instances.
     let _lock_guard = acquire_gateway_lock()?;
 
