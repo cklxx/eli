@@ -75,6 +75,9 @@ pub struct ChatRequest<'a> {
     /// Optional cancellation token. When cancelled, `run_tools` returns partial
     /// results at the next iteration boundary.
     pub cancellation: Option<CancellationToken>,
+    /// Context window size in tokens. When set, `apply_context_budget` and the
+    /// tool loop use this to compute char thresholds instead of hardcoded constants.
+    pub context_window: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +91,8 @@ pub struct LLM {
     async_tape: AsyncTapeManager,
     spill_dir: Option<std::path::PathBuf>,
     stream_filter: Option<StreamEventFilter>,
+    /// Model context window in tokens, used for tape budget and tool loop limits.
+    pub(crate) context_window: Option<usize>,
 }
 
 impl LLM {
@@ -155,6 +160,7 @@ impl LLM {
             async_tape,
             stream_filter: None,
             spill_dir: None,
+            context_window: None,
         })
     }
 
@@ -183,6 +189,16 @@ impl LLM {
     /// Access the tool executor.
     pub fn tools(&self) -> &ToolExecutor {
         &self.tool_executor
+    }
+
+    /// The context window size in tokens, if set.
+    pub fn context_window(&self) -> Option<usize> {
+        self.context_window
+    }
+
+    /// Set the context window size in tokens.
+    pub fn set_context_window(&mut self, tokens: usize) {
+        self.context_window = Some(tokens);
     }
 
     /// Set a stream event filter. Events returning `None` are dropped.

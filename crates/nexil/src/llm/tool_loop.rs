@@ -120,6 +120,8 @@ impl LLM {
             tape,
             tape_context,
             cancellation,
+            context_window,
+            ..
         } = req;
         let tools = tools.ok_or_else(|| {
             ConduitError::new(ErrorKind::InvalidInput, "run_tools requires tools")
@@ -155,6 +157,8 @@ impl LLM {
         };
 
         let max_iterations: usize = 250; // Safety limit for tool-calling rounds
+        // Resolve the effective context window: prefer request-level, then LLM-level.
+        let _effective_context_window = context_window.or(self.context_window);
         let mut iteration: usize = 0;
         let mut last_round_had_errors = false;
         let mut recovery_nudges: u8 = 0;
@@ -293,7 +297,7 @@ impl LLM {
 
         let decisions = collect_active_decisions(&all_entries);
         inject_decisions_into_system_prompt(&mut tape_msgs, &decisions);
-        crate::tape::context::apply_context_budget(&mut tape_msgs);
+        crate::tape::context::apply_context_budget(&mut tape_msgs, self.context_window);
         tape_msgs
     }
 

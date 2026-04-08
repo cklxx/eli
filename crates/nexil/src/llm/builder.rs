@@ -34,6 +34,7 @@ pub struct LLMBuilder {
     tape_store: Option<Box<dyn AsyncTapeStore + Send + Sync>>,
     stream_filter: Option<StreamEventFilter>,
     spill_dir: Option<std::path::PathBuf>,
+    context_window: Option<usize>,
 }
 
 impl LLMBuilder {
@@ -55,6 +56,7 @@ impl LLMBuilder {
             tape_store: None,
             stream_filter: None,
             spill_dir: None,
+            context_window: None,
         }
     }
 
@@ -142,6 +144,12 @@ impl LLMBuilder {
         self
     }
 
+    /// Set the model context window in tokens.
+    pub fn context_window(mut self, tokens: usize) -> Self {
+        self.context_window = Some(tokens);
+        self
+    }
+
     /// Set a stream event filter.
     pub fn stream_filter(mut self, filter: StreamEventFilter) -> Self {
         self.stream_filter = Some(filter);
@@ -218,6 +226,7 @@ impl LLMBuilder {
             async_tape,
             stream_filter: self.stream_filter,
             spill_dir: self.spill_dir,
+            context_window: self.context_window,
         })
     }
 }
