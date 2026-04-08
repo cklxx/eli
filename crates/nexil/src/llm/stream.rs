@@ -88,22 +88,26 @@ impl LLM {
 
         tokio::spawn(async move {
             let mut byte_stream = response.bytes_stream();
-            let mut buffer = String::new();
+            let mut buffer: Vec<u8> = Vec::new();
 
             while let Some(chunk_result) = byte_stream.next().await {
                 let bytes = match chunk_result {
                     Ok(b) => b,
                     Err(_) => break,
                 };
-                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                buffer.extend_from_slice(&bytes);
 
-                // Parse complete SSE lines from the buffer, leaving partial
-                // lines for the next chunk.  We drain consumed bytes in-place
-                // instead of reallocating the remainder on every line.
+                // Parse complete SSE lines from the byte buffer, leaving
+                // partial lines (which may contain incomplete multibyte
+                // UTF-8 sequences) for the next chunk.
                 let mut cursor = 0;
-                while let Some(rel) = buffer[cursor..].find('\n') {
+                while let Some(rel) = buffer[cursor..].iter().position(|&b| b == b'\n') {
                     let line_end = cursor + rel;
-                    let line = buffer[cursor..line_end].trim_end_matches('\r').to_owned();
+                    let mut end = line_end;
+                    if end > cursor && buffer[end - 1] == b'\r' {
+                        end -= 1;
+                    }
+                    let line = String::from_utf8_lossy(&buffer[cursor..end]);
                     cursor = line_end + 1;
 
                     if let Some(data) = line.strip_prefix("data: ") {

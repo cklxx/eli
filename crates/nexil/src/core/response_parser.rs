@@ -276,7 +276,7 @@ impl LLMCore {
         use futures::StreamExt;
 
         let mut stream = resp.bytes_stream();
-        let mut buffer = String::new();
+        let mut raw: Vec<u8> = Vec::new();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| {
@@ -288,7 +288,7 @@ impl LLMCore {
                 info!(
                     target: "eli_trace",
                     error = ?e,
-                    bytes_received = buffer.len(),
+                    bytes_received = raw.len(),
                     "sse_stream_chunk_error"
                 );
                 ConduitError::new(
@@ -296,8 +296,12 @@ impl LLMCore {
                     format!("{SSE_STREAM_ERROR_PREFIX}: {e}{source}"),
                 )
             })?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            raw.extend_from_slice(&chunk);
         }
+
+        // Decode once after all bytes are collected — avoids corrupting
+        // multibyte UTF-8 characters split across chunk boundaries.
+        let buffer = String::from_utf8_lossy(&raw);
 
         info!(
             target: "eli_trace",
