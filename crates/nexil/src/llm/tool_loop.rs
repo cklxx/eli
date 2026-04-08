@@ -121,7 +121,7 @@ impl LLM {
             tape_context,
             cancellation,
             context_window,
-            ..
+            max_tool_iterations,
         } = req;
         let tools = tools.ok_or_else(|| {
             ConduitError::new(ErrorKind::InvalidInput, "run_tools requires tools")
@@ -156,9 +156,9 @@ impl LLM {
             tool_context: context,
         };
 
-        let max_iterations: usize = 250; // Safety limit for tool-calling rounds
+        let max_iterations: usize = max_tool_iterations.unwrap_or(250);
         // Resolve the effective context window: prefer request-level, then LLM-level.
-        let _effective_context_window = context_window.or(self.context_window);
+        let effective_context_window = context_window.or(self.context_window);
         let mut iteration: usize = 0;
         let mut last_round_had_errors = false;
         let mut recovery_nudges: u8 = 0;
@@ -261,6 +261,41 @@ impl LLM {
                     all_tool_results.extend(execution.tool_results.clone());
                     self._persist_round(tape, &response, &execution, &mut in_memory_msgs)
                         .await?;
+
+                    // Check if accumulated context approaches the model's window.
+                    if let Some(cw) = effective_context_window {
+                        let total_chars: usize = in_memory_msgs
+                            .iter()
+                            .map(|m| {
+                                m.get("content")
+                                    .and_then(|c| c.as_str())
+                                    .map_or(0, str::len)
+                            })
+                            .sum();
+                        // Use ~4 chars/token as a rough estimate; break at 80%.
+                        let char_limit = cw * 4 * 80 / 100;
+                        if total_chars > char_limit {
+                            tracing::warn!(
+                                iteration,
+                                total_chars,
+                                char_limit,
+                                context_window = cw,
+                                "tool loop stopped: approaching context window limit"
+                            );
+                            return Ok(ToolAutoResult {
+                                kind: ToolAutoResultKind::Text,
+                                text: Some(
+                                    "Tool loop stopped: approaching context window limit. \
+                                     Please continue in a new turn or session."
+                                        .to_owned(),
+                                ),
+                                tool_calls: all_tool_calls,
+                                tool_results: all_tool_results,
+                                error: None,
+                                usage: usage_events,
+                            });
+                        }
+                    }
                 }
             }
         }

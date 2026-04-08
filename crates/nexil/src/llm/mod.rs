@@ -78,6 +78,8 @@ pub struct ChatRequest<'a> {
     /// Context window size in tokens. When set, `apply_context_budget` and the
     /// tool loop use this to compute char thresholds instead of hardcoded constants.
     pub context_window: Option<usize>,
+    /// Maximum tool-calling iterations. Defaults to 250 when `None`.
+    pub max_tool_iterations: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
