@@ -99,7 +99,10 @@ mod tests {
 
         // "data: {\"c\":\"\xe2" — first byte of € but line is incomplete
         let mut chunk1 = b"data: {\"c\":\"\xE2".to_vec();
-        assert!(decoder.push(&chunk1).is_empty(), "incomplete line should not decode");
+        assert!(
+            decoder.push(&chunk1).is_empty(),
+            "incomplete line should not decode"
+        );
 
         // Remaining 2 bytes of €, closing JSON, and newline
         chunk1 = b"\x82\xAC\"}\n".to_vec();

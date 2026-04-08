@@ -234,11 +234,8 @@ async fn test_pipeline_default_session_id() {
 #[tokio::test]
 async fn test_pipeline_state_flows_to_model() {
     let fw = EliFramework::with_workspace("/tmp/test-pipeline-state".into());
-    fw.register_plugin(
-        "state",
-        Arc::new(MockStatePlugin) as Arc<dyn EliHookSpec>,
-    )
-    .await;
+    fw.register_plugin("state", Arc::new(MockStatePlugin) as Arc<dyn EliHookSpec>)
+        .await;
     fw.register_plugin(
         "model",
         Arc::new(StateEchoModelPlugin) as Arc<dyn EliHookSpec>,

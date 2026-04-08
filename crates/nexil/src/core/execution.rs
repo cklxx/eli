@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde_json::Value;
+use tokio::sync::Mutex as TokioMutex;
 use tracing::{info, warn};
 
 use super::api_format::ApiFormat;
@@ -17,6 +18,11 @@ use super::provider_registry::ProviderRegistry;
 use super::provider_runtime::ProviderRuntime;
 use super::response_parser::{SSE_STREAM_ERROR_PREFIX, TransportResponse};
 use crate::clients::parsing::TransportKind;
+
+/// Async callback that attempts to refresh an OAuth token for the given provider.
+///
+/// Returns `Some(new_api_key)` on success, `None` if refresh is not applicable or fails.
+pub type OAuthTokenRefresher = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// How API keys are configured.
 #[derive(Debug, Clone)]
@@ -48,6 +54,10 @@ pub struct LLMCore {
     provider_registry: ProviderRegistry,
     #[allow(clippy::type_complexity)]
     error_classifier: Option<Box<dyn Fn(&ConduitError) -> Option<ErrorKind> + Send + Sync>>,
+    /// Optional callback to refresh an OAuth token when a 401 is received.
+    oauth_refresher: Option<OAuthTokenRefresher>,
+    /// Single-flight guard: prevents concurrent 401s from triggering multiple refreshes.
+    oauth_refresh_guard: Arc<TokioMutex<()>>,
 }
 
 fn split_model_id<'a>(
@@ -120,6 +130,8 @@ impl LLMCore {
             verbose,
             provider_registry: ProviderRegistry::new(),
             error_classifier: None,
+            oauth_refresher: None,
+            oauth_refresh_guard: Arc::new(TokioMutex::new(())),
         }
     }
 
@@ -138,6 +150,16 @@ impl LLMCore {
         classifier: impl Fn(&ConduitError) -> Option<ErrorKind> + Send + Sync + 'static,
     ) -> Self {
         self.error_classifier = Some(Box::new(classifier));
+        self
+    }
+
+    /// Set an OAuth token refresher callback.
+    ///
+    /// When a 401 Unauthorized is received and this refresher is set, it will be
+    /// called to attempt a token refresh. A single-flight guard prevents concurrent
+    /// 401s from triggering multiple refresh attempts.
+    pub fn with_oauth_refresher(mut self, refresher: OAuthTokenRefresher) -> Self {
+        self.oauth_refresher = Some(refresher);
         self
     }
 
@@ -380,6 +402,72 @@ impl LLMCore {
         outcome.decision == AttemptDecision::RetrySameModel
     }
 
+    /// Check whether an error is a 401 Unauthorized that could be resolved by
+    /// refreshing an OAuth token. Returns `true` if the error message contains
+    /// "HTTP 401".
+    fn is_http_401(error: &ConduitError) -> bool {
+        error.kind == ErrorKind::Config && error.message.contains("HTTP 401")
+    }
+
+    /// Attempt to refresh an OAuth token for the given provider.
+    ///
+    /// Uses a single-flight guard so concurrent 401s don't trigger multiple
+    /// refreshes. On success, updates the API key config and evicts the cached
+    /// client so the next attempt uses the fresh token.
+    ///
+    /// Returns `true` if the token was refreshed and the caller should retry.
+    async fn try_oauth_refresh(&mut self, provider_name: &str) -> bool {
+        let Some(refresher) = &self.oauth_refresher else {
+            return false;
+        };
+
+        // Single-flight: acquire the guard. If another task is already refreshing,
+        // we wait for it, then check if the key changed (it did if the other task
+        // succeeded).
+        let _guard = self.oauth_refresh_guard.lock().await;
+
+        let refresher = Arc::clone(refresher);
+        match refresher(provider_name) {
+            Some(new_key) => {
+                info!(
+                    provider = %provider_name,
+                    "OAuth token refreshed successfully, evicting cached client"
+                );
+
+                // Evict old client so the next build_candidate picks up the new key.
+                let old_api_key = self.resolve_api_key(provider_name);
+                let api_base = self.resolve_api_base(provider_name);
+                self.client_registry.remove(
+                    provider_name,
+                    old_api_key.as_deref(),
+                    api_base.as_deref(),
+                );
+
+                // Update the API key config.
+                match &mut self.api_key {
+                    ApiKeyConfig::Single(key) => {
+                        *key = new_key;
+                    }
+                    ApiKeyConfig::PerProvider(map) => {
+                        map.insert(provider_name.to_owned(), new_key);
+                    }
+                    ApiKeyConfig::None => {
+                        self.api_key = ApiKeyConfig::Single(new_key);
+                    }
+                }
+
+                true
+            }
+            None => {
+                warn!(
+                    provider = %provider_name,
+                    "OAuth token refresh returned None, not retrying"
+                );
+                false
+            }
+        }
+    }
+
     /// Get or create an HTTP client for the given provider.
     pub fn get_client(&mut self, provider: &str) -> Arc<Client> {
         let api_key = self.resolve_api_key(provider);
@@ -500,6 +588,7 @@ impl LLMCore {
     {
         let candidates = self.model_candidates(model, provider)?;
         let mut last_error: Option<ConduitError> = None;
+        let mut oauth_refreshed = false;
 
         for (provider_name, model_id) in &candidates {
             for attempt in self.retry_attempts() {
@@ -539,6 +628,19 @@ impl LLMCore {
                 {
                     Ok(r) => r,
                     Err(e) => {
+                        // On 401 with an OAuth refresher, try to refresh once.
+                        if !oauth_refreshed
+                            && Self::is_http_401(&e)
+                            && self.try_oauth_refresh(&candidate.provider_name).await
+                        {
+                            oauth_refreshed = true;
+                            warn!(
+                                provider = %candidate.provider_name,
+                                model = %candidate.model_id,
+                                "retrying after OAuth token refresh"
+                            );
+                            continue;
+                        }
                         if self.handle_send_error(
                             e,
                             &candidate.provider_name,
@@ -640,12 +742,16 @@ impl LLMCore {
     ) -> Result<(reqwest::Response, TransportKind, String, String), ConduitError> {
         let candidates = self.model_candidates(model, provider)?;
         let mut last_error: Option<ConduitError> = None;
+        let mut oauth_refreshed = false;
 
         for (provider_name, model_id) in &candidates {
-            let candidate = self.build_candidate(provider_name, model_id);
-
             for attempt in self.retry_attempts() {
                 Self::backoff_delay(attempt).await;
+
+                // Build candidate inside the retry loop (same as run_chat) so that
+                // after an OAuth refresh + client eviction the next attempt uses
+                // the fresh token.
+                let candidate = self.build_candidate(provider_name, model_id);
 
                 let prepared = match self.prepare_attempt(
                     &candidate,
@@ -675,6 +781,19 @@ impl LLMCore {
                 {
                     Ok(r) => r,
                     Err(e) => {
+                        // On 401 with an OAuth refresher, try to refresh once.
+                        if !oauth_refreshed
+                            && Self::is_http_401(&e)
+                            && self.try_oauth_refresh(&candidate.provider_name).await
+                        {
+                            oauth_refreshed = true;
+                            warn!(
+                                provider = %candidate.provider_name,
+                                model = %candidate.model_id,
+                                "retrying stream after OAuth token refresh"
+                            );
+                            continue;
+                        }
                         if self.handle_send_error(
                             e,
                             &candidate.provider_name,
@@ -1335,5 +1454,128 @@ mod tests {
         assert_eq!(result.len(), 3);
         assert_eq!(result[1]["tool_calls"][0]["id"], "call_123");
         assert_eq!(result[1]["tool_calls"][0]["function"]["name"], "tape_info");
+    }
+
+    // -- OAuth token refresh tests -------------------------------------------
+
+    #[test]
+    fn test_is_http_401_detects_401() {
+        let error = ConduitError::new(ErrorKind::Config, "openai:gpt-4: HTTP 401 Unauthorized - ");
+        assert!(LLMCore::is_http_401(&error));
+    }
+
+    #[test]
+    fn test_is_http_401_rejects_other_errors() {
+        let error = ConduitError::new(ErrorKind::Config, "invalid api key");
+        assert!(!LLMCore::is_http_401(&error));
+
+        let error = ConduitError::new(ErrorKind::Temporary, "rate limit exceeded");
+        assert!(!LLMCore::is_http_401(&error));
+
+        let error = ConduitError::new(ErrorKind::Config, "HTTP 403 Forbidden");
+        assert!(!LLMCore::is_http_401(&error));
+    }
+
+    #[tokio::test]
+    async fn test_try_oauth_refresh_without_refresher_returns_false() {
+        let mut core = LLMCore::new(
+            "openai".into(),
+            "gpt-4".into(),
+            vec![],
+            1,
+            ApiKeyConfig::Single("old-key".into()),
+            ApiBaseConfig::None,
+            ApiFormat::default(),
+            0,
+        );
+        assert!(!core.try_oauth_refresh("openai").await);
+    }
+
+    #[tokio::test]
+    async fn test_try_oauth_refresh_with_successful_refresh() {
+        let refresher: OAuthTokenRefresher =
+            Arc::new(|_provider: &str| Some("new-oauth-token".to_string()));
+
+        let mut core = LLMCore::new(
+            "openai".into(),
+            "gpt-4".into(),
+            vec![],
+            1,
+            ApiKeyConfig::Single("expired-token".into()),
+            ApiBaseConfig::None,
+            ApiFormat::default(),
+            0,
+        )
+        .with_oauth_refresher(refresher);
+
+        // Pre-populate the client cache
+        core.get_client("openai");
+        assert!(!core.client_registry.is_empty());
+
+        assert!(core.try_oauth_refresh("openai").await);
+
+        // API key should be updated
+        assert_eq!(
+            core.resolve_api_key("openai"),
+            Some("new-oauth-token".to_string())
+        );
+
+        // Cached client should be evicted (old key no longer matches)
+        assert!(
+            !core
+                .client_registry
+                .contains("openai", Some("expired-token"), None),
+            "old client should be evicted after refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_try_oauth_refresh_with_failed_refresh() {
+        let refresher: OAuthTokenRefresher = Arc::new(|_provider: &str| None);
+
+        let mut core = LLMCore::new(
+            "openai".into(),
+            "gpt-4".into(),
+            vec![],
+            1,
+            ApiKeyConfig::Single("old-key".into()),
+            ApiBaseConfig::None,
+            ApiFormat::default(),
+            0,
+        )
+        .with_oauth_refresher(refresher);
+
+        assert!(!core.try_oauth_refresh("openai").await);
+
+        // API key should be unchanged
+        assert_eq!(core.resolve_api_key("openai"), Some("old-key".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_try_oauth_refresh_updates_per_provider_map() {
+        let refresher: OAuthTokenRefresher =
+            Arc::new(|_provider: &str| Some("refreshed-key".to_string()));
+
+        let mut map = HashMap::new();
+        map.insert("openai".to_string(), "stale-key".to_string());
+
+        let mut core = LLMCore::new(
+            "openai".into(),
+            "gpt-4".into(),
+            vec![],
+            1,
+            ApiKeyConfig::PerProvider(map),
+            ApiBaseConfig::None,
+            ApiFormat::default(),
+            0,
+        )
+        .with_oauth_refresher(refresher);
+
+        assert!(core.try_oauth_refresh("openai").await);
+
+        assert_eq!(
+            core.resolve_api_key("openai"),
+            Some("refreshed-key".to_string())
+        );
     }
 }

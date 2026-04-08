@@ -529,12 +529,19 @@ impl HookRuntime {
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(plugin = %name, error = %e, "hook.resolve_session failed");
-                    return Err(HookError::wrap(name.to_owned(), HookPoint::ResolveSession, e));
+                    return Err(HookError::wrap(
+                        name.to_owned(),
+                        HookPoint::ResolveSession,
+                        e,
+                    ));
                 }
                 Err(panic_info) => {
                     let msg = panic_payload_message(&panic_info);
                     tracing::warn!(plugin = %name, panic.message = %msg, "hook.resolve_session panicked");
-                    return Err(HookError::Panic { plugin: name.to_owned(), message: msg });
+                    return Err(HookError::Panic {
+                        plugin: name.to_owned(),
+                        message: msg,
+                    });
                 }
             }
         }
@@ -567,7 +574,10 @@ impl HookRuntime {
                 Err(panic_info) => {
                     let msg = panic_payload_message(&panic_info);
                     tracing::warn!(plugin = %name, panic.message = %msg, "hook.load_state panicked");
-                    return Err(HookError::Panic { plugin: name.to_owned(), message: msg });
+                    return Err(HookError::Panic {
+                        plugin: name.to_owned(),
+                        message: msg,
+                    });
                 }
             }
         }
@@ -651,7 +661,10 @@ impl HookRuntime {
                 Err(panic_info) => {
                     let msg = panic_payload_message(&panic_info);
                     tracing::warn!(plugin = %name, panic.message = %msg, "hook.run_model panicked");
-                    return Err(HookError::Panic { plugin: name.to_owned(), message: msg });
+                    return Err(HookError::Panic {
+                        plugin: name.to_owned(),
+                        message: msg,
+                    });
                 }
             }
         }

@@ -33,6 +33,7 @@ pub use crate::auth::{
 };
 pub use crate::clients::InternalOps;
 pub use crate::core::errors::{ConduitError, ErrorKind};
+pub use crate::core::execution::OAuthTokenRefresher;
 pub use crate::core::provider_registry::{ProviderConfig, ProviderRegistry};
 pub use crate::core::results::{
     AsyncStreamEvents, AsyncTextStream, ErrorPayload, StreamEvent, StreamEvents, StreamState,
