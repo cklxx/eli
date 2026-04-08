@@ -240,12 +240,6 @@ nav a:hover { color: var(--text); border-color: var(--line); background: rgba(25
 
 ## Workflow
 
-### Step 0: Decide deployment target
-
-- If the page is an **explainer, docs, or project-related page** → **GitHub Pages** (write to `site/`)
-- If the page is a **standalone tool, demo, or external project** → **Cloudflare Pages** (via wrangler)
-- If unclear, default to GitHub Pages.
-
 ### Step 1: Generate the HTML
 
 Use the Design System above. The page MUST:
@@ -262,47 +256,58 @@ Use the Design System above. The page MUST:
 - Maps: Leaflet via CDN
 - Math: KaTeX via CDN
 
-### Step 2A: Deploy to GitHub Pages (default)
+### Step 2: Write to deploy directory
 
 ```bash
-# Generate a kebab-case filename from the title
-SLUG="<kebab-case-title>"
-SITE_DIR="site"
+DEPLOY_DIR=$(mktemp -d)
+```
 
-# Write the HTML
-# (use Write tool to create site/${SLUG}.html)
+Use the Write tool to create `$DEPLOY_DIR/index.html`. If there are additional assets, put them in `$DEPLOY_DIR` too.
 
-# Commit and push — GitHub Actions auto-deploys
+### Step 3: Deploy to Cloudflare Pages
+
+```bash
+bash $SKILL_DIR/deploy.sh "$DEPLOY_DIR" "<project-name>"
+```
+
+**Project naming rules:**
+- Derive from the page's purpose: `palu-explainer`, `kv-cache-infra`, `team-dashboard`
+- kebab-case, lowercase, no special characters
+- If user specifies a name, use it
+- Redeploying with the same name updates the existing site
+
+The script handles:
+1. Validates `index.html` exists
+2. Creates Cloudflare Pages project (idempotent)
+3. Deploys with `wrangler pages deploy`
+4. Prints preview URL and production URL
+
+### Step 4: Save to site/ and commit
+
+After successful Cloudflare deploy, also save a copy to the project's `site/` directory for version control:
+
+```bash
+SLUG="<project-name>"
+cp "$DEPLOY_DIR/index.html" "site/${SLUG}.html"
+rm -rf "$DEPLOY_DIR"
 git add "site/${SLUG}.html"
 git commit -m "feat: add ${SLUG} explainer page"
 git push
 ```
 
-The page will be live at `https://eliagent.github.io/${SLUG}.html` after GitHub Actions completes (~1 min).
+### Step 5: Present the URL
 
-**Important:** The `site/` directory has a GitHub Actions workflow (`.github/workflows/pages.yml`) that auto-deploys on push to `main` when `site/**` changes. Just commit and push — deployment is automatic.
+Show the user the **Cloudflare Pages URL** prominently:
 
-### Step 2B: Deploy to Cloudflare Pages (standalone)
-
-```bash
-DEPLOY_DIR=$(mktemp -d)
-# Write index.html to $DEPLOY_DIR
-bash $SKILL_DIR/deploy.sh "$DEPLOY_DIR" "<project-name>"
-rm -rf "$DEPLOY_DIR"
 ```
-
-The page will be live at `https://<project-name>.pages.dev`.
-
-### Step 3: Present the URL
-
-Show the user the live URL prominently:
-- GitHub Pages: `https://eliagent.github.io/<slug>.html`
-- Cloudflare Pages: `https://<project-name>.pages.dev`
+https://<project-name>.pages.dev
+```
 
 ## Constraints
 
-- GitHub Pages: push to `site/` on `main` branch triggers auto-deploy
-- Cloudflare Pages: requires `wrangler` installed and authenticated
+- `wrangler` must be installed and authenticated (`wrangler login`)
 - Max file size: 25 MiB per asset
+- Project names must be globally unique on Cloudflare Pages
+- If project name conflicts, append a short random suffix and retry
 - All pages must use the Eli Dark Theme design system
 - No build step — everything is vanilla HTML/CSS/JS
