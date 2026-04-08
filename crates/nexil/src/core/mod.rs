@@ -8,6 +8,7 @@ pub mod errors;
 pub mod execution;
 pub mod message_norm;
 pub mod provider_policies;
+pub mod provider_registry;
 pub mod provider_runtime;
 pub mod request_adapters;
 pub mod request_builder;

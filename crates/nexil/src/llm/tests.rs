@@ -860,6 +860,83 @@ fn test_builder_default() {
     let _builder = LLMBuilder::default();
 }
 
+// ----- ProviderRegistry via LLMBuilder -----
+
+#[test]
+fn test_builder_register_provider() {
+    use crate::core::provider_registry::{ProviderConfig, ProviderRegistry};
+
+    let llm = LLM::builder()
+        .model("my-llm:custom-model")
+        .api_key("test-key")
+        .register_provider(
+            "my-llm",
+            ProviderConfig::new("https://api.my-llm.example.com/v1", ApiFormat::Completion),
+        )
+        .build()
+        .unwrap();
+
+    assert_eq!(llm.provider(), "my-llm");
+    assert_eq!(llm.model(), "custom-model");
+
+    // The registry on the core should resolve the custom provider.
+    let reg = llm.core.provider_registry();
+    let cfg = reg
+        .get("my-llm")
+        .expect("custom provider should be registered");
+    assert_eq!(cfg.api_base, "https://api.my-llm.example.com/v1");
+    assert_eq!(cfg.api_format, ApiFormat::Completion);
+}
+
+#[test]
+fn test_builder_provider_registry_replaces_defaults() {
+    use crate::core::provider_registry::{ProviderConfig, ProviderRegistry};
+
+    let mut custom_reg = ProviderRegistry::new();
+    custom_reg.register(
+        "special",
+        ProviderConfig::new("https://special.example.com/v1", ApiFormat::Responses),
+    );
+
+    let llm = LLM::builder()
+        .model("special:some-model")
+        .api_key("test-key")
+        .provider_registry(custom_reg)
+        .build()
+        .unwrap();
+
+    let reg = llm.core.provider_registry();
+    assert!(reg.get("special").is_some());
+    // Built-in providers are still present because ProviderRegistry::new() seeds them.
+    assert!(reg.get("openai").is_some());
+}
+
+#[test]
+fn test_builder_register_provider_with_custom_headers() {
+    use crate::core::provider_registry::ProviderConfig;
+
+    let llm = LLM::builder()
+        .model("custom:my-model")
+        .api_key("test-key")
+        .register_provider(
+            "custom",
+            ProviderConfig::new("https://api.custom.example.com/v1", ApiFormat::Completion)
+                .with_header("X-Custom-Auth", "token-123"),
+        )
+        .build()
+        .unwrap();
+
+    let cfg = llm
+        .core
+        .provider_registry()
+        .get("custom")
+        .expect("custom provider should exist");
+    assert_eq!(
+        cfg.custom_headers.get("X-Custom-Auth").unwrap(),
+        "token-123"
+    );
+}
+
 // ----- StreamEventFilter -----
 
 #[test]
