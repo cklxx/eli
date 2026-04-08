@@ -45,6 +45,12 @@ pub struct TapeEntry {
     pub date: String,
 }
 
+impl AsRef<TapeEntry> for TapeEntry {
+    fn as_ref(&self) -> &TapeEntry {
+        self
+    }
+}
+
 impl TapeEntry {
     /// Create a new TapeEntry with the given fields.
     pub fn new(id: i64, kind: TapeEntryKind, payload: Value, meta: Value, date: String) -> Self {

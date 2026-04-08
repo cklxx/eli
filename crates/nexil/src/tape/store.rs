@@ -48,8 +48,8 @@ fn is_matching_anchor(entry: &TapeEntry, name: Option<&str>) -> bool {
             .unwrap_or(true)
 }
 
-fn anchor_index(
-    entries: &[TapeEntry],
+fn anchor_index<T: AsRef<TapeEntry>>(
+    entries: &[T],
     name: Option<&str>,
     default: i64,
     forward: bool,
@@ -58,13 +58,13 @@ fn anchor_index(
     let mut range = start..entries.len();
     if forward {
         range
-            .find(|&i| is_matching_anchor(&entries[i], name))
+            .find(|&i| is_matching_anchor(entries[i].as_ref(), name))
             .map(|i| i as i64)
             .unwrap_or(default)
     } else {
         range
             .rev()
-            .find(|&i| is_matching_anchor(&entries[i], name))
+            .find(|&i| is_matching_anchor(entries[i].as_ref(), name))
             .map(|i| i as i64)
             .unwrap_or(default)
     }
@@ -206,14 +206,100 @@ pub fn fetch_all_in_memory(
     Ok(result)
 }
 
+/// Like [`fetch_all_in_memory`] but operates on borrowed references, deferring
+/// the clone until the final result set. Used by `InMemoryTapeStore` to avoid
+/// a full deep-copy before filtering.
+fn fetch_all_in_memory_refs(
+    entries: &[&TapeEntry],
+    query: &TapeQuery,
+) -> Result<Vec<TapeEntry>, ConduitError> {
+    let mut start_index: usize = 0;
+    let mut end_index: Option<usize> = None;
+
+    if let Some((ref start_name, ref end_name)) = query.between_anchors {
+        let start_idx = anchor_index(entries, Some(start_name), -1, false, 0);
+        if start_idx < 0 {
+            return Err(ConduitError::new(
+                ErrorKind::NotFound,
+                format!("Anchor '{}' was not found.", start_name),
+            ));
+        }
+        let end_idx = anchor_index(entries, Some(end_name), -1, true, (start_idx + 1) as usize);
+        if end_idx < 0 {
+            return Err(ConduitError::new(
+                ErrorKind::NotFound,
+                format!("Anchor '{}' was not found.", end_name),
+            ));
+        }
+        start_index = ((start_idx + 1) as usize).min(entries.len());
+        end_index = Some(start_index.max(end_idx as usize).min(entries.len()));
+    } else if query.after_last {
+        let idx = anchor_index(entries, None, -1, false, 0);
+        if idx < 0 {
+            return Err(ConduitError::new(
+                ErrorKind::NotFound,
+                "No anchors found in tape.",
+            ));
+        }
+        start_index = ((idx + 1) as usize).min(entries.len());
+    } else if let Some(ref after_name) = query.after_anchor {
+        let idx = anchor_index(entries, Some(after_name), -1, false, 0);
+        if idx < 0 {
+            return Err(ConduitError::new(
+                ErrorKind::NotFound,
+                format!("Anchor '{}' was not found.", after_name),
+            ));
+        }
+        start_index = ((idx + 1) as usize).min(entries.len());
+    }
+
+    let sliced: &[&TapeEntry] = match end_index {
+        Some(end) => &entries[start_index..end],
+        None => &entries[start_index..],
+    };
+
+    // Filter on references first, clone only surviving entries.
+    let mut refs: Vec<&TapeEntry> = sliced.to_vec();
+
+    if let Some((ref start_date, ref end_date)) = query.between_dates {
+        let start_dt = parse_datetime_boundary(start_date, false)?;
+        let end_dt = parse_datetime_boundary(end_date, true)?;
+        if start_dt > end_dt {
+            return Err(ConduitError::new(
+                ErrorKind::InvalidInput,
+                "Start date must be earlier than or equal to end date.",
+            ));
+        }
+        refs.retain(|e| entry_in_datetime_range(e, &start_dt, &end_dt).unwrap_or(false));
+    }
+
+    if let Some(ref q) = query.query_text {
+        refs.retain(|e| entry_matches_query(e, q));
+    }
+
+    if !query.kinds.is_empty() {
+        refs.retain(|e| query.kinds.contains(&e.kind));
+    }
+
+    if let Some(limit) = query.limit {
+        refs.truncate(limit);
+    }
+
+    Ok(refs.into_iter().cloned().collect())
+}
+
 // ---------------------------------------------------------------------------
 // InMemoryTapeStore
 // ---------------------------------------------------------------------------
 
 /// In-memory tape storage (thread-safe via RwLock).
+///
+/// Entries are stored behind `Arc` so that reads (which happen on every
+/// turn) only bump a reference count instead of deep-cloning every
+/// `serde_json::Value` payload.
 #[derive(Debug, Clone)]
 pub struct InMemoryTapeStore {
-    tapes: Arc<RwLock<HashMap<String, Vec<TapeEntry>>>>,
+    tapes: Arc<RwLock<HashMap<String, Vec<Arc<TapeEntry>>>>>,
     next_ids: Arc<RwLock<HashMap<String, i64>>>,
 }
 
@@ -229,7 +315,7 @@ impl InMemoryTapeStore {
         let tapes = self.tapes.read();
         tapes
             .get(tape)
-            .map(|entries| entries.iter().map(|e| e.copy()).collect())
+            .map(|entries| entries.iter().map(|e| e.as_ref().clone()).collect())
     }
 }
 
@@ -257,8 +343,14 @@ impl TapeStore for InMemoryTapeStore {
     }
 
     fn fetch_all(&self, query: &TapeQuery) -> Result<Vec<TapeEntry>, ConduitError> {
-        let entries = self.read(&query.tape).unwrap_or_default();
-        fetch_all_in_memory(&entries, query)
+        let tapes = self.tapes.read();
+        let empty = Vec::new();
+        let arc_entries = tapes.get(&query.tape).unwrap_or(&empty);
+        // Build a temporary slice of references so fetch_all_in_memory can
+        // work with &[TapeEntry]. The actual cloning happens inside that
+        // function only for entries that survive filtering.
+        let refs: Vec<&TapeEntry> = arc_entries.iter().map(|e| e.as_ref()).collect();
+        fetch_all_in_memory_refs(&refs, query)
     }
 
     fn append(&self, tape: &str, entry: &TapeEntry) -> Result<(), ConduitError> {
@@ -266,13 +358,13 @@ impl TapeStore for InMemoryTapeStore {
         let next_id = ids.get(tape).copied().unwrap_or(1);
         ids.insert(tape.into(), next_id + 1);
 
-        let stored = TapeEntry::new(
+        let stored = Arc::new(TapeEntry::new(
             next_id,
             entry.kind,
             entry.payload.clone(),
             entry.meta.clone(),
             entry.date.clone(),
-        );
+        ));
 
         let mut tapes = self.tapes.write();
         let entries = tapes.entry(tape.into()).or_default();
