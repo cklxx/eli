@@ -47,6 +47,7 @@ parking_lot = "0.12"
 axum = { version = "0.8", optional = true }
 tempfile = "3"
 schemars = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [features]
 default = ["gateway", "tape-viewer"]
