@@ -3,6 +3,7 @@ use serde_json::Value;
 use super::api_format::ApiFormat;
 use super::errors::{ConduitError, ErrorKind};
 use super::provider_policies;
+use super::provider_registry::ProviderRegistry;
 use crate::clients::parsing::TransportKind;
 
 pub struct ProviderRuntime<'a> {
@@ -11,6 +12,7 @@ pub struct ProviderRuntime<'a> {
     api_key: Option<&'a str>,
     explicit_api_base: Option<&'a str>,
     api_format: ApiFormat,
+    registry: Option<&'a ProviderRegistry>,
 }
 
 impl<'a> ProviderRuntime<'a> {
@@ -27,7 +29,31 @@ impl<'a> ProviderRuntime<'a> {
             api_key,
             explicit_api_base,
             api_format,
+            registry: None,
         }
+    }
+
+    /// Attach a provider registry for transport and API base lookups.
+    pub fn with_registry(mut self, registry: &'a ProviderRegistry) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    /// Resolve the effective `ApiFormat` by checking the registry first,
+    /// then falling back to the explicitly configured format.
+    fn effective_api_format(&self) -> ApiFormat {
+        // Explicit (non-Auto) format always wins — the caller specifically asked for it.
+        if self.api_format != ApiFormat::Auto {
+            return self.api_format;
+        }
+        // Check the registry for a provider-level preference.
+        if let Some(reg) = self.registry
+            && let Some(cfg) = reg.get(self.provider_name)
+            && cfg.api_format != ApiFormat::Auto
+        {
+            return cfg.api_format;
+        }
+        ApiFormat::Auto
     }
 
     pub fn selected_transport(
@@ -40,7 +66,8 @@ impl<'a> ProviderRuntime<'a> {
             return Ok(forced);
         }
 
-        match self.api_format {
+        let format = self.effective_api_format();
+        match format {
             ApiFormat::Completion => Ok(TransportKind::Completion),
             ApiFormat::Messages => self.require_messages(),
             ApiFormat::Responses => self.require_responses(tools_payload, supports_responses),
@@ -61,6 +88,13 @@ impl<'a> ProviderRuntime<'a> {
 
         if self.uses_openai_codex_backend() {
             return "https://chatgpt.com/backend-api/codex".to_owned();
+        }
+
+        // Check the registry for a provider-level default.
+        if let Some(reg) = self.registry
+            && let Some(cfg) = reg.get(self.provider_name)
+        {
+            return cfg.api_base.clone();
         }
 
         Self::default_api_base(self.provider_name).to_owned()
@@ -132,6 +166,7 @@ impl<'a> ProviderRuntime<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::provider_registry::ProviderConfig;
     use super::*;
 
     #[test]
@@ -166,6 +201,79 @@ mod tests {
         assert_eq!(
             runtime.resolved_api_base(),
             "https://chatgpt.com/backend-api/codex"
+        );
+    }
+
+    #[test]
+    fn registry_api_format_overrides_auto() {
+        let mut reg = ProviderRegistry::new();
+        reg.register(
+            "my-llm",
+            ProviderConfig::new("https://api.my-llm.example.com/v1", ApiFormat::Completion),
+        );
+
+        let runtime = ProviderRuntime::new("my-llm", "some-model", None, None, ApiFormat::Auto)
+            .with_registry(&reg);
+
+        let transport = runtime.selected_transport(None, false, None).unwrap();
+        assert_eq!(transport, TransportKind::Completion);
+    }
+
+    #[test]
+    fn explicit_api_format_wins_over_registry() {
+        let mut reg = ProviderRegistry::new();
+        reg.register(
+            "my-llm",
+            ProviderConfig::new("https://api.my-llm.example.com/v1", ApiFormat::Responses),
+        );
+
+        // The caller explicitly requested Completion; the registry says Responses.
+        // The explicit format must win.
+        let runtime =
+            ProviderRuntime::new("my-llm", "some-model", None, None, ApiFormat::Completion)
+                .with_registry(&reg);
+
+        let transport = runtime.selected_transport(None, false, None).unwrap();
+        assert_eq!(transport, TransportKind::Completion);
+    }
+
+    #[test]
+    fn registry_api_base_used_when_no_explicit_base() {
+        let mut reg = ProviderRegistry::new();
+        reg.register(
+            "my-llm",
+            ProviderConfig::new("https://api.my-llm.example.com/v1", ApiFormat::Auto),
+        );
+
+        let runtime = ProviderRuntime::new("my-llm", "some-model", None, None, ApiFormat::Auto)
+            .with_registry(&reg);
+
+        assert_eq!(
+            runtime.resolved_api_base(),
+            "https://api.my-llm.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn explicit_api_base_wins_over_registry() {
+        let mut reg = ProviderRegistry::new();
+        reg.register(
+            "my-llm",
+            ProviderConfig::new("https://api.my-llm.example.com/v1", ApiFormat::Auto),
+        );
+
+        let runtime = ProviderRuntime::new(
+            "my-llm",
+            "some-model",
+            None,
+            Some("https://override.example.com/v1"),
+            ApiFormat::Auto,
+        )
+        .with_registry(&reg);
+
+        assert_eq!(
+            runtime.resolved_api_base(),
+            "https://override.example.com/v1"
         );
     }
 }

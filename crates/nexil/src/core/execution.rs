@@ -13,6 +13,7 @@ use super::client_registry::ClientRegistry;
 use super::error_classify::AttemptDecision;
 use super::errors::{ConduitError, ErrorKind};
 use super::message_norm::normalize_messages_for_api;
+use super::provider_registry::ProviderRegistry;
 use super::provider_runtime::ProviderRuntime;
 use super::response_parser::{SSE_STREAM_ERROR_PREFIX, TransportResponse};
 use crate::clients::parsing::TransportKind;
@@ -44,6 +45,7 @@ pub struct LLMCore {
     client_registry: ClientRegistry,
     api_format: ApiFormat,
     verbose: u32,
+    provider_registry: ProviderRegistry,
     #[allow(clippy::type_complexity)]
     error_classifier: Option<Box<dyn Fn(&ConduitError) -> Option<ErrorKind> + Send + Sync>>,
 }
@@ -70,7 +72,11 @@ struct ModelCandidate {
 }
 
 impl ModelCandidate {
-    fn runtime(&self, api_format: ApiFormat) -> ProviderRuntime<'_> {
+    fn runtime<'a>(
+        &'a self,
+        api_format: ApiFormat,
+        registry: &'a ProviderRegistry,
+    ) -> ProviderRuntime<'a> {
         ProviderRuntime::new(
             &self.provider_name,
             &self.model_id,
@@ -78,6 +84,7 @@ impl ModelCandidate {
             self.api_base.as_deref(),
             api_format,
         )
+        .with_registry(registry)
     }
 }
 
@@ -111,8 +118,19 @@ impl LLMCore {
             client_registry: ClientRegistry::new(),
             api_format: api_format.into(),
             verbose,
+            provider_registry: ProviderRegistry::new(),
             error_classifier: None,
         }
+    }
+
+    /// Replace the provider registry.
+    pub fn set_provider_registry(&mut self, registry: ProviderRegistry) {
+        self.provider_registry = registry;
+    }
+
+    /// Access the provider registry.
+    pub fn provider_registry(&self) -> &ProviderRegistry {
+        &self.provider_registry
     }
 
     pub fn with_error_classifier(
@@ -398,7 +416,7 @@ impl LLMCore {
         reasoning_effort: &Option<Value>,
         kwargs: &serde_json::Map<String, Value>,
     ) -> Result<PreparedAttempt, ConduitError> {
-        let runtime = candidate.runtime(self.api_format);
+        let runtime = candidate.runtime(self.api_format, &self.provider_registry);
         let transport = runtime.selected_transport(tools_payload.as_deref(), false, None)?;
         let resolved_api_base = runtime.resolved_api_base();
         let request = Self::build_transport_request(

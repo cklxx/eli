@@ -6,6 +6,7 @@ use crate::auth::APIKeyResolver;
 use crate::core::api_format::ApiFormat;
 use crate::core::errors::{ConduitError, ErrorKind};
 use crate::core::execution::{ApiBaseConfig, ApiKeyConfig, LLMCore};
+use crate::core::provider_registry::{ProviderConfig, ProviderRegistry};
 use crate::tape::{
     AsyncTapeManager, AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore, TapeContext,
 };
@@ -35,6 +36,7 @@ pub struct LLMBuilder {
     stream_filter: Option<StreamEventFilter>,
     spill_dir: Option<std::path::PathBuf>,
     context_window: Option<usize>,
+    provider_registry: Option<ProviderRegistry>,
 }
 
 impl LLMBuilder {
@@ -57,6 +59,7 @@ impl LLMBuilder {
             stream_filter: None,
             spill_dir: None,
             context_window: None,
+            provider_registry: None,
         }
     }
 
@@ -156,6 +159,21 @@ impl LLMBuilder {
         self
     }
 
+    /// Replace the entire provider registry.
+    pub fn provider_registry(mut self, registry: ProviderRegistry) -> Self {
+        self.provider_registry = Some(registry);
+        self
+    }
+
+    /// Register a single custom provider. If no registry has been set yet, one
+    /// is created with the built-in defaults first.
+    pub fn register_provider(mut self, name: impl Into<String>, config: ProviderConfig) -> Self {
+        self.provider_registry
+            .get_or_insert_with(ProviderRegistry::new)
+            .register(name, config);
+        self
+    }
+
     /// Build the [`LLM`] instance.
     pub fn build(self) -> Result<LLM, ConduitError> {
         let verbose = self.verbose.unwrap_or(0);
@@ -199,7 +217,7 @@ impl LLMBuilder {
 
         let api_format = self.api_format.unwrap_or_default();
 
-        let core = LLMCore::new(
+        let mut core = LLMCore::new(
             resolved_provider,
             resolved_model,
             self.fallback_models.unwrap_or_default(),
@@ -209,6 +227,9 @@ impl LLMBuilder {
             api_format,
             verbose,
         );
+        if let Some(registry) = self.provider_registry {
+            core.set_provider_registry(registry);
+        }
 
         let context = self.context;
 
