@@ -28,8 +28,8 @@ pub enum HookError {
         hook_point: &'static str,
         source: anyhow::Error,
     },
-    #[error("hook panicked in plugin '{0}'")]
-    Panic(String),
+    #[error("hook panicked in plugin '{plugin}': {message}")]
+    Panic { plugin: String, message: String },
 }
 
 impl HookError {
@@ -47,14 +47,26 @@ impl HookError {
     }
 }
 
+/// Extract a human-readable message from a `catch_unwind` panic payload.
+fn panic_payload_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 /// Iterate plugins, call an async method, and swallow any panics.
 macro_rules! call_notify_all {
     ($iter:expr, $hook_name:literal, |$p:ident| $call:expr) => {
         for $p in $iter {
             let name = $p.plugin_name();
             let result = std::panic::AssertUnwindSafe($call).catch_unwind().await;
-            if result.is_err() {
-                tracing::error!(plugin = %name, concat!("hook.", $hook_name, " panicked"));
+            if let Err(panic_info) = result {
+                let msg = panic_payload_message(&panic_info);
+                tracing::error!(plugin = %name, panic.message = %msg, concat!("hook.", $hook_name, " panicked"));
             }
         }
     };
@@ -65,8 +77,9 @@ macro_rules! call_sync_all {
     ($iter:expr, $hook_name:literal, |$p:ident| $call:expr) => {
         for $p in $iter {
             let name = $p.plugin_name();
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $call)).is_err() {
-                tracing::error!(plugin = %name, concat!("hook.", $hook_name, " panicked"));
+            if let Err(panic_info) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $call)) {
+                let msg = panic_payload_message(&panic_info);
+                tracing::error!(plugin = %name, panic.message = %msg, concat!("hook.", $hook_name, " panicked"));
             }
         }
     };
@@ -386,7 +399,10 @@ impl HookRuntime {
                     return Some(decision);
                 }
                 Ok(None) => {}
-                Err(_) => tracing::error!(plugin = %name, "hook.classify_inbound panicked"),
+                Err(panic_info) => {
+                    let msg = panic_payload_message(&panic_info);
+                    tracing::error!(plugin = %name, panic.message = %msg, "hook.classify_inbound panicked");
+                }
             }
         }
         None
@@ -403,7 +419,10 @@ impl HookRuntime {
             })) {
                 Ok(Some(prompt)) => return Some(prompt),
                 Ok(None) => {}
-                Err(_) => tracing::error!(plugin = %name, "hook.build_system_prompt panicked"),
+                Err(panic_info) => {
+                    let msg = panic_payload_message(&panic_info);
+                    tracing::error!(plugin = %name, panic.message = %msg, "hook.build_system_prompt panicked");
+                }
             }
         }
         None
@@ -432,8 +451,9 @@ impl HookRuntime {
                             None
                         }
                         Ok(nexil::ToolAction::Replace(wrapped)) => Some(wrapped),
-                        Err(_) => {
-                            tracing::error!(plugin = %name, "hook.wrap_tool panicked");
+                        Err(panic_info) => {
+                            let msg = panic_payload_message(&panic_info);
+                            tracing::error!(plugin = %name, panic.message = %msg, "hook.wrap_tool panicked");
                             Some(tool)
                         }
                     }
@@ -470,9 +490,10 @@ impl HookRuntime {
                     tracing::warn!(plugin = %name, error = %e, "hook.resolve_session failed");
                     return Err(HookError::wrap(name.to_owned(), "resolve_session", e));
                 }
-                Err(_) => {
-                    tracing::warn!(plugin = %name, "hook.resolve_session panicked");
-                    return Err(HookError::Panic(name.to_owned()));
+                Err(panic_info) => {
+                    let msg = panic_payload_message(&panic_info);
+                    tracing::warn!(plugin = %name, panic.message = %msg, "hook.resolve_session panicked");
+                    return Err(HookError::Panic { plugin: name.to_owned(), message: msg });
                 }
             }
         }
@@ -502,9 +523,10 @@ impl HookRuntime {
                     tracing::warn!(plugin = %name, error = %e, "hook.load_state failed");
                     return Err(HookError::wrap(name.to_owned(), "load_state", e));
                 }
-                Err(_) => {
-                    tracing::warn!(plugin = %name, "hook.load_state panicked");
-                    return Err(HookError::Panic(name.to_owned()));
+                Err(panic_info) => {
+                    let msg = panic_payload_message(&panic_info);
+                    tracing::warn!(plugin = %name, panic.message = %msg, "hook.load_state panicked");
+                    return Err(HookError::Panic { plugin: name.to_owned(), message: msg });
                 }
             }
         }
@@ -544,8 +566,9 @@ impl HookRuntime {
                     trace_hook_none(name, session_id, "build_user_prompt");
                     continue;
                 }
-                Err(_) => {
-                    tracing::error!(plugin = %name, session_id = %session_id, "hook.build_user_prompt panicked");
+                Err(panic_info) => {
+                    let msg = panic_payload_message(&panic_info);
+                    tracing::error!(plugin = %name, session_id = %session_id, panic.message = %msg, "hook.build_user_prompt panicked");
                     continue;
                 }
             }
@@ -584,9 +607,10 @@ impl HookRuntime {
                     tracing::warn!(plugin = %name, error = %e, "hook.run_model failed");
                     return Err(HookError::wrap(name.to_owned(), "run_model", e));
                 }
-                Err(_) => {
-                    tracing::warn!(plugin = %name, "hook.run_model panicked");
-                    return Err(HookError::Panic(name.to_owned()));
+                Err(panic_info) => {
+                    let msg = panic_payload_message(&panic_info);
+                    tracing::warn!(plugin = %name, panic.message = %msg, "hook.run_model panicked");
+                    return Err(HookError::Panic { plugin: name.to_owned(), message: msg });
                 }
             }
         }
@@ -614,8 +638,9 @@ impl HookRuntime {
             .await;
             match result {
                 Ok(()) => trace_hook_return(name, session_id, "save_state", "ok"),
-                Err(_) => {
-                    tracing::error!(plugin = %name, "hook.save_state panicked");
+                Err(panic_info) => {
+                    let msg = panic_payload_message(&panic_info);
+                    tracing::error!(plugin = %name, panic.message = %msg, "hook.save_state panicked");
                 }
             }
         }
@@ -653,8 +678,9 @@ impl HookRuntime {
                     results.push(batch);
                 }
                 Ok(None) => trace_hook_none(name, session_id, "render_outbound"),
-                Err(_) => {
-                    tracing::error!(plugin = %name, "hook.render_outbound panicked");
+                Err(panic_info) => {
+                    let msg = panic_payload_message(&panic_info);
+                    tracing::error!(plugin = %name, panic.message = %msg, "hook.render_outbound panicked");
                 }
             }
         }
@@ -692,8 +718,9 @@ impl HookRuntime {
                     );
                 }
                 Ok(None) => trace_hook_none(name, session_id, "dispatch_outbound"),
-                Err(_) => {
-                    tracing::error!(plugin = %name, "hook.dispatch_outbound panicked");
+                Err(panic_info) => {
+                    let msg = panic_payload_message(&panic_info);
+                    tracing::error!(plugin = %name, panic.message = %msg, "hook.dispatch_outbound panicked");
                 }
             }
         }
@@ -725,7 +752,10 @@ impl HookRuntime {
             })) {
                 Ok(Some(store)) => return Some(store),
                 Ok(None) => {}
-                Err(_) => tracing::error!(plugin = %name, "hook.provide_tape_store panicked"),
+                Err(panic_info) => {
+                    let msg = panic_payload_message(&panic_info);
+                    tracing::error!(plugin = %name, panic.message = %msg, "hook.provide_tape_store panicked");
+                }
             }
         }
         None
@@ -918,7 +948,7 @@ mod tests {
         let result = rt.call_resolve_session(&msg).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, HookError::Panic(ref name) if name == "panic-session"));
+        assert!(matches!(err, HookError::Panic { ref plugin, .. } if plugin == "panic-session"));
     }
 
     // -- call_build_system_prompt (first-result sync) -------------------------
@@ -1071,7 +1101,7 @@ mod tests {
         let result = rt.call_load_state(&msg, "s1").await;
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), HookError::Panic(ref name) if name == "panic-load-state")
+            matches!(result.unwrap_err(), HookError::Panic { ref plugin, .. } if plugin == "panic-load-state")
         );
     }
 
@@ -1136,7 +1166,7 @@ mod tests {
         let result = rt.call_run_model(&prompt, "s1", &state).await;
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), HookError::Panic(ref name) if name == "panic-run-model")
+            matches!(result.unwrap_err(), HookError::Panic { ref plugin, .. } if plugin == "panic-run-model")
         );
     }
 
