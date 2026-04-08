@@ -876,8 +876,11 @@ mod tests {
         // FirstStatePlugin registered first, SecondStatePlugin registered second.
         fw.register_plugin("first", Arc::new(FirstStatePlugin) as Arc<dyn EliHookSpec>)
             .await;
-        fw.register_plugin("second", Arc::new(SecondStatePlugin) as Arc<dyn EliHookSpec>)
-            .await;
+        fw.register_plugin(
+            "second",
+            Arc::new(SecondStatePlugin) as Arc<dyn EliHookSpec>,
+        )
+        .await;
 
         let rt = fw.hook_runtime_snapshot();
         let msg = json!({"content": "hello"});

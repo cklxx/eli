@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::auth::APIKeyResolver;
 use crate::core::api_format::ApiFormat;
 use crate::core::errors::{ConduitError, ErrorKind};
-use crate::core::execution::{ApiBaseConfig, ApiKeyConfig, LLMCore};
+use crate::core::execution::{ApiBaseConfig, ApiKeyConfig, LLMCore, OAuthTokenRefresher};
 use crate::core::provider_registry::{ProviderConfig, ProviderRegistry};
 use crate::tape::{
     AsyncTapeManager, AsyncTapeStore, AsyncTapeStoreAdapter, InMemoryTapeStore, TapeContext,
@@ -37,6 +37,7 @@ pub struct LLMBuilder {
     spill_dir: Option<std::path::PathBuf>,
     context_window: Option<usize>,
     provider_registry: Option<ProviderRegistry>,
+    oauth_refresher: Option<OAuthTokenRefresher>,
 }
 
 impl LLMBuilder {
@@ -60,6 +61,7 @@ impl LLMBuilder {
             spill_dir: None,
             context_window: None,
             provider_registry: None,
+            oauth_refresher: None,
         }
     }
 
@@ -174,6 +176,15 @@ impl LLMBuilder {
         self
     }
 
+    /// Set an OAuth token refresher for automatic 401 retry.
+    ///
+    /// When a 401 Unauthorized is received, the refresher is called to obtain a
+    /// new API key. The request is retried at most once with the refreshed token.
+    pub fn oauth_refresher(mut self, refresher: OAuthTokenRefresher) -> Self {
+        self.oauth_refresher = Some(refresher);
+        self
+    }
+
     /// Build the [`LLM`] instance.
     pub fn build(self) -> Result<LLM, ConduitError> {
         let verbose = self.verbose.unwrap_or(0);
@@ -229,6 +240,9 @@ impl LLMBuilder {
         );
         if let Some(registry) = self.provider_registry {
             core.set_provider_registry(registry);
+        }
+        if let Some(refresher) = self.oauth_refresher {
+            core = core.with_oauth_refresher(refresher);
         }
 
         let context = self.context;
