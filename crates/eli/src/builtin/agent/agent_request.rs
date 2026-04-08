@@ -156,7 +156,8 @@ pub(super) fn create_llm(
         .api_format(settings.api_format)
         .verbose(settings.verbose as u32)
         .tape_store(tape_store)
-        .spill_dir(settings.home.join("tapes"));
+        .spill_dir(settings.home.join("tapes"))
+        .context_window(settings.context_window);
 
     if let Some(fallback_models) = settings.fallback_models.clone() {
         builder = builder.fallback_models(fallback_models);
@@ -307,6 +308,7 @@ pub(super) async fn run_tools_once(
             tape: Some(tape_name),
             tape_context,
             cancellation,
+            context_window: Some(settings.context_window),
             ..Default::default()
         })
         .await?;

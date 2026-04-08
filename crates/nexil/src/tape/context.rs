@@ -106,16 +106,40 @@ const CJK_RATIO_THRESHOLD: f64 = 0.30;
 /// Number of recent user-message rounds to keep during aggressive trimming.
 const AGGRESSIVE_TRIM_KEEP_ROUNDS: usize = 2;
 
-pub fn apply_context_budget(messages: &mut Vec<Value>) {
+/// Compute the character threshold for context trimming.
+///
+/// When `context_window` is provided (in tokens), convert to an approximate
+/// char budget:
+///   - Predominantly CJK text: `context_window * 1.5` (CJK chars ≈ 1 token each,
+///     but we allow 1.5× headroom since not all chars are CJK).
+///   - Otherwise: `context_window * 4` (ASCII/Latin chars ≈ 4 chars/token).
+///
+/// When `context_window` is `None`, fall back to the hardcoded constants.
+fn compute_char_threshold(messages: &[Value], context_window: Option<usize>) -> usize {
+    let is_cjk_heavy = cjk_content_ratio(messages) > CJK_RATIO_THRESHOLD;
+    match context_window {
+        Some(cw) => {
+            if is_cjk_heavy {
+                // CJK: ~1 token/char, use 1.5× as char budget
+                (cw as f64 * 1.5) as usize
+            } else {
+                // ASCII: ~4 chars/token
+                cw * 4
+            }
+        }
+        None => {
+            if is_cjk_heavy {
+                MAX_TOTAL_CONTEXT_CHARS_CJK
+            } else {
+                MAX_TOTAL_CONTEXT_CHARS
+            }
+        }
+    }
+}
+
+pub fn apply_context_budget(messages: &mut Vec<Value>, context_window: Option<usize>) {
     let total_chars: usize = messages.iter().map(content_char_count).sum();
-    // Bug C: use a tighter limit for CJK-heavy conversations because CJK chars
-    // are ~1 token each, so the default 400K-char budget can balloon to 400K
-    // tokens — well beyond a typical 128K context window.
-    let threshold = if cjk_content_ratio(messages) > CJK_RATIO_THRESHOLD {
-        MAX_TOTAL_CONTEXT_CHARS_CJK
-    } else {
-        MAX_TOTAL_CONTEXT_CHARS
-    };
+    let threshold = compute_char_threshold(messages, context_window);
     if total_chars > threshold {
         let before_count = messages.len();
         aggressive_trim(messages);
