@@ -19,13 +19,54 @@ use crate::types::{Envelope, MessageHandler, PromptValue, State};
 // HookError
 // ---------------------------------------------------------------------------
 
+/// Identifies which hook point an error originated from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookPoint {
+    ClassifyInbound,
+    ResolveSession,
+    LoadState,
+    BuildUserPrompt,
+    BuildSystemPrompt,
+    RunModel,
+    SaveState,
+    RenderOutbound,
+    DispatchOutbound,
+    RegisterCliCommands,
+    OnError,
+    WrapTool,
+    ProvideTapeStore,
+    ProvideChannels,
+}
+
+impl std::fmt::Display for HookPoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::ClassifyInbound => "classify_inbound",
+            Self::ResolveSession => "resolve_session",
+            Self::LoadState => "load_state",
+            Self::BuildUserPrompt => "build_user_prompt",
+            Self::BuildSystemPrompt => "build_system_prompt",
+            Self::RunModel => "run_model",
+            Self::SaveState => "save_state",
+            Self::RenderOutbound => "render_outbound",
+            Self::DispatchOutbound => "dispatch_outbound",
+            Self::RegisterCliCommands => "register_cli_commands",
+            Self::OnError => "on_error",
+            Self::WrapTool => "wrap_tool",
+            Self::ProvideTapeStore => "provide_tape_store",
+            Self::ProvideChannels => "provide_channels",
+        };
+        f.write_str(name)
+    }
+}
+
 /// Error returned by hook methods that can fail.
 #[derive(Debug, thiserror::Error)]
 pub enum HookError {
     #[error("{hook_point} failed in plugin '{plugin}': {source}")]
     Plugin {
         plugin: String,
-        hook_point: &'static str,
+        hook_point: HookPoint,
         source: anyhow::Error,
     },
     #[error("hook panicked in plugin '{plugin}': {message}")]
@@ -34,7 +75,7 @@ pub enum HookError {
 
 impl HookError {
     /// Wrap a hook error with plugin/hook-point context, extracting the inner source.
-    fn wrap(plugin: String, hook_point: &'static str, e: HookError) -> Self {
+    fn wrap(plugin: String, hook_point: HookPoint, e: HookError) -> Self {
         let source = match e {
             HookError::Plugin { source, .. } => source,
             other => anyhow::anyhow!("{other}"),
@@ -488,7 +529,7 @@ impl HookRuntime {
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(plugin = %name, error = %e, "hook.resolve_session failed");
-                    return Err(HookError::wrap(name.to_owned(), "resolve_session", e));
+                    return Err(HookError::wrap(name.to_owned(), HookPoint::ResolveSession, e));
                 }
                 Err(panic_info) => {
                     let msg = panic_payload_message(&panic_info);
@@ -521,7 +562,7 @@ impl HookRuntime {
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(plugin = %name, error = %e, "hook.load_state failed");
-                    return Err(HookError::wrap(name.to_owned(), "load_state", e));
+                    return Err(HookError::wrap(name.to_owned(), HookPoint::LoadState, e));
                 }
                 Err(panic_info) => {
                     let msg = panic_payload_message(&panic_info);
@@ -605,7 +646,7 @@ impl HookRuntime {
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(plugin = %name, error = %e, "hook.run_model failed");
-                    return Err(HookError::wrap(name.to_owned(), "run_model", e));
+                    return Err(HookError::wrap(name.to_owned(), HookPoint::RunModel, e));
                 }
                 Err(panic_info) => {
                     let msg = panic_payload_message(&panic_info);
@@ -1088,7 +1129,7 @@ mod tests {
         ) -> Result<Option<State>, HookError> {
             Err(HookError::Plugin {
                 plugin: "error-load-state".into(),
-                hook_point: "load_state",
+                hook_point: HookPoint::LoadState,
                 source: anyhow::anyhow!("state unavailable"),
             })
         }
@@ -1112,7 +1153,7 @@ mod tests {
         let result = rt.call_load_state(&msg, "s1").await;
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), HookError::Plugin { ref hook_point, .. } if *hook_point == "load_state")
+            matches!(result.unwrap_err(), HookError::Plugin { hook_point, .. } if hook_point == HookPoint::LoadState)
         );
     }
 
@@ -1152,7 +1193,7 @@ mod tests {
         ) -> Result<Option<String>, HookError> {
             Err(HookError::Plugin {
                 plugin: "error-run-model".into(),
-                hook_point: "run_model",
+                hook_point: HookPoint::RunModel,
                 source: anyhow::anyhow!("model unavailable"),
             })
         }
@@ -1178,7 +1219,7 @@ mod tests {
         let result = rt.call_run_model(&prompt, "s1", &state).await;
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), HookError::Plugin { ref hook_point, .. } if *hook_point == "run_model")
+            matches!(result.unwrap_err(), HookError::Plugin { hook_point, .. } if hook_point == HookPoint::RunModel)
         );
     }
 

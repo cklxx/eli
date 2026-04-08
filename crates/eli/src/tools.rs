@@ -12,36 +12,33 @@ pub static REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, Tool>>> =
 
 /// Cached model-ready tools (names rewritten with underscores).
 /// Populated once via `populate_model_tools_cache` after registration.
-static MODEL_TOOLS_CACHE: std::sync::LazyLock<Mutex<Vec<Tool>>> =
-    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+/// Uses `OnceLock` so reads are lock-free after the single write.
+static MODEL_TOOLS_CACHE: std::sync::OnceLock<Vec<Tool>> = std::sync::OnceLock::new();
 
 /// Populate the model-tools cache from the current REGISTRY contents.
-/// Should be called once after `register_builtin_tools()`.
+/// Should be called once after `register_builtin_tools()`. Subsequent calls are no-ops.
 pub fn populate_model_tools_cache() {
-    let reg = REGISTRY.lock();
-    let cached: Vec<Tool> = reg
-        .values()
-        .map(|tool| {
-            let mut cloned = tool.clone();
-            cloned.name = to_model_name(&cloned.name);
-            cloned
-        })
-        .collect();
-    let mut cache = MODEL_TOOLS_CACHE.lock();
-    *cache = cached;
+    MODEL_TOOLS_CACHE.get_or_init(|| {
+        let reg = REGISTRY.lock();
+        reg.values()
+            .map(|tool| {
+                let mut cloned = tool.clone();
+                cloned.name = to_model_name(&cloned.name);
+                cloned
+            })
+            .collect()
+    });
 }
 
 /// Return the cached model-ready tool list. Falls back to dynamic generation
 /// if the cache is empty (e.g. in tests that don't call registration).
 pub fn model_tools_cached() -> Vec<Tool> {
-    let cache = MODEL_TOOLS_CACHE.lock();
-    if cache.is_empty() {
-        drop(cache);
-        // Fallback: build from current registry.
+    if let Some(cached) = MODEL_TOOLS_CACHE.get() {
+        cached.clone()
+    } else {
+        // Fallback: build from current registry (tests that skip registration).
         let reg = REGISTRY.lock();
         model_tools(&reg.values().cloned().collect::<Vec<_>>())
-    } else {
-        cache.clone()
     }
 }
 
