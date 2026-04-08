@@ -1,6 +1,6 @@
 [package]
 name = "eli"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2024"
 description = "Ease Lives Instantly — hook-first AI agent framework with multi-channel support"
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ name = "eli"
 path = "src/main.rs"
 
 [dependencies]
-nexil = { version = "0.7.0", path = "../nexil" }
+nexil = { version = "0.8.0", path = "../nexil" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

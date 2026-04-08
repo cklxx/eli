@@ -6,6 +6,38 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [0.5.0] — 2026-04-08
+
+### Breaking
+- **HookPoint enum** — `HookError::Plugin.hook_point` changed from `&'static str` to `HookPoint` enum
+- **nexil v0.8.0** — `apply_context_budget()` now accepts `context_window: Option<usize>` parameter
+
+### Added
+- **Model-aware context budget** — tape trimming uses model's actual context window instead of hardcoded 400K/200K char limits
+- **Tool loop context budget** — stops at 80% of context window; iteration cap configurable via `ChatRequest.max_tool_iterations`
+- **Streaming cancellation** — SSE streaming supports `CancellationToken`; `/stop` actually stops mid-stream
+- **Runtime provider registration** — `ProviderRegistry` allows custom LLM providers without source modification
+- **OAuth auto-refresh** — automatic token refresh on 401 with single-flight guard
+- **Integration tests** — 5 Rust integration tests for full framework pipeline
+- **Context truncation telemetry** — `tracing::warn!` emitted when conversation history is trimmed
+
+### Changed
+- **parking_lot** — all 47 `std::sync` lock-poisoning sites replaced with `parking_lot` (never poisons)
+- **Hook panic payloads** — `catch_unwind` handlers extract and log panic messages
+- **OnceLock tool cache** — lock-free reads via `OnceLock` replacing `Mutex` + clone per turn
+- **SSE byte buffer** — `SseDecoder` uses `Vec<u8>` internally, fixing multibyte UTF-8 corruption
+- **Arc tape entries** — `InMemoryTapeStore` uses `Arc<TapeEntry>` for O(1) clone on read
+- **HookPoint enum** — stringly-typed hook names replaced with type-safe enum
+- **State merge docs** — precedence documented and tested (last-registered wins)
+
+### Fixed
+- SSE multibyte UTF-8 characters split across chunks no longer corrupted
+- `.env` loaded once in `main()` instead of 4 redundant call sites
+- `eli_home()` consolidated to single source in `config.rs`
+- `populate_model_tools_cache()` now wired at startup (was never called)
+
+---
+
 ## [0.4.1] — 2026-03-26
 
 ### Added
