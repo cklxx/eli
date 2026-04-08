@@ -333,6 +333,13 @@ impl EliFramework {
         }
     }
 
+    /// Build the merged state for one turn.
+    ///
+    /// **State merge precedence**: `call_load_state` collects results in
+    /// forward registration order, then this method iterates them in
+    /// *reverse* and uses `or_insert` — so **last-registered plugin's
+    /// value wins** for duplicate keys, consistent with first-result
+    /// hooks (e.g. `resolve_session`, `build_system_prompt`).
     async fn build_state(
         &self,
         rt: &HookRuntime,
@@ -817,6 +824,72 @@ mod tests {
         let result = turn.await.unwrap().unwrap();
         assert_eq!(result.session_id, "lock-test");
         assert!(fw.plugin_status().await.contains_key("late"));
+    }
+
+    // -- state merge precedence ------------------------------------------------
+
+    /// Plugin that provides a state key "shared" = "first" and "only_first" = "yes".
+    struct FirstStatePlugin;
+
+    #[async_trait]
+    impl EliHookSpec for FirstStatePlugin {
+        fn plugin_name(&self) -> &str {
+            "first-state"
+        }
+
+        async fn load_state(
+            &self,
+            _message: &Envelope,
+            _session_id: &str,
+        ) -> Result<Option<State>, HookError> {
+            let mut s = State::new();
+            s.insert("shared".into(), Value::String("first".into()));
+            s.insert("only_first".into(), Value::String("yes".into()));
+            Ok(Some(s))
+        }
+    }
+
+    /// Plugin that provides a state key "shared" = "second" and "only_second" = "yes".
+    struct SecondStatePlugin;
+
+    #[async_trait]
+    impl EliHookSpec for SecondStatePlugin {
+        fn plugin_name(&self) -> &str {
+            "second-state"
+        }
+
+        async fn load_state(
+            &self,
+            _message: &Envelope,
+            _session_id: &str,
+        ) -> Result<Option<State>, HookError> {
+            let mut s = State::new();
+            s.insert("shared".into(), Value::String("second".into()));
+            s.insert("only_second".into(), Value::String("yes".into()));
+            Ok(Some(s))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_state_last_registered_wins_for_duplicate_keys() {
+        let fw = EliFramework::new();
+        // FirstStatePlugin registered first, SecondStatePlugin registered second.
+        fw.register_plugin("first", Arc::new(FirstStatePlugin) as Arc<dyn EliHookSpec>)
+            .await;
+        fw.register_plugin("second", Arc::new(SecondStatePlugin) as Arc<dyn EliHookSpec>)
+            .await;
+
+        let rt = fw.hook_runtime_snapshot();
+        let msg = json!({"content": "hello"});
+        let state = fw
+            .build_state(&rt, &msg, "test-session", std::path::Path::new("/tmp"))
+            .await;
+
+        // Last-registered plugin wins for the duplicate "shared" key.
+        assert_eq!(state["shared"], Value::String("second".into()));
+        // Non-overlapping keys are preserved from both plugins.
+        assert_eq!(state["only_first"], Value::String("yes".into()));
+        assert_eq!(state["only_second"], Value::String("yes".into()));
     }
 
     // -- hook_report ----------------------------------------------------------
