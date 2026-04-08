@@ -62,6 +62,7 @@ impl BuiltinImpl {
     /// Create a new `BuiltinImpl`, registering builtin tools.
     pub fn new() -> Self {
         tools::register_builtin_tools();
+        crate::tools::populate_model_tools_cache();
         let home = settings::AgentSettings::from_env().home;
         let session_ttl = Duration::from_secs(
             std::env::var("ELI_SESSION_TTL_SECS")
