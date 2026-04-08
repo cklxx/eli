@@ -468,7 +468,7 @@ impl EliHookSpec for BuiltinImpl {
                 tracing::error!(error = %e, session_id = %session_id, "run_model failed");
                 Err(crate::hooks::HookError::Plugin {
                     plugin: self.plugin_name().to_owned(),
-                    hook_point: "run_model",
+                    hook_point: crate::hooks::HookPoint::RunModel,
                     source: e.into(),
                 })
             }
