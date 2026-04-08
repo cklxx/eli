@@ -101,8 +101,10 @@
     }
     nav a:hover { color: var(--text); border-color: var(--line); background: rgba(255,255,255,0.03); }
     .equation {
+      margin: 0;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 15px; color: #d9e8ff; background: rgba(5, 10, 18, 0.65);
+      white-space: pre-wrap;
       border: 1px solid rgba(122, 165, 255, 0.18); border-radius: 16px; padding: 16px; overflow-x: auto;
     }
     ul.clean, ol.clean { margin: 0; padding-left: 20px; color: var(--muted); }
@@ -234,13 +236,13 @@
         <h2>低秩投影分解：它到底分解了什么</h2>
         <p class="sub">下面是工程上最该抓住的形式。具体符号在不同实现里会略有差异，但结构本质是一样的。</p>
         <div class="card">
-          <div class="equation">原始：K = xW_k,  V = xW_v
+          <pre class="equation">原始：K = xW_k,  V = xW_v
 
 低秩分解后：W_k ≈ A_k B_k,  W_v ≈ A_v B_v
 其中 A ∈ R^{d_model × r}, B ∈ R^{r × d_k 或 d_v}, 且 r << d_model
 
 于是：z_k = xA_k,  K ≈ z_k B_k
-      z_v = xA_v,  V ≈ z_v B_v</div>
+      z_v = xA_v,  V ≈ z_v B_v</pre>
           <p style="margin-top:14px;">PALU 的关键不在“低秩”三个字本身，而在<strong>缓存哪一段</strong>：缓存的不是完整 <code>K/V</code>，而是维度更小的 <code>z_k / z_v</code> 这类中间态，所以内存占用按 rank 比例下降。</p>
         </div>
         <div class="grid-3" style="margin-top:18px;">
@@ -318,7 +320,7 @@
           </div>
           <div class="card">
             <h3>一句话区分 QLoRA 和 PALU</h3>
-            <p><strong>QLoRA：</strong>为训练内存服务。<br/><strong>PALU：</strong>���推理缓存内存服务。方向不同，系统位置也不同。</p>
+            <p><strong>QLoRA：</strong>为训练内存服务。<br/><strong>PALU：</strong>为推理缓存内存服务。方向不同，系统位置也不同。</p>
           </div>
         </div>
       </div>

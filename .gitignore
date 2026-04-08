@@ -29,6 +29,12 @@ test-results/
 
 autoresearch-results.tsv
 tiny16mb/
-site/
+site/*.html
+!site/index.html
+!site/palu-low-rank-projection.html
+site/*.bak
+site/*.orig
+site/*.tmp
+site/*.swp
 .context/
 .claude/worktrees/
