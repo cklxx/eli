@@ -10,7 +10,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from skill_runner.env import load_repo_dotenv
+from skill_runner.env import eli_home_dir, load_repo_dotenv
 from skill_runner.cli_contract import parse_cli_args, render_result
 
 load_repo_dotenv(__file__)
@@ -28,13 +28,13 @@ def _resolve_soul_path(args: dict[str, Any]) -> Path:
     if explicit:
         return Path(explicit)
 
-    env_path = str(os.environ.get("ALEX_SOUL_PATH", "")).strip()
+    env_path = str(os.environ.get("ELI_SOUL_PATH", "")).strip()
     if env_path:
         return Path(env_path)
 
-    repo_candidate = Path("docs/reference/SOUL.md")
-    if repo_candidate.exists():
-        return repo_candidate
+    for candidate in (Path(".agents/SOUL.md"), eli_home_dir() / "SOUL.md", Path("SOUL.md")):
+        if candidate.exists():
+            return candidate
     return Path("SOUL.md")
 
 
@@ -43,8 +43,8 @@ def _validate_soul_target(path: Path) -> bool:
 
 
 def _checkpoint_dir() -> Path:
-    root = os.environ.get("ALEX_SOUL_CHECKPOINT_DIR", "~/.alex/soul-checkpoints")
-    directory = Path(os.path.expanduser(root))
+    root = os.environ.get("ELI_SOUL_CHECKPOINT_DIR", str(eli_home_dir() / "soul-checkpoints"))
+    directory = Path(root).expanduser()
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 

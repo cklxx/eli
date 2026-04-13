@@ -11,6 +11,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from skill_runner.env import eli_home_dir
+
 _TOKEN_CACHE: dict[str, Any] = {
     "token": "",
     "expires_at": 0.0,
@@ -32,8 +34,8 @@ def _strip_quotes(value: str) -> str:
     return value
 
 
-def _load_alex_lark_credentials() -> tuple[str, str]:
-    config_path = Path.home() / ".alex" / "config.yaml"
+def _load_eli_lark_credentials() -> tuple[str, str]:
+    config_path = eli_home_dir() / "config.yaml"
     if not config_path.is_file():
         return "", ""
 
@@ -68,7 +70,7 @@ def _resolve_lark_credentials() -> tuple[str, str]:
     if app_id and app_secret:
         return app_id, app_secret
 
-    cfg_app_id, cfg_app_secret = _load_alex_lark_credentials()
+    cfg_app_id, cfg_app_secret = _load_eli_lark_credentials()
     return app_id or cfg_app_id, app_secret or cfg_app_secret
 
 

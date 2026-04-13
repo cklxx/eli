@@ -23,7 +23,7 @@ requires_approval: false
 
 # soul-self-evolution
 
-Perform controlled updates to `SOUL.md` (or `docs/reference/SOUL.md`). Only evolvable sections can be modified. Every change creates a checkpoint that supports one-click rollback.
+Perform controlled updates to `SOUL.md` (typically `.agents/SOUL.md` or `~/.eli/SOUL.md`). Only evolvable sections can be modified. Every change creates a checkpoint that supports one-click rollback.
 
 ## Quick Reference
 
@@ -36,7 +36,7 @@ Perform controlled updates to `SOUL.md` (or `docs/reference/SOUL.md`). Only evol
 
 ```bash
 # Apply a change to an evolvable section
-python3 $SKILL_DIR/run.py apply --path docs/reference/SOUL.md --changes '[{"section":"## Collaboration Preferences","content":"- Keep updates concise."}]'
+python3 $SKILL_DIR/run.py apply --path .agents/SOUL.md --changes '[{"section":"## Collaboration Preferences","content":"- Keep updates concise."}]'
 
 # List available rollback checkpoints
 python3 $SKILL_DIR/run.py list_checkpoints

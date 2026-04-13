@@ -19,6 +19,7 @@ use crate::builtin::config::eli_home;
 use crate::builtin::shell_manager::shell_manager;
 use crate::builtin::tape::TapeService;
 use crate::envelope::ValueExt;
+use crate::evolution::{CandidateStatus, EvolutionStore};
 use crate::sidecar_contract::{SidecarNoticeRequest, SidecarToolRequest, contract_version};
 use crate::skills::discover_skills;
 use crate::tools::{REGISTRY, shorten_text};
@@ -286,6 +287,9 @@ fn builtin_tools() -> Vec<Tool> {
         tool_fs_write(),
         tool_fs_edit(),
         tool_skill(),
+        tool_evolution_capture(),
+        tool_evolution_list(),
+        tool_evolution_show(),
         tool_tape_info(),
         tool_tape_search(),
         tool_tape_reset(),
@@ -571,6 +575,10 @@ fn invalid_input(error: anyhow::Error) -> ConduitError {
     ConduitError::new(ErrorKind::InvalidInput, error.to_string())
 }
 
+fn tool_error(error: anyhow::Error) -> ConduitError {
+    ConduitError::new(ErrorKind::Tool, error.to_string())
+}
+
 /// Build a short, human-readable notice from the tool name and its arguments.
 ///
 /// Examples: "读 src/main.rs", "执行 cargo build", "搜索 tape: error",
@@ -598,6 +606,9 @@ fn auto_notice(tool_name: &str, args: &Value) -> String {
         "fs.read" => format!("读 {}", shorten(primary("path"), 60)),
         "fs.write" => format!("写 {}", shorten(primary("path"), 60)),
         "fs.edit" => format!("编辑 {}", shorten(primary("path"), 60)),
+        "evolution.capture" => format!("记录演进候选: {}", shorten(primary("title"), 40)),
+        "evolution.list" => "列出演进候选".to_owned(),
+        "evolution.show" => format!("查看演进候选 {}", primary("id")),
         "web.fetch" => format!("获取 {}", shorten(primary("url"), 60)),
         "tape.search" => format!("搜索 tape: {}", shorten(primary("query"), 40)),
         "tape.info" => "查看 tape 信息".to_owned(),
@@ -1327,6 +1338,193 @@ fn tool_skill() -> Tool {
             })
         },
     )
+}
+
+fn tool_evolution_capture() -> Tool {
+    Tool::with_context(
+        "evolution.capture",
+        "Capture a governed self-evolution candidate for later review.\n\nExamples: save a stable collaboration rule learned during a task, draft a reusable procedure as a skill candidate, record a prompt refinement without applying it immediately.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["prompt_rule", "skill"]},
+                "title": {"type": "string"},
+                "summary": {"type": "string"},
+                "content": {"type": "string"},
+                "skill_name": {"type": "string", "description": "Required when kind=skill."}
+            },
+            "required": ["kind", "title", "summary", "content"]
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(run_evolution_capture(args, ctx))
+        },
+    )
+}
+
+fn tool_evolution_list() -> Tool {
+    Tool::with_context(
+        "evolution.list",
+        "List self-evolution candidates in the current workspace.\n\nExamples: review pending prompt-rule drafts, inspect promoted skill drafts, check whether a remembered workflow still needs approval.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["pending", "promoted", "rejected"]}
+            }
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(run_evolution_list(args, ctx))
+        },
+    )
+}
+
+fn tool_evolution_show() -> Tool {
+    Tool::with_context(
+        "evolution.show",
+        "Show a self-evolution candidate in full.\n\nExamples: inspect the exact text of a pending prompt rule, read the body of a skill draft before approving it, verify where a promoted candidate landed.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"}
+            },
+            "required": ["id"]
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(run_evolution_show(args, ctx))
+        },
+    )
+}
+
+async fn run_evolution_capture(args: Value, ctx: Option<ToolContext>) -> ToolResult {
+    maybe_send_user_facing_notice("evolution.capture", ctx.as_ref(), &args).await;
+    let kind = args.require_str_field("kind").map_err(invalid_input)?;
+    let title = args.require_str_field("title").map_err(invalid_input)?;
+    let summary = args.require_str_field("summary").map_err(invalid_input)?;
+    let content = args.require_str_field("content").map_err(invalid_input)?;
+    let store = EvolutionStore::new(workspace_from_context(ctx.as_ref()));
+    let tape = ctx.as_ref().and_then(|item| item.tape.clone());
+    let candidate = capture_candidate(&store, kind, title, summary, content, &args, tape)?;
+    ok_val(format!("candidate captured: {} ({kind})", candidate.id))
+}
+
+async fn run_evolution_list(args: Value, ctx: Option<ToolContext>) -> ToolResult {
+    maybe_send_user_facing_notice("evolution.list", ctx.as_ref(), &args).await;
+    let store = EvolutionStore::new(workspace_from_context(ctx.as_ref()));
+    let status = parse_candidate_status(args.get_str_field("status"))?;
+    let candidates = store.list_candidates().map_err(tool_error)?;
+    let filtered = filter_candidates(candidates, status);
+    ok_val(render_candidate_list(&filtered))
+}
+
+async fn run_evolution_show(args: Value, ctx: Option<ToolContext>) -> ToolResult {
+    maybe_send_user_facing_notice("evolution.show", ctx.as_ref(), &args).await;
+    let id = args.require_str_field("id").map_err(invalid_input)?;
+    let store = EvolutionStore::new(workspace_from_context(ctx.as_ref()));
+    let candidate = store.read_candidate(id).map_err(tool_error)?;
+    ok_val(render_candidate_detail(&candidate))
+}
+
+fn workspace_from_context(ctx: Option<&ToolContext>) -> PathBuf {
+    ctx.and_then(|item| item.state.get(RUNTIME_WORKSPACE_KEY))
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
+fn capture_candidate(
+    store: &EvolutionStore,
+    kind: &str,
+    title: &str,
+    summary: &str,
+    content: &str,
+    args: &Value,
+    tape: Option<String>,
+) -> Result<crate::evolution::EvolutionCandidate, ConduitError> {
+    match kind {
+        "prompt_rule" => store
+            .capture_rule(title, summary, content, tape, "tool")
+            .map_err(tool_error),
+        "skill" => capture_skill_candidate(store, title, summary, content, args, tape),
+        _ => Err(ConduitError::new(
+            ErrorKind::InvalidInput,
+            "kind must be 'prompt_rule' or 'skill'",
+        )),
+    }
+}
+
+fn capture_skill_candidate(
+    store: &EvolutionStore,
+    title: &str,
+    summary: &str,
+    content: &str,
+    args: &Value,
+    tape: Option<String>,
+) -> Result<crate::evolution::EvolutionCandidate, ConduitError> {
+    let skill_name = args
+        .require_str_field("skill_name")
+        .map_err(invalid_input)?;
+    store
+        .capture_skill(skill_name, title, summary, content, tape, "tool")
+        .map_err(tool_error)
+}
+
+fn parse_candidate_status(raw: Option<&str>) -> Result<Option<CandidateStatus>, ConduitError> {
+    match raw {
+        None | Some("") => Ok(None),
+        Some("pending") => Ok(Some(CandidateStatus::Pending)),
+        Some("promoted") => Ok(Some(CandidateStatus::Promoted)),
+        Some("rejected") => Ok(Some(CandidateStatus::Rejected)),
+        Some(_) => Err(ConduitError::new(
+            ErrorKind::InvalidInput,
+            "status must be pending, promoted, or rejected",
+        )),
+    }
+}
+
+fn filter_candidates(
+    candidates: Vec<crate::evolution::EvolutionCandidate>,
+    status: Option<CandidateStatus>,
+) -> Vec<crate::evolution::EvolutionCandidate> {
+    candidates
+        .into_iter()
+        .filter(|candidate| status.is_none_or(|expected| candidate.status == expected))
+        .collect()
+}
+
+fn render_candidate_list(candidates: &[crate::evolution::EvolutionCandidate]) -> String {
+    if candidates.is_empty() {
+        return "No evolution candidates.".to_owned();
+    }
+    candidates
+        .iter()
+        .map(candidate_summary_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn candidate_summary_line(candidate: &crate::evolution::EvolutionCandidate) -> String {
+    format!(
+        "{}  {}  {}",
+        candidate.id,
+        candidate.status_string(),
+        candidate.title
+    )
+}
+
+fn render_candidate_detail(candidate: &crate::evolution::EvolutionCandidate) -> String {
+    [
+        format!("id: {}", candidate.id),
+        format!("status: {}", candidate.status_string()),
+        format!("kind: {}", candidate.kind_string()),
+        format!("title: {}", candidate.title),
+        format!("summary: {}", candidate.summary),
+        format!(
+            "promoted_to: {}",
+            candidate.promoted_to.clone().unwrap_or_default()
+        ),
+        String::new(),
+        candidate.content.clone(),
+    ]
+    .join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -3117,6 +3315,9 @@ mod tests {
             tool_fs_read(),
             tool_fs_write(),
             tool_fs_edit(),
+            tool_evolution_capture(),
+            tool_evolution_list(),
+            tool_evolution_show(),
             tool_tape_info(),
             tool_tape_search(),
             tool_tape_reset(),
@@ -3151,6 +3352,15 @@ mod tests {
         assert_eq!(
             auto_notice("fs.edit", &json!({"path": "lib.rs"})),
             "编辑 lib.rs"
+        );
+        assert_eq!(
+            auto_notice("evolution.capture", &json!({"title": "Keep updates terse"})),
+            "记录演进候选: Keep updates terse"
+        );
+        assert_eq!(auto_notice("evolution.list", &json!({})), "列出演进候选");
+        assert_eq!(
+            auto_notice("evolution.show", &json!({"id": "cand123"})),
+            "查看演进候选 cand123"
         );
         assert_eq!(
             auto_notice("web.fetch", &json!({"url": "https://example.com"})),

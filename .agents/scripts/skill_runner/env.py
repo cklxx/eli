@@ -12,9 +12,9 @@ _LOADED_PATHS: set[Path] = set()
 _LOAD_DOTENV_FN: LoadDotenvFn | None = None
 
 
-def _home_alex_root(path: Path) -> Path | None:
+def _home_eli_root(path: Path) -> Path | None:
     for current in (path, *path.parents):
-        if current.name == "skills" and current.parent.name == ".alex":
+        if current.name == "skills" and current.parent.name == ".eli":
             return current.parent
     return None
 
@@ -38,7 +38,7 @@ def _iter_search_roots(start_path: str | os.PathLike[str] | None = None):
 
     roots = [base]
 
-    repo_root = os.environ.get("ALEX_REPO_ROOT", "").strip()
+    repo_root = os.environ.get("ELI_REPO_ROOT", "").strip()
     if repo_root:
         roots.append(Path(repo_root).expanduser().resolve())
 
@@ -54,12 +54,17 @@ def _iter_search_roots(start_path: str | os.PathLike[str] | None = None):
 
 def find_dotenv(start_path: str | os.PathLike[str] | None = None) -> Path | None:
     for root in _iter_search_roots(start_path):
-        stop_at = _home_alex_root(root)
+        stop_at = _home_eli_root(root)
         for current in _iter_path_to_root(root, stop=stop_at):
             candidate = current / ".env"
             if candidate.is_file():
                 return candidate
     return None
+
+
+def eli_home_dir() -> Path:
+    raw = os.environ.get("ELI_HOME", "").strip()
+    return Path(raw).expanduser() if raw else Path.home() / ".eli"
 
 
 def _simple_load_dotenv(*, dotenv_path: str | os.PathLike[str], override: bool = False) -> bool:

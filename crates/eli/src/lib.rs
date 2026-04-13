@@ -28,6 +28,7 @@ pub mod builtin;
 pub mod channels;
 pub mod control_plane;
 pub mod envelope;
+pub mod evolution;
 pub mod framework;
 pub mod hooks;
 pub mod prompt_builder;

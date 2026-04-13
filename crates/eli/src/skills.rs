@@ -238,6 +238,11 @@ fn is_valid_name(name: &str, skill_dir: &Path) -> bool {
     SKILL_NAME_RE.is_match(normalized)
 }
 
+pub fn is_valid_skill_name(name: &str) -> bool {
+    let normalized = name.trim();
+    !normalized.is_empty() && normalized.len() <= 64 && SKILL_NAME_RE.is_match(normalized)
+}
+
 fn is_valid_description(description: &str) -> bool {
     let normalized = description.trim();
     !normalized.is_empty() && normalized.len() <= 1024
@@ -472,6 +477,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("");
         assert!(!is_valid_name("", &dir));
+    }
+
+    #[test]
+    fn test_is_valid_skill_name_matches_public_rules() {
+        assert!(is_valid_skill_name("deploy-docs"));
+        assert!(!is_valid_skill_name("DeployDocs"));
+        assert!(!is_valid_skill_name("bad_name"));
     }
 
     #[test]

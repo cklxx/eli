@@ -15,7 +15,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from skill_runner.env import load_repo_dotenv
+from skill_runner.env import eli_home_dir, load_repo_dotenv
 from skill_runner.cli_contract import parse_cli_args, render_result
 
 load_repo_dotenv(__file__)
@@ -24,8 +24,8 @@ from cli.timer.timer_cli import cancel_timer, list_timers, set_timer
 
 _PLAN_STORE_PATH = Path(
     os.environ.get(
-        "ALEX_REMINDER_SCHEDULER_STORE",
-        os.path.expanduser("~/.alex/reminder-scheduler/plans.json"),
+        "ELI_REMINDER_SCHEDULER_STORE",
+        str(eli_home_dir() / "reminder-scheduler" / "plans.json"),
     )
 )
 

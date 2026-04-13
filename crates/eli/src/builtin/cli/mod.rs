@@ -2,6 +2,7 @@
 
 mod chat;
 mod decisions;
+mod evolution;
 mod gateway;
 mod login;
 mod model;
@@ -14,7 +15,7 @@ mod task;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 
 use crate::builtin::BuiltinImpl;
 use crate::framework::EliFramework;
@@ -101,6 +102,11 @@ pub enum CliCommand {
         #[command(subcommand)]
         action: DecisionAction,
     },
+    /// Govern self-evolution candidates and promotions.
+    Evolution {
+        #[command(subcommand)]
+        action: EvolutionAction,
+    },
     /// Manage the task board.
     Task {
         #[command(subcommand)]
@@ -120,6 +126,66 @@ pub enum DecisionAction {
     },
     /// Export decisions as markdown.
     Export,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum EvolutionStatusArg {
+    Pending,
+    Promoted,
+    Rejected,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EvolutionAction {
+    /// List evolution candidates.
+    List {
+        /// Optional status filter.
+        #[arg(long)]
+        status: Option<EvolutionStatusArg>,
+    },
+    /// Show a candidate in full.
+    Show {
+        /// Candidate ID.
+        id: String,
+    },
+    /// Capture a prompt-rule candidate.
+    CaptureRule {
+        /// Human-readable rule title.
+        title: String,
+        /// Short rationale or summary.
+        #[arg(long)]
+        summary: String,
+        /// Final rule content.
+        #[arg(long)]
+        content: String,
+    },
+    /// Capture a skill candidate.
+    CaptureSkill {
+        /// Final skill name (directory name).
+        skill_name: String,
+        /// Optional display title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Skill description for frontmatter.
+        #[arg(long)]
+        description: String,
+        /// Skill body markdown.
+        #[arg(long)]
+        content: String,
+    },
+    /// Promote a pending candidate.
+    Promote {
+        /// Candidate ID.
+        id: String,
+        /// Overwrite an existing promoted skill target.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Reject a pending candidate.
+    Reject {
+        /// Candidate ID.
+        id: String,
+    },
 }
 
 /// Task board management actions.
@@ -207,6 +273,25 @@ pub async fn execute(cmd: CliCommand) -> anyhow::Result<()> {
             DecisionAction::Remove { index } => decisions::remove_command(index).await,
             DecisionAction::Export => decisions::export_command().await,
         },
+        CliCommand::Evolution { action } => match action {
+            EvolutionAction::List { status } => {
+                evolution::list_command(status.map(map_evolution_status)).await
+            }
+            EvolutionAction::Show { id } => evolution::show_command(id).await,
+            EvolutionAction::CaptureRule {
+                title,
+                summary,
+                content,
+            } => evolution::capture_rule_command(title, summary, content).await,
+            EvolutionAction::CaptureSkill {
+                skill_name,
+                title,
+                description,
+                content,
+            } => evolution::capture_skill_command(skill_name, title, description, content).await,
+            EvolutionAction::Promote { id, force } => evolution::promote_command(id, force).await,
+            EvolutionAction::Reject { id } => evolution::reject_command(id).await,
+        },
         CliCommand::Task { action } => {
             crate::taskboard::init_task_store(&crate::builtin::config::eli_home());
             match action {
@@ -277,5 +362,13 @@ fn print_usage(usage: &crate::types::TurnUsageInfo) {
             "\x1b[2m[tokens: {} in + {} out = {}]\x1b[0m",
             usage.input_tokens, usage.output_tokens, usage.total_tokens,
         );
+    }
+}
+
+fn map_evolution_status(status: EvolutionStatusArg) -> crate::evolution::CandidateStatus {
+    match status {
+        EvolutionStatusArg::Pending => crate::evolution::CandidateStatus::Pending,
+        EvolutionStatusArg::Promoted => crate::evolution::CandidateStatus::Promoted,
+        EvolutionStatusArg::Rejected => crate::evolution::CandidateStatus::Rejected,
     }
 }

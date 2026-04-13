@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::sync::LazyLock;
 
 use crate::builtin::settings::AgentSettings;
+use crate::evolution::load_prompt_rules_for_workspace;
 use crate::skills::{SkillMetadata, render_skills_prompt};
 
 static HINT_RE: LazyLock<regex::Regex> =
@@ -41,6 +42,8 @@ pub enum SectionKind {
     Guardrails,
     /// Workspace conventions and file rules.
     Workspace,
+    /// Approved self-evolved rules.
+    Evolved,
     /// `<available_skills>` block listing discovered skills.
     Skills,
     /// Runtime context (date, workspace, environment).
@@ -91,6 +94,11 @@ impl PromptBuilder {
                     truncation_priority: 180,
                 },
                 SectionConfig {
+                    kind: SectionKind::Evolved,
+                    max_chars: Some(2_000),
+                    truncation_priority: 230,
+                },
+                SectionConfig {
                     kind: SectionKind::Skills,
                     max_chars: Some(8_000),
                     truncation_priority: 10,
@@ -116,6 +124,11 @@ impl PromptBuilder {
                     kind: SectionKind::Guardrails,
                     max_chars: Some(1_500),
                     truncation_priority: 240,
+                },
+                SectionConfig {
+                    kind: SectionKind::Evolved,
+                    max_chars: Some(2_000),
+                    truncation_priority: 230,
                 },
                 SectionConfig {
                     kind: SectionKind::Runtime,
@@ -265,6 +278,7 @@ impl PromptBuilder {
             SectionKind::System => load_system_instructions(settings, workspace),
             SectionKind::Guardrails => build_guardrails_section(),
             SectionKind::Workspace => build_workspace_section(workspace),
+            SectionKind::Evolved => build_evolved_section(workspace),
             SectionKind::Skills => {
                 let skills = crate::skills::discover_skills(workspace);
                 let filtered: Vec<SkillMetadata> = match allowed_skills {
@@ -324,6 +338,13 @@ fn build_runtime_section(workspace: &Path) -> String {
          </runtime>",
         workspace.display()
     )
+}
+
+fn build_evolved_section(workspace: &Path) -> String {
+    match load_prompt_rules_for_workspace(workspace) {
+        Ok(rules) if !rules.trim().is_empty() => rules,
+        _ => String::new(),
+    }
 }
 
 /// Load persona and system prompt with precedence:
@@ -441,5 +462,28 @@ mod tests {
         assert!(result.contains("<runtime>"));
         // Minimal mode should NOT have tools or skills
         assert!(!result.contains("<available_tools>"));
+    }
+
+    #[test]
+    fn test_build_includes_evolved_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".agents/evolution")).unwrap();
+        std::fs::write(
+            tmp.path().join(".agents/evolution/rules.md"),
+            "## Evolved\n- Keep updates terse.\n",
+        )
+        .unwrap();
+
+        let result = PromptBuilder::new(PromptMode::Minimal).build(
+            &AgentSettings::from_env(),
+            "test",
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            tmp.path(),
+        );
+
+        assert!(result.contains("## Evolved"));
+        assert!(result.contains("Keep updates terse."));
     }
 }

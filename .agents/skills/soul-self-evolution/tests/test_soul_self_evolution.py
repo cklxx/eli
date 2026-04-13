@@ -35,7 +35,7 @@ def soul_file(tmp_path):
 
 @pytest.fixture(autouse=True)
 def checkpoint_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("ALEX_SOUL_CHECKPOINT_DIR", str(tmp_path / "checkpoints"))
+    monkeypatch.setenv("ELI_SOUL_CHECKPOINT_DIR", str(tmp_path / "checkpoints"))
 
 
 class TestPropose:
