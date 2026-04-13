@@ -159,9 +159,8 @@ fn preview_json(value: &Envelope) -> String {
             if remaining == 0 {
                 return Err(std::fmt::Error); // stop writing
             }
-            // Take at most `remaining` chars (char-boundary safe via floor_char_boundary).
-            let end = s.len().min(remaining);
-            let end = s[..end].len(); // already byte-aligned from min
+            // Take at most `remaining` bytes, but truncate to a char boundary.
+            let end = s.floor_char_boundary(s.len().min(remaining));
             self.buf.push_str(&s[..end]);
             if self.buf.len() >= self.limit {
                 return Err(std::fmt::Error);
