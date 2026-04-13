@@ -25,7 +25,7 @@ $ eli chat
 eli> summarize this repo
 
 Eli is a hook-first AI agent framework in Rust. 7-stage turn pipeline,
-22 builtin tools, tape-based history, provider-agnostic LLM layer (nexil).
+multi-tool runtime, tape-based history, provider-agnostic LLM layer (nexil).
 Works across CLI, Telegram, and any channel via OpenClaw sidecar.
 ```
 
@@ -45,6 +45,12 @@ Rust performance + type safety + single-binary deploys. Smaller ecosystem, zero 
 git clone https://github.com/cklxx/eli.git
 cd eli && cargo build --release
 cp env.example .env    # add your API key
+```
+
+```bash
+just doctor            # check local prerequisites
+just check             # fmt + clippy + workspace tests
+just test-all          # Rust + Python smoke + sidecar tests
 ```
 
 ```bash
@@ -98,8 +104,8 @@ Sidecar = Node.js bridge loading OpenClaw channel plugins. First run prompts for
 
 | Crate | Version | Role |
 |-------|---------|------|
-| **nexil** | 0.7.0 | Provider-agnostic LLM — streaming, tool calls, tape, embeddings, OAuth |
-| **eli** | 0.4.2 | Hook-first agent — pipeline, channels, tools, skills, decisions |
+| **nexil** | 0.8.0 | Provider-agnostic LLM — streaming, tool calls, tape, embeddings, OAuth |
+| **eli** | 0.5.0 | Hook-first agent — pipeline, channels, tools, skills, decisions |
 | **eli-sidecar** | 0.2.0 | Node.js bridge — OpenClaw plugins over HTTP / MCP |
 
 ## Configuration
@@ -118,6 +124,28 @@ Sidecar = Node.js bridge loading OpenClaw channel plugins. First run prompts for
 | `ELI_TRACE` | — | Trace logging (`1` / `true`) |
 
 Profiles: `~/.eli/config.toml`
+
+## Development Workflow
+
+The repository is multi-language in practice:
+
+- Rust workspace in `crates/`
+- Python integration tests in `tests/`
+- TypeScript sidecar in `sidecar/`
+
+Use the task runner for common workflows:
+
+```bash
+just doctor
+just check
+just test-rust
+just test-py
+just test-sidecar
+just test-all
+just release-check
+```
+
+Documentation entrypoint: [`docs/index.md`](docs/index.md)
 
 ## Skills
 

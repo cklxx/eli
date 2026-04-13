@@ -1,0 +1,37 @@
+{
+  "cleanupPeriodDays": 30,
+  "env": {},
+  "includeCoAuthoredBy": true,
+  "permissions": {
+    "allow": [
+      "Bash(chmod:*)"
+    ],
+    "ask": [],
+    "deny": [],
+    "additionalDirectories": []
+  },
+  "hooks": {},
+  "disableAllHooks": false,
+  "modelReasoning": {},
+  "modelFallbackPolicies": {},
+  "models": {},
+  "enableAllProjectMcpServers": false,
+  "enabledMcpjsonServers": [],
+  "disabledMcpjsonServers": [],
+  "MCP_TIMEOUT": 60000,
+  "MCP_TOOL_TIMEOUT": 240000,
+  "BASH_DEFAULT_TIMEOUT_MS": 240000,
+  "BASH_MAX_TIMEOUT_MS": 600000,
+  "slashCommand": {
+    "collisionMode": "prefer-project",
+    "rules": {
+      "allow": [],
+      "deny": []
+    }
+  },
+  "enableToolSearch": "auto",
+  "autoMemoryEnabled": true,
+  "repositoryMemoryEnabled": false,
+  "sessionMemoryEnabled": false,
+  "disabledAgents": []
+}

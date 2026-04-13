@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: "0 6 * * *"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -16,8 +18,45 @@ env:
   RUST_TOOLCHAIN: "1.93.0"
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      python: ${{ steps.filter.outputs.python }}
+      sidecar: ${{ steps.filter.outputs.sidecar }}
+      docs_only: ${{ steps.filter.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**'
+              - '.github/workflows/main.yml'
+              - 'justfile'
+              - 'scripts/**'
+            python:
+              - 'tests/**'
+              - '.github/workflows/main.yml'
+              - 'justfile'
+              - 'scripts/**'
+              - 'crates/**'
+            sidecar:
+              - 'sidecar/**'
+              - '.github/workflows/main.yml'
+              - 'justfile'
+              - 'scripts/**'
+            docs_only:
+              - 'README.md'
+              - 'docs/**'
   check:
     name: Check
+    needs: changes
+    if: ${{ github.event_name == 'schedule' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +68,8 @@ jobs:
 
   test:
     name: Test
+    needs: changes
+    if: ${{ github.event_name == 'schedule' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +81,8 @@ jobs:
 
   fmt:
     name: Format
+    needs: changes
+    if: ${{ github.event_name == 'schedule' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +94,8 @@ jobs:
 
   clippy:
     name: Clippy
+    needs: changes
+    if: ${{ github.event_name == 'schedule' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,3 +105,43 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace -- -D warnings
+
+  python-smoke:
+    name: Python smoke
+    needs: changes
+    if: ${{ github.event_name == 'schedule' || needs.changes.outputs.python == 'true' || needs.changes.outputs.docs_only != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo build --release -p eli
+      - run: python3 -m pip install pytest
+      - run: python3 -m pytest tests/test_basic.py -k 'version or status or help or invalid_subcommand or run_without_message' -v
+        env:
+          ELI_BIN: ${{ github.workspace }}/target/release/eli
+
+  sidecar:
+    name: Sidecar
+    needs: changes
+    if: ${{ github.event_name == 'schedule' || needs.changes.outputs.sidecar == 'true' || needs.changes.outputs.docs_only != 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sidecar
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: sidecar/package-lock.json
+      - uses: oven-sh/setup-bun@v2
+      - run: npm install
+      - run: npm test
+      - run: npm run build

@@ -1,126 +1,104 @@
 # Contributing to `eli`
 
-Contributions are welcome, and they are greatly appreciated!
-Every little bit helps, and credit will always be given.
+`eli` is a multi-language AI project:
 
-You can contribute in many ways:
+- `crates/nexil` — provider-agnostic LLM toolkit
+- `crates/eli` — hook-first AI agent framework
+- `sidecar/` — TypeScript bridge and channel host
+- `tests/` — Python smoke and integration tests
 
-# Types of Contributions
+## Prerequisites
 
-## Report Bugs
+Have these available locally:
 
-Report bugs at https://github.com/eliagent/eli/issues
+- Rust toolchain
+- `cargo`
+- Python 3
+- `pytest`
+- Node.js and `npm`
 
-If you are reporting a bug, please include:
-
-- Your operating system name and version.
-- Any details about your local setup that might be helpful in troubleshooting.
-- Detailed steps to reproduce the bug.
-
-## Fix Bugs
-
-Look through the GitHub issues for bugs.
-Anything tagged with "bug" and "help wanted" is open to whoever wants to implement a fix for it.
-
-## Implement Features
-
-Look through the GitHub issues for features.
-Anything tagged with "enhancement" and "help wanted" is open to whoever wants to implement it.
-
-## Write Documentation
-
-eli could always use more documentation, whether as part of the official docs, in docstrings, or even on the web in blog posts, articles, and such.
-
-## Submit Feedback
-
-The best way to send feedback is to file an issue at https://github.com/eliagent/eli/issues.
-
-If you are proposing a new feature:
-
-- Explain in detail how it would work.
-- Keep the scope as narrow as possible, to make it easier to implement.
-- Remember that this is a volunteer-driven project, and that contributions
-  are welcome :)
-
-# Get Started!
-
-Ready to contribute? Here's how to set up `eli` for local development.
-Please note this documentation assumes you already have `uv` and `Git` installed and ready to go.
-
-1. Fork the `eli` repo on GitHub.
-
-2. Clone your fork locally:
+Start with:
 
 ```bash
-cd <directory_in_which_repo_should_be_created>
-git clone git@github.com:YOUR_NAME/eli.git
+just doctor
 ```
 
-3. Now we need to install the environment. Navigate into the directory
-
-```bash
-cd eli
-```
-
-Then, install and activate the environment with:
-
-```bash
-uv sync
-```
-
-4. Install prek to run linters/formatters at commit time:
-
-```bash
-uv run prek install
-```
-
-5. Create a branch for local development:
-
-```bash
-git checkout -b name-of-your-bugfix-or-feature
-```
-
-Now you can make your changes locally.
-
-6. Don't forget to add test cases for your added functionality to the `tests` directory.
-
-7. When you're done making changes, check that your changes pass the formatting tests.
+## Common Commands
 
 ```bash
 just check
+just test-rust
+just test-py
+just test-sidecar
+just test-all
+just release-check
 ```
 
-Now, validate that all unit tests are passing:
+## Change Expectations
 
-```bash
-just test
-```
+### Rust changes
 
-8. Before raising a pull request you should also run tox.
-   This will run the tests across different versions of Python:
+For changes in `crates/**`:
 
-```bash
-tox
-```
+- run `just check`
+- add or update Rust tests where practical
+- update docs if behavior changes
 
-This requires you to have multiple versions of python installed.
-This step is also triggered in the CI/CD pipeline, so you could also choose to skip this step locally.
+### Python test changes
 
-10. Commit your changes and push your branch to GitHub:
+For changes in `tests/**`:
 
-```bash
-git add .
-git commit -m "Your detailed description of your changes."
-git push origin name-of-your-bugfix-or-feature
-```
+- run `just test-py`
+- keep smoke paths cheap and deterministic where possible
 
-11. Submit a pull request through the GitHub website.
+### Sidecar changes
 
-# Pull Request Guidelines
+For changes in `sidecar/**`:
 
-Before you submit a pull request, check that it meets these guidelines:
+- run `just test-sidecar`
+- keep TypeScript style and Rust-side contracts aligned
 
-1. The pull request should include tests.
+### Docs changes
 
-2. If the pull request adds functionality, the docs should be updated.
-   Put your new functionality into a function with a docstring, and add the feature to the list in `README.md`.
+For changes in `README.md` or `docs/**`:
+
+- keep docs aligned with current code
+- label historical documents clearly when they are not current guidance
+
+## Before Opening a PR
+
+1. run the smallest meaningful validation for the surface you changed
+2. update tests if behavior changed
+3. update docs if user-facing or maintainer-facing behavior changed
+4. avoid unrelated cleanup in the same PR
+
+Recommended commit prefixes:
+
+- `feat:`
+- `fix:`
+- `docs:`
+- `chore:`
+
+## Extra Care Areas
+
+Call out contract changes clearly in the PR when touching:
+
+- hook semantics or precedence
+- session or turn pipeline behavior
+- tool schemas or result conventions
+- tape behavior
+- sidecar contracts and envelope shape
+
+For these changes, state:
+
+- what changed
+- what remains compatible
+- what tests were added or updated
+- what docs were updated
+
+## Where to Start Reading
+
+- `README.md`
+- `docs/index.md`
+- `AGENTS.md`
+- `CLAUDE.md`

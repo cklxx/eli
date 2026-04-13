@@ -12,6 +12,7 @@ import type {
   ToolCallLifecycleEvent,
 } from "./types.js";
 import { emitPluginEvent } from "./api.js";
+import { outboundMediaItems, resolveBridgeContractVersion } from "./contract.js";
 import { envelopeToEliMessage, parseOutboundTarget } from "./envelope.js";
 import { registry } from "./registry.js";
 import { endPendingTyping, sessionContexts } from "./runtime.js";
@@ -107,6 +108,23 @@ function normalizeToolCallText(text: string | null | undefined): string | null {
 function extractToolDescription(body: any): string | undefined {
   const description = normalizeToolCallText(body?.description);
   return description ?? undefined;
+}
+
+function invalidContractVersion(version: unknown): string | null {
+  try {
+    resolveBridgeContractVersion(version);
+    return null;
+  } catch (err: any) {
+    return err?.message ?? "unsupported contract_version";
+  }
+}
+
+function outboundMediaWithPath(msg: EliChannelMessage) {
+  return outboundMediaItems(msg).flatMap((item) =>
+    typeof item.path === "string" && item.path.length > 0
+      ? [{ path: item.path, media_type: item.media_type, mime_type: item.mime_type ?? "" }]
+      : []
+  );
 }
 
 async function resolveToolCallText(
@@ -214,6 +232,11 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
 
     app.post("/outbound", async (req, res) => {
       const msg = req.body as EliChannelMessage;
+      const contractError = invalidContractVersion(msg.contract_version);
+      if (contractError) {
+        res.status(400).json({ error: contractError });
+        return;
+      }
       const cleanupOnly = Boolean(msg.context?._eli_cleanup_only);
       let { sourceChannel, accountId, chatId, chatType } = parseOutboundTarget(msg);
 
@@ -263,8 +286,7 @@ export function startOutboundServer(port: number): Promise<import("node:http").S
           }
         }
 
-        const mediaItems: Array<{ path: string; media_type: string; mime_type: string }> =
-          Array.isArray(msg.context?.outbound_media) ? msg.context.outbound_media : [];
+        const mediaItems = outboundMediaWithPath(msg);
 
         log.debug("outbound", {
           channel: sourceChannel, to, text_len: msg.content?.length,

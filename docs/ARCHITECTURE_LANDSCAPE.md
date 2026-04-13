@@ -1,4 +1,8 @@
-# Eli — Architecture Landscape
+# Eli — Architecture Landscape (Historical Snapshot)
+
+> Historical architecture snapshot from 2026-03-25.
+> This document contains older crate names, versions, and topology details.
+> Use `docs/index.md`, `README.md`, and current code as the source of truth.
 
 > Generated 2026-03-25. Function-level detail, critical issues prioritized.
 

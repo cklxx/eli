@@ -1,4 +1,8 @@
-# Workspace Structure Review — Eli (Final)
+# Workspace Structure Review — Eli (Historical Snapshot)
+
+> Historical review snapshot from 2026-03-24.
+> This document references older package names, versions, and file paths.
+> Use `docs/index.md`, `README.md`, and current code as the source of truth.
 
 **Date**: 2026-03-24
 **Standard**: Pragmatic quality for a v0.3.0 single-developer agent framework

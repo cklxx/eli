@@ -1,50 +1,67 @@
-# Eli
+# Eli Documentation
 
-**A common shape for agents that live alongside people.**
+This is the current documentation entrypoint for the repository.
 
-Eli started in group chats. Not as a demo or a personal assistant, but as a teammate that had to coexist with real humans and other agents in the same messy conversations — concurrent tasks, incomplete context, and nobody waiting.
+## Repository Shape
 
-It is hook-first, built on [pluggy](https://pluggy.readthedocs.io/), with a small core (~200 lines) and builtins that are just default plugins you can replace. Context comes from [tape](https://tape.systems) via [Republic](https://github.com/eliagent/republic), not session accumulation. The same pipeline runs across CLI, Telegram, and any channel you add.
+- `crates/nexil` — provider-agnostic LLM toolkit
+- `crates/eli` — hook-first AI agent framework
+- `sidecar/` — OpenClaw bridge and MCP/HTTP channel host
 
 ## Quick Start
 
 ```bash
-pip install eli
-```
-
-Or from source:
-
-```bash
-git clone https://github.com/eliagent/eli.git
+git clone https://github.com/cklxx/eli.git
 cd eli
-uv sync
 cp env.example .env
+cargo build --release
 ```
+
+## Common Local Commands
 
 ```bash
-uv run eli chat                         # interactive session
-uv run eli run "summarize this repo"    # one-shot task
-uv run eli gateway                      # channel listener mode
+just doctor
+just check
+just test-all
 ```
 
-## How It Works
+## Main Runtime Commands
 
-Every inbound message goes through one turn pipeline. Each stage is a hook.
-
-```
-resolve_session → load_state → build_prompt → run_model
-                                                   ↓
-              dispatch_outbound ← render_outbound ← save_state
+```bash
+eli chat
+eli run "summarize this repo"
+eli gateway
 ```
 
-Builtins are plugins registered first. Later plugins override earlier ones. No special cases.
+## Turn Pipeline
+
+```text
+resolve_session → load_state → build_prompt → run_model → save_state → render_outbound → dispatch_outbound
+```
 
 ## Read Next
 
-- [Architecture](architecture.md) — lifecycle, hook precedence, error handling
-- [Features](features.md) — what ships today and current boundaries
-- [Channels](channels/index.md) — CLI, Telegram, and custom adapters
-- [Skills](skills.md) — discovery and authoring
-- [Extension Guide](extension-guide.md) — hooks, tools, plugin packaging
-- [Deployment](deployment.md) — Docker, environment, upgrades
-- [Posts](posts/index.md) — design notes
+- [Repository review](REVIEW_2026-04-10.md)
+- [DX improvement plan](DX_IMPROVEMENT_PLAN_2026-04-10.md)
+- [Architecture review](ARCHITECTURE_REVIEW_2026-04-06.md)
+- [Channels](channels/index.md)
+- [Rust conventions](rust-conventions.md)
+- [Plans](plans/)
+- [Experience notes](experience/)
+
+## Historical Snapshots
+
+These are useful reference documents, but not the primary source of truth:
+
+- [Architecture landscape](ARCHITECTURE_LANDSCAPE.md)
+- [Workspace structure review](STRUCTURE_REVIEW.md)
+
+## Source of Truth Order
+
+When docs conflict, trust these in order:
+
+1. current code in `crates/` and `sidecar/`
+2. `README.md`
+3. `AGENTS.md` and `CLAUDE.md`
+4. current docs in `docs/`
+5. historical snapshots
