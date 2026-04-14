@@ -160,9 +160,9 @@ fn preview_json(value: &Envelope) -> String {
                 return Err(std::fmt::Error); // stop writing
             }
             // Take at most `remaining` bytes, but truncate to a char boundary.
-            let end = s.floor_char_boundary(s.len().min(remaining));
+            let end = s.floor_char_boundary(remaining.min(s.len()));
             self.buf.push_str(&s[..end]);
-            if self.buf.len() >= self.limit {
+            if end < s.len() || self.buf.len() >= self.limit {
                 return Err(std::fmt::Error);
             }
             Ok(())
@@ -1233,6 +1233,20 @@ mod tests {
         assert!(
             matches!(result.unwrap_err(), HookError::Plugin { hook_point, .. } if hook_point == HookPoint::RunModel)
         );
+    }
+
+    #[test]
+    fn test_preview_json_truncates_multibyte_content_on_char_boundary() {
+        let message = json!({
+            "content": "你".repeat(400),
+            "channel": "test",
+        });
+
+        let preview = preview_json(&message);
+
+        assert!(preview.ends_with("...(truncated)"));
+        assert!(!preview.contains('\u{fffd}'));
+        assert!(preview.contains("你"));
     }
 
     // -- call_build_user_prompt panic skipping ------------------------------------
