@@ -133,6 +133,7 @@ pub enum EvolutionStatusArg {
     Pending,
     Promoted,
     Rejected,
+    RolledBack,
 }
 
 #[derive(Debug, Subcommand)]
@@ -145,6 +146,11 @@ pub enum EvolutionAction {
     },
     /// Show a candidate in full.
     Show {
+        /// Candidate ID.
+        id: String,
+    },
+    /// Evaluate a pending candidate.
+    Evaluate {
         /// Candidate ID.
         id: String,
     },
@@ -183,6 +189,11 @@ pub enum EvolutionAction {
     },
     /// Reject a pending candidate.
     Reject {
+        /// Candidate ID.
+        id: String,
+    },
+    /// Roll back a promoted candidate to its snapshot.
+    Rollback {
         /// Candidate ID.
         id: String,
     },
@@ -278,6 +289,7 @@ pub async fn execute(cmd: CliCommand) -> anyhow::Result<()> {
                 evolution::list_command(status.map(map_evolution_status)).await
             }
             EvolutionAction::Show { id } => evolution::show_command(id).await,
+            EvolutionAction::Evaluate { id } => evolution::evaluate_command(id).await,
             EvolutionAction::CaptureRule {
                 title,
                 summary,
@@ -291,6 +303,7 @@ pub async fn execute(cmd: CliCommand) -> anyhow::Result<()> {
             } => evolution::capture_skill_command(skill_name, title, description, content).await,
             EvolutionAction::Promote { id, force } => evolution::promote_command(id, force).await,
             EvolutionAction::Reject { id } => evolution::reject_command(id).await,
+            EvolutionAction::Rollback { id } => evolution::rollback_command(id).await,
         },
         CliCommand::Task { action } => {
             crate::taskboard::init_task_store(&crate::builtin::config::eli_home());
@@ -370,5 +383,6 @@ fn map_evolution_status(status: EvolutionStatusArg) -> crate::evolution::Candida
         EvolutionStatusArg::Pending => crate::evolution::CandidateStatus::Pending,
         EvolutionStatusArg::Promoted => crate::evolution::CandidateStatus::Promoted,
         EvolutionStatusArg::Rejected => crate::evolution::CandidateStatus::Rejected,
+        EvolutionStatusArg::RolledBack => crate::evolution::CandidateStatus::RolledBack,
     }
 }

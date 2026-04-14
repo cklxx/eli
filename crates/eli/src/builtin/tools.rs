@@ -19,7 +19,7 @@ use crate::builtin::config::eli_home;
 use crate::builtin::shell_manager::shell_manager;
 use crate::builtin::tape::TapeService;
 use crate::envelope::ValueExt;
-use crate::evolution::{CandidateStatus, EvolutionStore};
+use crate::evolution::{CandidateStatus, EvaluationRun, EvolutionStore};
 use crate::sidecar_contract::{SidecarNoticeRequest, SidecarToolRequest, contract_version};
 use crate::skills::discover_skills;
 use crate::tools::{REGISTRY, shorten_text};
@@ -290,6 +290,10 @@ fn builtin_tools() -> Vec<Tool> {
         tool_evolution_capture(),
         tool_evolution_list(),
         tool_evolution_show(),
+        tool_evolution_evaluate(),
+        tool_evolution_promote(),
+        tool_evolution_reject(),
+        tool_evolution_rollback(),
         tool_tape_info(),
         tool_tape_search(),
         tool_tape_reset(),
@@ -609,6 +613,10 @@ fn auto_notice(tool_name: &str, args: &Value) -> String {
         "evolution.capture" => format!("记录演进候选: {}", shorten(primary("title"), 40)),
         "evolution.list" => "列出演进候选".to_owned(),
         "evolution.show" => format!("查看演进候选 {}", primary("id")),
+        "evolution.evaluate" => format!("评估演进候选 {}", primary("id")),
+        "evolution.promote" => format!("提升演进候选 {}", primary("id")),
+        "evolution.reject" => format!("拒绝演进候选 {}", primary("id")),
+        "evolution.rollback" => format!("回滚演进候选 {}", primary("id")),
         "web.fetch" => format!("获取 {}", shorten(primary("url"), 60)),
         "tape.search" => format!("搜索 tape: {}", shorten(primary("query"), 40)),
         "tape.info" => "查看 tape 信息".to_owned(),
@@ -1368,7 +1376,7 @@ fn tool_evolution_list() -> Tool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "status": {"type": "string", "enum": ["pending", "promoted", "rejected"]}
+                "status": {"type": "string", "enum": ["pending", "promoted", "rejected", "rolled_back"]}
             }
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
@@ -1390,6 +1398,75 @@ fn tool_evolution_show() -> Tool {
         }),
         |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
             Box::pin(run_evolution_show(args, ctx))
+        },
+    )
+}
+
+fn tool_evolution_evaluate() -> Tool {
+    Tool::with_context(
+        "evolution.evaluate",
+        "Run the deterministic self-evolution evaluator for a pending candidate.\n\nExamples: verify that a prompt rule survives prompt composition, check that a skill draft materializes cleanly, inspect integration regressions before promotion.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"}
+            },
+            "required": ["id"]
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(run_evolution_evaluate(args, ctx))
+        },
+    )
+}
+
+fn tool_evolution_promote() -> Tool {
+    Tool::with_context(
+        "evolution.promote",
+        "Promote a governed self-evolution candidate into the active rules or skills store.\n\nExamples: publish a passing prompt rule into the Evolved section, materialize an approved skill draft, force-publish an already reviewed candidate.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "force": {"type": "boolean"}
+            },
+            "required": ["id"]
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(run_evolution_promote(args, ctx))
+        },
+    )
+}
+
+fn tool_evolution_reject() -> Tool {
+    Tool::with_context(
+        "evolution.reject",
+        "Reject a pending self-evolution candidate.\n\nExamples: discard a noisy prompt rule, close out a low-quality skill draft, mark a candidate as intentionally not promoted.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"}
+            },
+            "required": ["id"]
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(run_evolution_reject(args, ctx))
+        },
+    )
+}
+
+fn tool_evolution_rollback() -> Tool {
+    Tool::with_context(
+        "evolution.rollback",
+        "Roll back a promoted self-evolution candidate to its captured snapshot.\n\nExamples: undo a prompt-rule promotion that caused regressions, restore a previous skill file after a bad promotion, revert an experimental evolution safely.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"}
+            },
+            "required": ["id"]
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(run_evolution_rollback(args, ctx))
         },
     )
 }
@@ -1421,6 +1498,47 @@ async fn run_evolution_show(args: Value, ctx: Option<ToolContext>) -> ToolResult
     let store = EvolutionStore::new(workspace_from_context(ctx.as_ref()));
     let candidate = store.read_candidate(id).map_err(tool_error)?;
     ok_val(render_candidate_detail(&candidate))
+}
+
+async fn run_evolution_evaluate(args: Value, ctx: Option<ToolContext>) -> ToolResult {
+    maybe_send_user_facing_notice("evolution.evaluate", ctx.as_ref(), &args).await;
+    let id = args.require_str_field("id").map_err(invalid_input)?;
+    let store = EvolutionStore::new(workspace_from_context(ctx.as_ref()));
+    let run = store.evaluate(id).map_err(tool_error)?;
+    ok_val(render_evaluation_run(&run))
+}
+
+async fn run_evolution_promote(args: Value, ctx: Option<ToolContext>) -> ToolResult {
+    maybe_send_user_facing_notice("evolution.promote", ctx.as_ref(), &args).await;
+    let id = args.require_str_field("id").map_err(invalid_input)?;
+    let force = args.get_bool_field("force").unwrap_or(false);
+    let store = EvolutionStore::new(workspace_from_context(ctx.as_ref()));
+    let outcome = store.promote(id, force).map_err(tool_error)?;
+    ok_val(format!(
+        "promoted {} -> {}",
+        outcome.candidate.id,
+        outcome.target.display()
+    ))
+}
+
+async fn run_evolution_reject(args: Value, ctx: Option<ToolContext>) -> ToolResult {
+    maybe_send_user_facing_notice("evolution.reject", ctx.as_ref(), &args).await;
+    let id = args.require_str_field("id").map_err(invalid_input)?;
+    let store = EvolutionStore::new(workspace_from_context(ctx.as_ref()));
+    let candidate = store.reject(id).map_err(tool_error)?;
+    ok_val(format!("rejected {}", candidate.id))
+}
+
+async fn run_evolution_rollback(args: Value, ctx: Option<ToolContext>) -> ToolResult {
+    maybe_send_user_facing_notice("evolution.rollback", ctx.as_ref(), &args).await;
+    let id = args.require_str_field("id").map_err(invalid_input)?;
+    let store = EvolutionStore::new(workspace_from_context(ctx.as_ref()));
+    let outcome = store.rollback(id).map_err(tool_error)?;
+    ok_val(format!(
+        "rolled_back {} -> {}",
+        outcome.candidate.id,
+        outcome.target.display()
+    ))
 }
 
 fn workspace_from_context(ctx: Option<&ToolContext>) -> PathBuf {
@@ -1473,9 +1591,10 @@ fn parse_candidate_status(raw: Option<&str>) -> Result<Option<CandidateStatus>, 
         Some("pending") => Ok(Some(CandidateStatus::Pending)),
         Some("promoted") => Ok(Some(CandidateStatus::Promoted)),
         Some("rejected") => Ok(Some(CandidateStatus::Rejected)),
+        Some("rolled_back") => Ok(Some(CandidateStatus::RolledBack)),
         Some(_) => Err(ConduitError::new(
             ErrorKind::InvalidInput,
-            "status must be pending, promoted, or rejected",
+            "status must be pending, promoted, rejected, or rolled_back",
         )),
     }
 }
@@ -1517,6 +1636,20 @@ fn render_candidate_detail(candidate: &crate::evolution::EvolutionCandidate) -> 
         format!("kind: {}", candidate.kind_string()),
         format!("title: {}", candidate.title),
         format!("summary: {}", candidate.summary),
+        format!("risk_level: {}", candidate.risk_level_string()),
+        format!("fingerprint: {}", candidate.effective_fingerprint()),
+        format!("requires_evaluation: {}", candidate.requires_evaluation),
+        format!(
+            "latest_evaluation_id: {}",
+            candidate.latest_evaluation_id.clone().unwrap_or_default()
+        ),
+        format!(
+            "evaluation_passed: {}",
+            candidate
+                .evaluation_passed
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        ),
         format!(
             "promoted_to: {}",
             candidate.promoted_to.clone().unwrap_or_default()
@@ -1525,6 +1658,21 @@ fn render_candidate_detail(candidate: &crate::evolution::EvolutionCandidate) -> 
         candidate.content.clone(),
     ]
     .join("\n")
+}
+
+fn render_evaluation_run(run: &EvaluationRun) -> String {
+    let mut lines = vec![
+        format!("id: {}", run.id),
+        format!("candidate_id: {}", run.candidate_id),
+        format!("passed: {}", run.passed),
+        format!("score: {}", run.score),
+    ];
+    lines.extend(run.checks.iter().map(render_evaluation_check));
+    lines.join("\n")
+}
+
+fn render_evaluation_check(check: &crate::evolution::EvaluationCheck) -> String {
+    format!("- {}: {} ({})", check.name, check.passed, check.detail)
 }
 
 // ---------------------------------------------------------------------------
@@ -3318,6 +3466,10 @@ mod tests {
             tool_evolution_capture(),
             tool_evolution_list(),
             tool_evolution_show(),
+            tool_evolution_evaluate(),
+            tool_evolution_promote(),
+            tool_evolution_reject(),
+            tool_evolution_rollback(),
             tool_tape_info(),
             tool_tape_search(),
             tool_tape_reset(),
@@ -3361,6 +3513,22 @@ mod tests {
         assert_eq!(
             auto_notice("evolution.show", &json!({"id": "cand123"})),
             "查看演进候选 cand123"
+        );
+        assert_eq!(
+            auto_notice("evolution.evaluate", &json!({"id": "cand123"})),
+            "评估演进候选 cand123"
+        );
+        assert_eq!(
+            auto_notice("evolution.promote", &json!({"id": "cand123"})),
+            "提升演进候选 cand123"
+        );
+        assert_eq!(
+            auto_notice("evolution.reject", &json!({"id": "cand123"})),
+            "拒绝演进候选 cand123"
+        );
+        assert_eq!(
+            auto_notice("evolution.rollback", &json!({"id": "cand123"})),
+            "回滚演进候选 cand123"
         );
         assert_eq!(
             auto_notice("web.fetch", &json!({"url": "https://example.com"})),

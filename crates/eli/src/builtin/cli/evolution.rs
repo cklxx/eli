@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::evolution::{CandidateKind, CandidateStatus, EvolutionStore};
+use crate::evolution::{CandidateKind, CandidateStatus, EvaluationRun, EvolutionStore};
 
 pub(crate) async fn list_command(status: Option<CandidateStatus>) -> anyhow::Result<()> {
     let store = default_store()?;
@@ -20,6 +20,12 @@ pub(crate) async fn list_command(status: Option<CandidateStatus>) -> anyhow::Res
 pub(crate) async fn show_command(id: String) -> anyhow::Result<()> {
     let candidate = default_store()?.read_candidate(&id)?;
     println!("{}", render_candidate_detail(&candidate));
+    Ok(())
+}
+
+pub(crate) async fn evaluate_command(id: String) -> anyhow::Result<()> {
+    let run = default_store()?.evaluate(&id)?;
+    println!("{}", render_evaluation(&run));
     Ok(())
 }
 
@@ -59,6 +65,16 @@ pub(crate) async fn promote_command(id: String, force: bool) -> anyhow::Result<(
 pub(crate) async fn reject_command(id: String) -> anyhow::Result<()> {
     let candidate = default_store()?.reject(&id)?;
     println!("Rejected candidate {}", candidate.id);
+    Ok(())
+}
+
+pub(crate) async fn rollback_command(id: String) -> anyhow::Result<()> {
+    let outcome = default_store()?.rollback(&id)?;
+    println!(
+        "Rolled back {} to {}",
+        outcome.candidate.id,
+        outcome.target.display()
+    );
     Ok(())
 }
 
@@ -102,6 +118,20 @@ fn render_candidate_detail(candidate: &crate::evolution::EvolutionCandidate) -> 
             "source_tape: {}",
             candidate.source_tape.clone().unwrap_or_default()
         ),
+        format!("risk_level: {}", candidate.risk_level_string()),
+        format!("fingerprint: {}", candidate.effective_fingerprint()),
+        format!("requires_evaluation: {}", candidate.requires_evaluation),
+        format!(
+            "latest_evaluation_id: {}",
+            candidate.latest_evaluation_id.clone().unwrap_or_default()
+        ),
+        format!(
+            "evaluation_passed: {}",
+            candidate
+                .evaluation_passed
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        ),
         format!(
             "promoted_to: {}",
             candidate.promoted_to.clone().unwrap_or_default()
@@ -110,6 +140,21 @@ fn render_candidate_detail(candidate: &crate::evolution::EvolutionCandidate) -> 
         candidate.content.clone(),
     ]
     .join("\n")
+}
+
+fn render_evaluation(run: &EvaluationRun) -> String {
+    let mut lines = vec![
+        format!("id: {}", run.id),
+        format!("candidate_id: {}", run.candidate_id),
+        format!("passed: {}", run.passed),
+        format!("score: {}", run.score),
+    ];
+    lines.extend(run.checks.iter().map(render_check));
+    lines.join("\n")
+}
+
+fn render_check(check: &crate::evolution::EvaluationCheck) -> String {
+    format!("- {}: {} ({})", check.name, check.passed, check.detail)
 }
 
 fn kind_label(kind: CandidateKind) -> &'static str {
@@ -124,5 +169,6 @@ fn status_label(status: CandidateStatus) -> &'static str {
         CandidateStatus::Pending => "pending",
         CandidateStatus::Promoted => "promoted",
         CandidateStatus::Rejected => "rejected",
+        CandidateStatus::RolledBack => "rolled_back",
     }
 }
