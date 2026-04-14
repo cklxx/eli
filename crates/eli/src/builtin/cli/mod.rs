@@ -149,6 +149,14 @@ pub enum EvolutionAction {
         /// Candidate ID.
         id: String,
     },
+    /// Distill tape evidence into pending prompt-rule candidates.
+    Distill {
+        /// Tape name to distill.
+        tape: String,
+        /// Persist the distilled candidates.
+        #[arg(long)]
+        persist: bool,
+    },
     /// Evaluate a pending candidate.
     Evaluate {
         /// Candidate ID.
@@ -289,6 +297,9 @@ pub async fn execute(cmd: CliCommand) -> anyhow::Result<()> {
                 evolution::list_command(status.map(map_evolution_status)).await
             }
             EvolutionAction::Show { id } => evolution::show_command(id).await,
+            EvolutionAction::Distill { tape, persist } => {
+                evolution::distill_command(tape, persist).await
+            }
             EvolutionAction::Evaluate { id } => evolution::evaluate_command(id).await,
             EvolutionAction::CaptureRule {
                 title,

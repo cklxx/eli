@@ -19,11 +19,11 @@ use crate::builtin::config::eli_home;
 use crate::builtin::shell_manager::shell_manager;
 use crate::builtin::tape::TapeService;
 use crate::envelope::ValueExt;
-use crate::evolution::{CandidateStatus, EvaluationRun, EvolutionStore};
+use crate::evolution::{CandidateStatus, DistillOutcome, EvaluationRun, EvolutionStore};
 use crate::sidecar_contract::{SidecarNoticeRequest, SidecarToolRequest, contract_version};
 use crate::skills::discover_skills;
 use crate::tools::{REGISTRY, shorten_text};
-use crate::types::RUNTIME_WORKSPACE_KEY;
+use crate::types::{RUNTIME_TAPES_DIR_KEY, RUNTIME_WORKSPACE_KEY};
 
 const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 10;
@@ -288,6 +288,7 @@ fn builtin_tools() -> Vec<Tool> {
         tool_fs_edit(),
         tool_skill(),
         tool_evolution_capture(),
+        tool_evolution_distill(),
         tool_evolution_list(),
         tool_evolution_show(),
         tool_evolution_evaluate(),
@@ -611,6 +612,17 @@ fn auto_notice(tool_name: &str, args: &Value) -> String {
         "fs.write" => format!("写 {}", shorten(primary("path"), 60)),
         "fs.edit" => format!("编辑 {}", shorten(primary("path"), 60)),
         "evolution.capture" => format!("记录演进候选: {}", shorten(primary("title"), 40)),
+        "evolution.distill" => {
+            if args
+                .get("persist")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                format!("蒸馏演进候选 {}", primary("tape"))
+            } else {
+                format!("预演蒸馏演进候选 {}", primary("tape"))
+            }
+        }
         "evolution.list" => "列出演进候选".to_owned(),
         "evolution.show" => format!("查看演进候选 {}", primary("id")),
         "evolution.evaluate" => format!("评估演进候选 {}", primary("id")),
@@ -1369,6 +1381,23 @@ fn tool_evolution_capture() -> Tool {
     )
 }
 
+fn tool_evolution_distill() -> Tool {
+    Tool::with_context(
+        "evolution.distill",
+        "Distill tape evidence into pending prompt-rule candidates.\n\nExamples: preview what a tape would yield before persisting it, write distilled prompt-rule candidates from a named tape, derive candidates from the current tape when no tape is provided.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tape": {"type": "string", "description": "Tape name; defaults to the active tape in context when omitted."},
+                "persist": {"type": "boolean", "description": "Persist the distilled candidates instead of running a dry-run.", "default": false}
+            }
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(run_evolution_distill(args, ctx))
+        },
+    )
+}
+
 fn tool_evolution_list() -> Tool {
     Tool::with_context(
         "evolution.list",
@@ -1500,6 +1529,21 @@ async fn run_evolution_show(args: Value, ctx: Option<ToolContext>) -> ToolResult
     ok_val(render_candidate_detail(&candidate))
 }
 
+async fn run_evolution_distill(args: Value, ctx: Option<ToolContext>) -> ToolResult {
+    maybe_send_user_facing_notice("evolution.distill", ctx.as_ref(), &args).await;
+    let tape = args
+        .get_str_field("tape")
+        .map(str::to_owned)
+        .or_else(|| ctx.as_ref().and_then(|item| item.tape.clone()))
+        .ok_or_else(|| ConduitError::new(ErrorKind::Tool, "tool requires an active tape name"))?;
+    let persist = args.get_bool_field("persist").unwrap_or(false);
+    let store = EvolutionStore::new(workspace_from_context(ctx.as_ref()));
+    let outcome = store
+        .distill_tape(&tapes_dir_from_context(ctx.as_ref()), &tape, persist)
+        .map_err(tool_error)?;
+    ok_val(render_distill_result(&outcome))
+}
+
 async fn run_evolution_evaluate(args: Value, ctx: Option<ToolContext>) -> ToolResult {
     maybe_send_user_facing_notice("evolution.evaluate", ctx.as_ref(), &args).await;
     let id = args.require_str_field("id").map_err(invalid_input)?;
@@ -1546,6 +1590,13 @@ fn workspace_from_context(ctx: Option<&ToolContext>) -> PathBuf {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
+fn tapes_dir_from_context(ctx: Option<&ToolContext>) -> PathBuf {
+    ctx.and_then(|item| item.state.get(RUNTIME_TAPES_DIR_KEY))
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| eli_home().join("tapes"))
 }
 
 fn capture_candidate(
@@ -1658,6 +1709,20 @@ fn render_candidate_detail(candidate: &crate::evolution::EvolutionCandidate) -> 
         candidate.content.clone(),
     ]
     .join("\n")
+}
+
+fn render_distill_result(outcome: &DistillOutcome) -> String {
+    let mode = if outcome.persisted {
+        "Distilled"
+    } else {
+        "Previewed"
+    };
+    format!(
+        "{mode} tape {}: {} prompt-rule candidates, {} skipped.",
+        outcome.tape,
+        outcome.candidates.len(),
+        outcome.skipped.len()
+    )
 }
 
 fn render_evaluation_run(run: &EvaluationRun) -> String {
@@ -3464,6 +3529,7 @@ mod tests {
             tool_fs_write(),
             tool_fs_edit(),
             tool_evolution_capture(),
+            tool_evolution_distill(),
             tool_evolution_list(),
             tool_evolution_show(),
             tool_evolution_evaluate(),
@@ -3508,6 +3574,17 @@ mod tests {
         assert_eq!(
             auto_notice("evolution.capture", &json!({"title": "Keep updates terse"})),
             "记录演进候选: Keep updates terse"
+        );
+        assert_eq!(
+            auto_notice("evolution.distill", &json!({"tape": "abc123"})),
+            "预演蒸馏演进候选 abc123"
+        );
+        assert_eq!(
+            auto_notice(
+                "evolution.distill",
+                &json!({"tape": "abc123", "persist": true})
+            ),
+            "蒸馏演进候选 abc123"
         );
         assert_eq!(auto_notice("evolution.list", &json!({})), "列出演进候选");
         assert_eq!(

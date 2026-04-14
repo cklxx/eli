@@ -1,5 +1,6 @@
 //! Governed self-evolution storage for prompt rules and skill candidates.
 
+mod distill;
 mod eval;
 
 use std::fs;
@@ -19,6 +20,7 @@ const PROMOTIONS_DIR: &str = "promotions";
 const SNAPSHOTS_DIR: &str = "snapshots";
 const RULES_FILE: &str = "rules.md";
 
+pub use distill::{DistillEvidenceSummary, DistillOutcome, DistillSkip};
 pub use eval::{EvaluationCheck, EvaluationRun};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,6 +293,15 @@ impl EvolutionStore {
     pub fn list_candidates(&self) -> anyhow::Result<Vec<EvolutionCandidate>> {
         let candidates = read_candidates(&self.candidates_dir())?;
         Ok(sort_candidates(candidates))
+    }
+
+    pub fn distill_tape(
+        &self,
+        tapes_dir: &Path,
+        tape_name: &str,
+        persist: bool,
+    ) -> anyhow::Result<DistillOutcome> {
+        distill::distill_tape(self, tapes_dir, tape_name, persist)
     }
 
     pub fn read_candidate(&self, id: &str) -> anyhow::Result<EvolutionCandidate> {

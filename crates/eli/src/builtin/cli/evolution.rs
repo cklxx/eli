@@ -2,7 +2,10 @@
 
 use std::path::PathBuf;
 
-use crate::evolution::{CandidateKind, CandidateStatus, EvaluationRun, EvolutionStore};
+use crate::builtin::config::eli_home;
+use crate::evolution::{
+    CandidateKind, CandidateStatus, DistillOutcome, EvaluationRun, EvolutionStore,
+};
 
 pub(crate) async fn list_command(status: Option<CandidateStatus>) -> anyhow::Result<()> {
     let store = default_store()?;
@@ -20,6 +23,12 @@ pub(crate) async fn list_command(status: Option<CandidateStatus>) -> anyhow::Res
 pub(crate) async fn show_command(id: String) -> anyhow::Result<()> {
     let candidate = default_store()?.read_candidate(&id)?;
     println!("{}", render_candidate_detail(&candidate));
+    Ok(())
+}
+
+pub(crate) async fn distill_command(tape: String, persist: bool) -> anyhow::Result<()> {
+    let outcome = default_store()?.distill_tape(&default_tapes_dir()?, &tape, persist)?;
+    println!("{}", render_distill_result(&outcome));
     Ok(())
 }
 
@@ -86,6 +95,10 @@ fn default_workspace() -> anyhow::Result<PathBuf> {
     Ok(std::env::current_dir()?)
 }
 
+fn default_tapes_dir() -> anyhow::Result<PathBuf> {
+    Ok(eli_home().join("tapes"))
+}
+
 fn filter_status(
     candidates: Vec<crate::evolution::EvolutionCandidate>,
     status: Option<CandidateStatus>,
@@ -140,6 +153,20 @@ fn render_candidate_detail(candidate: &crate::evolution::EvolutionCandidate) -> 
         candidate.content.clone(),
     ]
     .join("\n")
+}
+
+fn render_distill_result(outcome: &DistillOutcome) -> String {
+    let mode = if outcome.persisted {
+        "Distilled"
+    } else {
+        "Previewed"
+    };
+    format!(
+        "{mode} tape {}: {} prompt-rule candidates, {} skipped.",
+        outcome.tape,
+        outcome.candidates.len(),
+        outcome.skipped.len()
+    )
 }
 
 fn render_evaluation(run: &EvaluationRun) -> String {
