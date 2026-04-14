@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use crate::builtin::config::eli_home;
 use crate::evolution::{
-    CandidateKind, CandidateStatus, DistillOutcome, EvaluationRun, EvolutionStore,
+    AutoEvolutionPolicy, AutoJournalEntry, CandidateKind, CandidateStatus, DistillOutcome,
+    EvaluationRun, EvolutionStore,
 };
 
 pub(crate) async fn list_command(status: Option<CandidateStatus>) -> anyhow::Result<()> {
@@ -26,9 +27,25 @@ pub(crate) async fn show_command(id: String) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) async fn history_command(limit: usize) -> anyhow::Result<()> {
+    let entries = default_store()?.load_auto_journal()?;
+    println!("{}", render_history_output(&entries, limit));
+    Ok(())
+}
+
 pub(crate) async fn distill_command(tape: String, persist: bool) -> anyhow::Result<()> {
     let outcome = default_store()?.distill_tape(&default_tapes_dir()?, &tape, persist)?;
     println!("{}", render_distill_result(&outcome));
+    Ok(())
+}
+
+pub(crate) async fn auto_run_command(tape: String) -> anyhow::Result<()> {
+    let outcome = default_store()?.auto_evolve_tape(
+        &default_tapes_dir()?,
+        &tape,
+        AutoEvolutionPolicy::default(),
+    )?;
+    println!("{}", render_auto_run_result(&outcome));
     Ok(())
 }
 
@@ -184,6 +201,29 @@ fn render_check(check: &crate::evolution::EvaluationCheck) -> String {
     format!("- {}: {} ({})", check.name, check.passed, check.detail)
 }
 
+fn render_auto_run_result(outcome: &crate::evolution::AutoEvolutionReport) -> String {
+    format!(
+        "Auto-ran tape {}: distilled {}, skipped {}, evaluated {}, observed {}, staged {}, promoted {}, expired {}.",
+        outcome.tape,
+        outcome.distill.candidates.len(),
+        outcome.distill.skipped.len(),
+        outcome.evaluations.len(),
+        outcome.observed.len(),
+        outcome.staged.len(),
+        outcome.promoted.len(),
+        outcome.expired.len(),
+    )
+}
+
+fn render_history_output(entries: &[AutoJournalEntry], limit: usize) -> String {
+    let lines = history_lines(entries, limit);
+    if lines.is_empty() {
+        "No automation history.".to_owned()
+    } else {
+        lines.join("\n")
+    }
+}
+
 fn kind_label(kind: CandidateKind) -> &'static str {
     match kind {
         CandidateKind::PromptRule => "prompt_rule",
@@ -197,5 +237,139 @@ fn status_label(status: CandidateStatus) -> &'static str {
         CandidateStatus::Promoted => "promoted",
         CandidateStatus::Rejected => "rejected",
         CandidateStatus::RolledBack => "rolled_back",
+    }
+}
+
+fn history_lines(entries: &[AutoJournalEntry], limit: usize) -> Vec<String> {
+    let mut entries = entries.to_vec();
+    entries.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    entries
+        .into_iter()
+        .take(limit)
+        .map(render_history_entry)
+        .collect()
+}
+
+fn render_history_entry(entry: AutoJournalEntry) -> String {
+    format!(
+        "{}  {}  {}  {}  {}",
+        entry.created_at,
+        render_action(entry.action),
+        entry.candidate_id.unwrap_or_default(),
+        shorten(&entry.tape, 24),
+        entry.detail,
+    )
+}
+
+fn render_action(action: crate::evolution::AutoJournalAction) -> &'static str {
+    match action {
+        crate::evolution::AutoJournalAction::Distilled => "distilled",
+        crate::evolution::AutoJournalAction::Evaluated => "evaluated",
+        crate::evolution::AutoJournalAction::Observed => "observed",
+        crate::evolution::AutoJournalAction::Staged => "staged",
+        crate::evolution::AutoJournalAction::Promoted => "promoted",
+        crate::evolution::AutoJournalAction::Expired => "expired",
+        crate::evolution::AutoJournalAction::Held => "held",
+    }
+}
+
+fn shorten(text: &str, width: usize) -> String {
+    let mut chars = text.chars();
+    let body: String = chars.by_ref().take(width).collect();
+    if chars.next().is_none() {
+        body
+    } else {
+        format!("{body}...")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store(tmp: &tempfile::TempDir) -> EvolutionStore {
+        EvolutionStore::new(tmp.path())
+    }
+
+    #[test]
+    fn test_render_auto_run_result_summarizes_counts() {
+        let outcome = crate::evolution::AutoEvolutionReport {
+            tape: "abc123".to_owned(),
+            policy: AutoEvolutionPolicy::default(),
+            distill: DistillOutcome {
+                tape: "abc123".to_owned(),
+                persisted: true,
+                evidence: crate::evolution::DistillEvidenceSummary {
+                    tape_entries: 3,
+                    successful_runs: 1,
+                    successful_commands: 1,
+                    active_decisions: 1,
+                },
+                candidates: vec![
+                    store(&tempfile::tempdir().unwrap())
+                        .capture_rule("a", "b", "- c", None, "test")
+                        .unwrap(),
+                ],
+                skipped: vec![crate::evolution::DistillSkip {
+                    title: "skip".to_owned(),
+                    fingerprint: "fp".to_owned(),
+                    reason: "duplicate".to_owned(),
+                }],
+            },
+            evaluations: vec![],
+            observed: vec![],
+            staged: vec![],
+            promoted: vec![],
+            expired: vec![],
+            journal_path: "/tmp/journal".to_owned(),
+            journaled_actions: 0,
+        };
+        assert_eq!(
+            render_auto_run_result(&outcome),
+            "Auto-ran tape abc123: distilled 1, skipped 1, evaluated 0, observed 0, staged 0, promoted 0, expired 0."
+        );
+    }
+
+    #[test]
+    fn test_history_lines_orders_and_limits_entries() {
+        let lines = history_lines(
+            &[
+                entry(
+                    "1",
+                    "tape-a",
+                    crate::evolution::AutoJournalAction::Distilled,
+                ),
+                entry("2", "tape-b", crate::evolution::AutoJournalAction::Promoted),
+                entry("3", "tape-c", crate::evolution::AutoJournalAction::Observed),
+            ],
+            2,
+        );
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("observed"));
+        assert!(lines[1].contains("promoted"));
+    }
+
+    #[test]
+    fn test_history_lines_handles_empty_workspace() {
+        assert_eq!(render_history_output(&[], 5), "No automation history.");
+    }
+
+    fn entry(
+        ts: &str,
+        tape: &str,
+        action: crate::evolution::AutoJournalAction,
+    ) -> AutoJournalEntry {
+        AutoJournalEntry {
+            id: format!("journal-{ts}"),
+            tape: tape.to_owned(),
+            candidate_id: Some(format!("cand-{ts}")),
+            action,
+            detail: format!("detail-{ts}"),
+            created_at: format!("2026-04-14T00:00:0{ts}Z"),
+        }
     }
 }

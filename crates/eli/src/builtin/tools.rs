@@ -19,7 +19,10 @@ use crate::builtin::config::eli_home;
 use crate::builtin::shell_manager::shell_manager;
 use crate::builtin::tape::TapeService;
 use crate::envelope::ValueExt;
-use crate::evolution::{CandidateStatus, DistillOutcome, EvaluationRun, EvolutionStore};
+use crate::evolution::{
+    AutoEvolutionPolicy, AutoJournalAction, AutoJournalEntry, CandidateStatus, DistillOutcome,
+    EvaluationRun, EvolutionStore,
+};
 use crate::sidecar_contract::{SidecarNoticeRequest, SidecarToolRequest, contract_version};
 use crate::skills::discover_skills;
 use crate::tools::{REGISTRY, shorten_text};
@@ -289,6 +292,8 @@ fn builtin_tools() -> Vec<Tool> {
         tool_skill(),
         tool_evolution_capture(),
         tool_evolution_distill(),
+        tool_evolution_history(),
+        tool_evolution_auto_run(),
         tool_evolution_list(),
         tool_evolution_show(),
         tool_evolution_evaluate(),
@@ -623,6 +628,18 @@ fn auto_notice(tool_name: &str, args: &Value) -> String {
                 format!("预演蒸馏演进候选 {}", primary("tape"))
             }
         }
+        "evolution.history" => {
+            let limit = args
+                .get("limit")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(20);
+            if limit > 0 {
+                format!("查看演进历史 {limit}")
+            } else {
+                "查看演进历史".to_owned()
+            }
+        }
+        "evolution.auto_run" => format!("自动运行演进 {}", primary("tape")),
         "evolution.list" => "列出演进候选".to_owned(),
         "evolution.show" => format!("查看演进候选 {}", primary("id")),
         "evolution.evaluate" => format!("评估演进候选 {}", primary("id")),
@@ -1398,6 +1415,39 @@ fn tool_evolution_distill() -> Tool {
     )
 }
 
+fn tool_evolution_history() -> Tool {
+    Tool::with_context(
+        "evolution.history",
+        "Inspect automation history for governed self-evolution.\n\nExamples: review the latest captured, evaluated, promoted, or rolled back candidates, scan the newest automation actions, inspect how a rule changed over time.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Maximum entries to return.", "default": 20}
+            }
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(run_evolution_history(args, ctx))
+        },
+    )
+}
+
+fn tool_evolution_auto_run() -> Tool {
+    Tool::with_context(
+        "evolution.auto_run",
+        "Run the auto-evolution loop on a tape.\n\nExamples: distill tape evidence, evaluate the resulting candidates, promote the passing ones in one step.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tape": {"type": "string", "description": "Tape name to process."}
+            },
+            "required": ["tape"]
+        }),
+        |args: Value, ctx: Option<ToolContext>| -> BoxFuture<'static, ToolResult> {
+            Box::pin(run_evolution_auto_run(args, ctx))
+        },
+    )
+}
+
 fn tool_evolution_list() -> Tool {
     Tool::with_context(
         "evolution.list",
@@ -1542,6 +1592,28 @@ async fn run_evolution_distill(args: Value, ctx: Option<ToolContext>) -> ToolRes
         .distill_tape(&tapes_dir_from_context(ctx.as_ref()), &tape, persist)
         .map_err(tool_error)?;
     ok_val(render_distill_result(&outcome))
+}
+
+async fn run_evolution_history(args: Value, ctx: Option<ToolContext>) -> ToolResult {
+    maybe_send_user_facing_notice("evolution.history", ctx.as_ref(), &args).await;
+    let limit = args.get_i64_field("limit").unwrap_or(20).max(0) as usize;
+    let store = EvolutionStore::new(workspace_from_context(ctx.as_ref()));
+    let entries = store.load_auto_journal().map_err(tool_error)?;
+    ok_val(render_history_output(&entries, limit))
+}
+
+async fn run_evolution_auto_run(args: Value, ctx: Option<ToolContext>) -> ToolResult {
+    maybe_send_user_facing_notice("evolution.auto_run", ctx.as_ref(), &args).await;
+    let tape = args.require_str_field("tape").map_err(invalid_input)?;
+    let store = EvolutionStore::new(workspace_from_context(ctx.as_ref()));
+    let outcome = store
+        .auto_evolve_tape(
+            &tapes_dir_from_context(ctx.as_ref()),
+            tape,
+            AutoEvolutionPolicy::default(),
+        )
+        .map_err(tool_error)?;
+    ok_val(render_auto_run_result(&outcome))
 }
 
 async fn run_evolution_evaluate(args: Value, ctx: Option<ToolContext>) -> ToolResult {
@@ -1725,6 +1797,43 @@ fn render_distill_result(outcome: &DistillOutcome) -> String {
     )
 }
 
+fn render_history_output(entries: &[AutoJournalEntry], limit: usize) -> String {
+    let lines = history_lines(entries, limit);
+    if lines.is_empty() {
+        "No automation history.".to_owned()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn render_auto_run_result(outcome: &crate::evolution::AutoEvolutionReport) -> String {
+    format!(
+        "Auto-ran tape {}: distilled {}, skipped {}, evaluated {}, observed {}, staged {}, promoted {}, expired {}.",
+        outcome.tape,
+        outcome.distill.candidates.len(),
+        outcome.distill.skipped.len(),
+        outcome.evaluations.len(),
+        outcome.observed.len(),
+        outcome.staged.len(),
+        outcome.promoted.len(),
+        outcome.expired.len(),
+    )
+}
+
+fn history_lines(entries: &[AutoJournalEntry], limit: usize) -> Vec<String> {
+    let mut entries = entries.to_vec();
+    entries.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    entries
+        .into_iter()
+        .take(limit)
+        .map(render_history_entry)
+        .collect()
+}
+
 fn render_evaluation_run(run: &EvaluationRun) -> String {
     let mut lines = vec![
         format!("id: {}", run.id),
@@ -1738,6 +1847,39 @@ fn render_evaluation_run(run: &EvaluationRun) -> String {
 
 fn render_evaluation_check(check: &crate::evolution::EvaluationCheck) -> String {
     format!("- {}: {} ({})", check.name, check.passed, check.detail)
+}
+
+fn render_history_entry(entry: AutoJournalEntry) -> String {
+    format!(
+        "{}  {}  {}  {}  {}",
+        entry.created_at,
+        render_action(entry.action),
+        entry.candidate_id.unwrap_or_default(),
+        shorten(&entry.tape, 24),
+        entry.detail,
+    )
+}
+
+fn render_action(action: AutoJournalAction) -> &'static str {
+    match action {
+        AutoJournalAction::Distilled => "distilled",
+        AutoJournalAction::Evaluated => "evaluated",
+        AutoJournalAction::Observed => "observed",
+        AutoJournalAction::Staged => "staged",
+        AutoJournalAction::Promoted => "promoted",
+        AutoJournalAction::Expired => "expired",
+        AutoJournalAction::Held => "held",
+    }
+}
+
+fn shorten(text: &str, width: usize) -> String {
+    let mut chars = text.chars();
+    let body: String = chars.by_ref().take(width).collect();
+    if chars.next().is_none() {
+        body
+    } else {
+        format!("{body}...")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3530,6 +3672,8 @@ mod tests {
             tool_fs_edit(),
             tool_evolution_capture(),
             tool_evolution_distill(),
+            tool_evolution_history(),
+            tool_evolution_auto_run(),
             tool_evolution_list(),
             tool_evolution_show(),
             tool_evolution_evaluate(),
@@ -3585,6 +3729,14 @@ mod tests {
                 &json!({"tape": "abc123", "persist": true})
             ),
             "蒸馏演进候选 abc123"
+        );
+        assert_eq!(
+            auto_notice("evolution.history", &json!({"limit": 3})),
+            "查看演进历史 3"
+        );
+        assert_eq!(
+            auto_notice("evolution.auto_run", &json!({"tape": "abc123"})),
+            "自动运行演进 abc123"
         );
         assert_eq!(auto_notice("evolution.list", &json!({})), "列出演进候选");
         assert_eq!(

@@ -1,5 +1,6 @@
 //! Governed self-evolution storage for prompt rules and skill candidates.
 
+mod auto;
 mod distill;
 mod eval;
 
@@ -19,7 +20,16 @@ const EVALUATIONS_DIR: &str = "evaluations";
 const PROMOTIONS_DIR: &str = "promotions";
 const SNAPSHOTS_DIR: &str = "snapshots";
 const RULES_FILE: &str = "rules.md";
+const RULES_BUNDLE_FILE: &str = "rules.bundle.md";
+const RULES_FRAGMENTS_DIR: &str = "rules";
+const AUTO_DIR: &str = "auto";
+const AUTO_CANARIES_DIR: &str = "canaries";
+const AUTO_JOURNAL_FILE: &str = "journal.jsonl";
 
+pub use auto::{
+    AutoCanary, AutoCanaryStatus, AutoEvolutionLoop, AutoEvolutionPolicy, AutoEvolutionReport,
+    AutoJournalAction, AutoJournalEntry,
+};
 pub use distill::{DistillEvidenceSummary, DistillOutcome, DistillSkip};
 pub use eval::{EvaluationCheck, EvaluationRun};
 
@@ -348,6 +358,9 @@ impl EvolutionStore {
         let target = PathBuf::from(&record.target);
         self.restore_target(&record, &target)?;
         self.write_promotion_record_file(&with_rollback_record(record))?;
+        if candidate.kind == CandidateKind::PromptRule {
+            self.refresh_prompt_rules_bundle()?;
+        }
         let rolled_back = with_status(candidate, CandidateStatus::RolledBack, Some(target.clone()));
         self.write_candidate(&rolled_back)?;
         Ok(RollbackOutcome {
@@ -357,7 +370,78 @@ impl EvolutionStore {
     }
 
     pub fn load_prompt_rules(&self) -> anyhow::Result<String> {
+        self.refresh_prompt_rules_bundle()?;
         load_prompt_rules_for_workspace(&self.workspace)
+    }
+
+    pub fn auto_evolve_tape(
+        &self,
+        tapes_dir: &Path,
+        tape_name: &str,
+        policy: AutoEvolutionPolicy,
+    ) -> anyhow::Result<AutoEvolutionReport> {
+        auto::run_auto_evolution(self, tapes_dir, tape_name, policy)
+    }
+
+    pub fn load_auto_canaries(&self) -> anyhow::Result<Vec<AutoCanary>> {
+        auto::load_canaries(self)
+    }
+
+    pub fn load_auto_journal(&self) -> anyhow::Result<Vec<AutoJournalEntry>> {
+        auto::load_journal(self)
+    }
+
+    pub fn observe_auto_canaries(
+        &self,
+        tape_name: &str,
+        fingerprints: &std::collections::HashSet<String>,
+    ) -> anyhow::Result<Vec<AutoCanary>> {
+        auto::observe_canaries(self, tape_name, fingerprints)
+    }
+
+    pub fn expire_auto_canaries(&self) -> anyhow::Result<Vec<AutoCanary>> {
+        auto::expire_canaries(self)
+    }
+
+    pub fn stage_auto_canary(
+        &self,
+        candidate: &EvolutionCandidate,
+        evaluation: &EvaluationRun,
+        tape_name: &str,
+        policy: &AutoEvolutionPolicy,
+    ) -> anyhow::Result<AutoCanary> {
+        auto::stage_canary(self, candidate, evaluation, tape_name, policy)
+    }
+
+    pub fn finalize_auto_canary(
+        &self,
+        candidate_id: &str,
+        force: bool,
+    ) -> anyhow::Result<PromotionOutcome> {
+        auto::finalize_canary(self, candidate_id, force)
+    }
+
+    pub fn append_auto_journal(&self, entry: &AutoJournalEntry) -> anyhow::Result<()> {
+        auto::append_journal(self, entry)
+    }
+
+    pub fn find_candidate_by_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> anyhow::Result<Option<EvolutionCandidate>> {
+        let candidates = self.list_candidates()?;
+        Ok(candidates
+            .iter()
+            .find(|candidate| {
+                candidate.effective_fingerprint() == fingerprint
+                    && candidate.status == CandidateStatus::Pending
+            })
+            .cloned()
+            .or_else(|| {
+                candidates
+                    .into_iter()
+                    .find(|candidate| candidate.effective_fingerprint() == fingerprint)
+            }))
     }
 
     fn promote_candidate(
@@ -380,6 +464,7 @@ impl EvolutionStore {
         ensure_parent(path)?;
         let updated = append_rule_block(read_optional(path)?, candidate);
         fs::write(path, updated)?;
+        self.refresh_prompt_rules_bundle()?;
         Ok(())
     }
 
@@ -472,7 +557,7 @@ impl EvolutionStore {
     }
 
     fn rules_path(&self) -> PathBuf {
-        self.evolution_root().join(RULES_FILE)
+        self.rules_bundle_path()
     }
 
     fn skill_path(&self, skill_name: &str) -> PathBuf {
@@ -488,7 +573,7 @@ impl EvolutionStore {
 
     fn target_path(&self, candidate: &EvolutionCandidate) -> PathBuf {
         match candidate.kind {
-            CandidateKind::PromptRule => self.rules_path(),
+            CandidateKind::PromptRule => self.rules_fragment_path(&candidate.id),
             CandidateKind::Skill => self.skill_path(candidate.skill_name.as_deref().unwrap_or("")),
         }
     }
@@ -548,27 +633,90 @@ impl EvolutionStore {
         fs::copy(snapshot, target)?;
         Ok(())
     }
+
+    fn refresh_prompt_rules_bundle(&self) -> anyhow::Result<()> {
+        auto::refresh_prompt_rules_bundle(self)
+    }
+
+    fn rules_bundle_path(&self) -> PathBuf {
+        self.evolution_root().join(RULES_BUNDLE_FILE)
+    }
+
+    fn rules_fragment_dir(&self) -> PathBuf {
+        self.evolution_root().join(RULES_FRAGMENTS_DIR)
+    }
+
+    fn rules_fragment_path(&self, id: &str) -> PathBuf {
+        self.rules_fragment_dir().join(format!("{id}.md"))
+    }
+
+    fn legacy_rules_path(&self) -> PathBuf {
+        self.evolution_root().join(RULES_FILE)
+    }
+
+    fn auto_root(&self) -> PathBuf {
+        self.evolution_root().join(AUTO_DIR)
+    }
+
+    fn auto_canaries_dir(&self) -> PathBuf {
+        self.auto_root().join(AUTO_CANARIES_DIR)
+    }
+
+    fn auto_journal_path(&self) -> PathBuf {
+        self.auto_root().join(AUTO_JOURNAL_FILE)
+    }
 }
 
 pub fn load_prompt_rules_for_workspace(workspace: &Path) -> anyhow::Result<String> {
+    let store = EvolutionStore::new(workspace);
     load_prompt_rules_from_paths(
         &global_rules_path(),
-        &EvolutionStore::new(workspace).rules_path(),
+        &store.legacy_rules_path(),
+        &store.rules_fragment_dir(),
     )
+}
+
+pub(super) fn load_local_prompt_rules_for_workspace(workspace: &Path) -> anyhow::Result<String> {
+    let store = EvolutionStore::new(workspace);
+    load_local_prompt_rules_from_paths(&store.legacy_rules_path(), &store.rules_fragment_dir())
 }
 
 fn global_rules_path() -> PathBuf {
     eli_home().join("evolution").join(RULES_FILE)
 }
 
-fn load_prompt_rules_from_paths(global: &Path, local: &Path) -> anyhow::Result<String> {
-    Ok(join_rule_sources([
-        read_optional(global)?,
-        read_optional(local)?,
-    ]))
+fn load_prompt_rules_from_paths(
+    global: &Path,
+    local: &Path,
+    fragments_dir: &Path,
+) -> anyhow::Result<String> {
+    let mut sources = vec![read_optional(global)?, read_optional(local)?];
+    sources.extend(read_rule_fragments(fragments_dir)?);
+    Ok(join_rule_sources(sources))
 }
 
-fn join_rule_sources(parts: [String; 2]) -> String {
+fn load_local_prompt_rules_from_paths(
+    local: &Path,
+    fragments_dir: &Path,
+) -> anyhow::Result<String> {
+    let mut sources = vec![read_optional(local)?];
+    sources.extend(read_rule_fragments(fragments_dir)?);
+    Ok(join_rule_sources(sources))
+}
+
+fn read_rule_fragments(dir: &Path) -> anyhow::Result<Vec<String>> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut paths = fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .collect::<Vec<_>>();
+    paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    paths.into_iter().map(|path| read_optional(&path)).collect()
+}
+
+fn join_rule_sources(parts: Vec<String>) -> String {
     parts
         .into_iter()
         .map(|part| part.trim().to_owned())
@@ -884,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn test_promote_rule_appends_rules_file() {
+    fn test_promote_rule_writes_fragment_and_refreshes_bundle() {
         let tmp = tempfile::tempdir().unwrap();
         let candidate = store(&tmp)
             .capture_rule(
@@ -897,9 +1045,16 @@ mod tests {
             .unwrap();
         store(&tmp).evaluate(&candidate.id).unwrap();
         let outcome = store(&tmp).promote(&candidate.id, false).unwrap();
-        let rules = fs::read_to_string(outcome.target).unwrap();
-        assert!(rules.contains("Prefer evidence"));
-        assert!(rules.contains("Cite file paths when possible."));
+        assert!(
+            outcome
+                .target
+                .ends_with(&format!(".agents/evolution/rules/{}.md", candidate.id))
+        );
+        let fragment = fs::read_to_string(&outcome.target).unwrap();
+        let bundle =
+            fs::read_to_string(tmp.path().join(".agents/evolution/rules.bundle.md")).unwrap();
+        assert!(fragment.contains("Prefer evidence"));
+        assert!(bundle.contains("Cite file paths when possible."));
     }
 
     #[test]
@@ -927,11 +1082,16 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let global = home.path().join("rules.md");
         let local = tmp.path().join("rules.md");
+        let fragments = tmp.path().join("rules");
         fs::write(&global, "## Global\n- One").unwrap();
         fs::write(&local, "## Local\n- Two").unwrap();
-        let rules = load_prompt_rules_from_paths(&global, &local).unwrap();
+        fs::create_dir_all(&fragments).unwrap();
+        fs::write(fragments.join("b.md"), "## B\n- Three").unwrap();
+        fs::write(fragments.join("a.md"), "## A\n- Four").unwrap();
+        let rules = load_prompt_rules_from_paths(&global, &local, &fragments).unwrap();
         assert!(rules.contains("## Global"));
         assert!(rules.contains("## Local"));
+        assert!(rules.find("## A").unwrap() < rules.find("## B").unwrap());
     }
 
     #[test]
@@ -975,20 +1135,33 @@ mod tests {
         let rules_dir = tmp.path().join(".agents/evolution");
         fs::create_dir_all(&rules_dir).unwrap();
         fs::write(rules_dir.join("rules.md"), "## Existing\n- Keep this.\n").unwrap();
-        let candidate = store(&tmp)
+        let first = store(&tmp)
             .capture_rule(
-                "Prefer evidence",
+                "Prefer evidence one",
                 "Cite files",
                 "- Cite file paths.",
                 None,
                 "test",
             )
             .unwrap();
-        store(&tmp).evaluate(&candidate.id).unwrap();
-        store(&tmp).promote(&candidate.id, false).unwrap();
-        let outcome = store(&tmp).rollback(&candidate.id).unwrap();
-        let restored = fs::read_to_string(outcome.target).unwrap();
-        assert_eq!(restored, "## Existing\n- Keep this.\n");
+        let second = store(&tmp)
+            .capture_rule(
+                "Prefer evidence two",
+                "Cite more files",
+                "- Cite every file.",
+                None,
+                "test",
+            )
+            .unwrap();
+        store(&tmp).evaluate(&first.id).unwrap();
+        store(&tmp).evaluate(&second.id).unwrap();
+        store(&tmp).promote(&first.id, false).unwrap();
+        store(&tmp).promote(&second.id, false).unwrap();
+        let outcome = store(&tmp).rollback(&first.id).unwrap();
+        let rules = store(&tmp).load_prompt_rules().unwrap();
+        assert!(rules.contains("## Existing"));
+        assert!(rules.contains("Prefer evidence two"));
+        assert!(!rules.contains("Prefer evidence one"));
         assert_eq!(outcome.candidate.status, CandidateStatus::RolledBack);
     }
 }

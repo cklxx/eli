@@ -34,7 +34,7 @@ use crate::channels::message::{ChannelMessage, MessageKind};
 use crate::hooks::{EliHookSpec, TapeStoreKind};
 use crate::smart_router::{RouteDecision, SmartRouter};
 use crate::tool_middleware::MiddlewareChain;
-use crate::types::{Envelope, PromptValue, RUNTIME_WORKSPACE_KEY, State};
+use crate::types::{Envelope, PromptValue, RUNTIME_TAPES_DIR_KEY, RUNTIME_WORKSPACE_KEY, State};
 
 pub(crate) const CLEANUP_ONLY_CONTEXT_KEY: &str = "_eli_cleanup_only";
 
@@ -183,11 +183,7 @@ impl BuiltinImpl {
             "session_id".to_owned(),
             Value::String(session_id.to_owned()),
         );
-        let workspace = std::env::current_dir()
-            .unwrap_or_default()
-            .display()
-            .to_string();
-        state.insert(RUNTIME_WORKSPACE_KEY.to_owned(), Value::String(workspace));
+        insert_runtime_paths(&mut state, &self.home);
         state
     }
 
@@ -290,6 +286,25 @@ impl BuiltinImpl {
             .finalize();
         vec![outbound]
     }
+}
+
+fn insert_runtime_paths(state: &mut State, home: &std::path::Path) {
+    state.insert(
+        RUNTIME_WORKSPACE_KEY.to_owned(),
+        Value::String(display_path(current_workspace())),
+    );
+    state.insert(
+        RUNTIME_TAPES_DIR_KEY.to_owned(),
+        Value::String(display_path(home.join("tapes"))),
+    );
+}
+
+fn current_workspace() -> PathBuf {
+    std::env::current_dir().unwrap_or_default()
+}
+
+fn display_path(path: PathBuf) -> String {
+    path.display().to_string()
 }
 
 fn effective_output_channel(message: &ChannelMessage) -> &str {
@@ -683,6 +698,20 @@ mod tests {
                 .get("source_channel")
                 .and_then(|v| v.as_str()),
             Some("feishu")
+        );
+    }
+
+    #[test]
+    fn test_load_state_includes_runtime_tapes_dir() {
+        let builtin = BuiltinImpl::new();
+        let state = builtin.load_state("session:1");
+        assert!(state.contains_key(RUNTIME_WORKSPACE_KEY));
+        assert_eq!(
+            state
+                .get(RUNTIME_TAPES_DIR_KEY)
+                .and_then(Value::as_str)
+                .map(|value| value.ends_with("/tapes")),
+            Some(true)
         );
     }
 

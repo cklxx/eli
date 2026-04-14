@@ -103,6 +103,24 @@ struct DistillSpec {
     evidence_ids: Vec<String>,
 }
 
+impl EntryId for RunEvidence {
+    fn entry_id(&self) -> i64 {
+        self.entry_id
+    }
+}
+
+impl EntryId for CommandEvidence {
+    fn entry_id(&self) -> i64 {
+        self.entry_id
+    }
+}
+
+impl EntryId for DecisionEvidence {
+    fn entry_id(&self) -> i64 {
+        self.entry_id
+    }
+}
+
 impl EvidenceSet {
     fn summary(&self) -> DistillEvidenceSummary {
         DistillEvidenceSummary {
@@ -124,22 +142,21 @@ fn collect_evidence(entries: &[TapeEntry]) -> EvidenceSet {
 }
 
 fn collect_runs(entries: &[TapeEntry]) -> Vec<RunEvidence> {
-    entries.iter().filter_map(run_evidence).collect::<Vec<_>>()
+    sorted_by_entry_id(entries.iter().filter_map(run_evidence).collect())
 }
 
 fn collect_commands(entries: &[TapeEntry]) -> Vec<CommandEvidence> {
-    entries
-        .iter()
-        .filter_map(command_evidence)
-        .collect::<Vec<_>>()
+    sorted_by_entry_id(entries.iter().filter_map(command_evidence).collect())
 }
 
 fn collect_decisions(entries: &[TapeEntry]) -> Vec<DecisionEvidence> {
     let active = active_decision_texts(entries);
-    entries
-        .iter()
-        .filter_map(|entry| decision_evidence(entry, &active))
-        .collect::<Vec<_>>()
+    sorted_by_entry_id(
+        entries
+            .iter()
+            .filter_map(|entry| decision_evidence(entry, &active))
+            .collect(),
+    )
 }
 
 fn active_decision_texts(entries: &[TapeEntry]) -> HashSet<String> {
@@ -190,6 +207,11 @@ fn is_success_event(entry: &TapeEntry, names: &[&str]) -> bool {
     entry.kind == TapeEntryKind::Event
         && names.contains(&event_name(entry).as_str())
         && event_data_text(entry, "status") == "ok"
+}
+
+fn sorted_by_entry_id<T: EntryId>(mut items: Vec<T>) -> Vec<T> {
+    items.sort_by_key(EntryId::entry_id);
+    items
 }
 
 fn draft_candidates(
@@ -244,6 +266,10 @@ fn build_specs(tape_name: &str, evidence: &EvidenceSet) -> Vec<DistillSpec> {
     .collect()
 }
 
+trait EntryId {
+    fn entry_id(&self) -> i64;
+}
+
 fn run_spec(tape_name: &str, runs: &[RunEvidence]) -> Option<DistillSpec> {
     (!runs.is_empty()).then(|| DistillSpec {
         title: "Preserve successful agent run patterns".to_owned(),
@@ -291,7 +317,7 @@ fn decision_spec(tape_name: &str, decisions: &[DecisionEvidence]) -> Option<Dist
 
 fn run_spec_content(runs: &[RunEvidence]) -> String {
     bullet_lines([
-        format!("- Observed successful agent runs: {}.", runs.len()),
+        String::from("- Observed successful agent runs on this tape."),
         format!("- Example run: {}.", run_example(runs)),
         String::from(
             "- Reuse the same model, provider, and token budget when the next task has the same shape.",
@@ -301,7 +327,7 @@ fn run_spec_content(runs: &[RunEvidence]) -> String {
 
 fn command_spec_content(commands: &[CommandEvidence]) -> String {
     bullet_lines([
-        format!("- Observed successful commands: {}.", commands.len()),
+        String::from("- Observed successful shell commands on this tape."),
         format!("- Example command: {}.", command_example(commands)),
         String::from(
             "- Prefer the shortest successful shell form that reproduces the same result.",
@@ -311,7 +337,7 @@ fn command_spec_content(commands: &[CommandEvidence]) -> String {
 
 fn decision_spec_content(decisions: &[DecisionEvidence]) -> String {
     bullet_lines([
-        format!("- Active decisions observed: {}.", decisions.len()),
+        String::from("- Active decisions are part of the current session policy."),
         String::from("- Preserve these commitments while they remain active."),
         format!("- {}.", decisions_example(decisions)),
     ])
@@ -575,6 +601,24 @@ mod tests {
         assert_eq!(first.candidates.len(), 1);
         assert!(second.candidates.is_empty());
         assert_eq!(second.skipped.len(), 1);
+    }
+
+    #[test]
+    fn test_distill_rule_fingerprint_stays_stable_when_tape_grows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store(&tmp);
+        write_tape(&tmp, "demo__tape", &[run_event("ok")]);
+        let first = store.distill_tape(tmp.path(), "demo__tape", false).unwrap();
+        write_tape(
+            &tmp,
+            "demo__tape",
+            &[run_event("ok"), run_event("ok"), command_event("ok")],
+        );
+        let second = store.distill_tape(tmp.path(), "demo__tape", false).unwrap();
+        assert_eq!(
+            first.candidates[0].effective_fingerprint(),
+            second.candidates[0].effective_fingerprint()
+        );
     }
 
     #[test]

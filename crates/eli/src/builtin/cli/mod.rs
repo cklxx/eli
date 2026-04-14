@@ -144,6 +144,12 @@ pub enum EvolutionAction {
         #[arg(long)]
         status: Option<EvolutionStatusArg>,
     },
+    /// Inspect automation history.
+    History {
+        /// Maximum history entries to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Show a candidate in full.
     Show {
         /// Candidate ID.
@@ -156,6 +162,11 @@ pub enum EvolutionAction {
         /// Persist the distilled candidates.
         #[arg(long)]
         persist: bool,
+    },
+    /// Run the auto-evolution loop on a tape.
+    AutoRun {
+        /// Tape name to process.
+        tape: String,
     },
     /// Evaluate a pending candidate.
     Evaluate {
@@ -296,10 +307,12 @@ pub async fn execute(cmd: CliCommand) -> anyhow::Result<()> {
             EvolutionAction::List { status } => {
                 evolution::list_command(status.map(map_evolution_status)).await
             }
+            EvolutionAction::History { limit } => evolution::history_command(limit).await,
             EvolutionAction::Show { id } => evolution::show_command(id).await,
             EvolutionAction::Distill { tape, persist } => {
                 evolution::distill_command(tape, persist).await
             }
+            EvolutionAction::AutoRun { tape } => evolution::auto_run_command(tape).await,
             EvolutionAction::Evaluate { id } => evolution::evaluate_command(id).await,
             EvolutionAction::CaptureRule {
                 title,
@@ -395,5 +408,39 @@ fn map_evolution_status(status: EvolutionStatusArg) -> crate::evolution::Candida
         EvolutionStatusArg::Promoted => crate::evolution::CandidateStatus::Promoted,
         EvolutionStatusArg::Rejected => crate::evolution::CandidateStatus::Rejected,
         EvolutionStatusArg::RolledBack => crate::evolution::CandidateStatus::RolledBack,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Debug, Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        command: CliCommand,
+    }
+
+    #[test]
+    fn test_parse_evolution_auto_run() {
+        let cmd = TestCli::try_parse_from(["eli", "evolution", "auto-run", "tape-1"]).unwrap();
+        match cmd.command {
+            CliCommand::Evolution {
+                action: EvolutionAction::AutoRun { tape },
+            } => assert_eq!(tape, "tape-1"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_evolution_history_limit() {
+        let cmd = TestCli::try_parse_from(["eli", "evolution", "history", "--limit", "7"]).unwrap();
+        match cmd.command {
+            CliCommand::Evolution {
+                action: EvolutionAction::History { limit },
+            } => assert_eq!(limit, 7),
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

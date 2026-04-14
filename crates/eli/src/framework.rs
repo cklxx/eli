@@ -13,10 +13,11 @@ use nexil::CancellationToken;
 use crate::builtin::config::EliConfig;
 use crate::control_plane::{BudgetLedger, DispatchFn, TurnContext, turn_usage, with_turn_context};
 use crate::envelope::{ValueExt, unpack_batch_vec};
+use crate::evolution::{AutoEvolutionLoop, AutoEvolutionPolicy};
 use crate::hooks::{ChannelHook, EliHookSpec, HookRuntime, TapeStoreKind};
 use crate::types::{
-    Envelope, MessageHandler, PromptValue, RUNTIME_SYSTEM_PROMPT_KEY, RUNTIME_WORKSPACE_KEY, State,
-    TurnResult, TurnUsageInfo,
+    Envelope, MessageHandler, PromptValue, RUNTIME_SYSTEM_PROMPT_KEY, RUNTIME_TAPES_DIR_KEY,
+    RUNTIME_WORKSPACE_KEY, State, TurnResult, TurnUsageInfo,
 };
 
 // ---------------------------------------------------------------------------
@@ -207,6 +208,7 @@ impl EliFramework {
             let t0 = Instant::now();
             rt.call_save_state(&session_id, &state, &inbound, &model_output)
                 .await;
+            self.spawn_auto_evolution(&session_id, &state);
             let save_state_us = t0.elapsed().as_micros();
 
             let t0 = Instant::now();
@@ -255,6 +257,20 @@ impl EliFramework {
             })
         })
         .await
+    }
+
+    fn spawn_auto_evolution(&self, session_id: &str, state: &State) {
+        let Some(ctx) = auto_evolution_context(session_id, state) else {
+            return;
+        };
+        tokio::spawn(async move {
+            let result = AutoEvolutionLoop::new(AutoEvolutionPolicy::default()).run(
+                &crate::evolution::EvolutionStore::new(&ctx.workspace),
+                &ctx.tapes_dir,
+                &ctx.tape_name,
+            );
+            log_auto_evolution_result(&ctx, result);
+        });
     }
 
     /// Load a snapshot of the hook runtime. Lock-free via `ArcSwap`.
@@ -515,6 +531,57 @@ impl EliFramework {
         }
 
         vec![Value::Object(fallback)]
+    }
+}
+
+struct AutoEvolutionContext {
+    workspace: PathBuf,
+    tapes_dir: PathBuf,
+    tape_name: String,
+}
+
+fn auto_evolution_context(session_id: &str, state: &State) -> Option<AutoEvolutionContext> {
+    if auto_evolution_disabled() {
+        return None;
+    }
+    Some(AutoEvolutionContext {
+        workspace: runtime_path(state, RUNTIME_WORKSPACE_KEY)?,
+        tapes_dir: runtime_path(state, RUNTIME_TAPES_DIR_KEY)?,
+        tape_name: crate::builtin::tape::TapeService::session_tape_name(
+            session_id,
+            &runtime_path(state, RUNTIME_WORKSPACE_KEY)?,
+        ),
+    })
+}
+
+fn runtime_path(state: &State, key: &str) -> Option<PathBuf> {
+    state.get(key).and_then(Value::as_str).map(PathBuf::from)
+}
+
+fn auto_evolution_disabled() -> bool {
+    matches!(
+        std::env::var("ELI_EVOLUTION_DISABLED").ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
+fn log_auto_evolution_result(
+    ctx: &AutoEvolutionContext,
+    result: anyhow::Result<crate::evolution::AutoEvolutionReport>,
+) {
+    match result {
+        Ok(report) => tracing::info!(
+            tape = %ctx.tape_name,
+            distilled = report.distill.candidates.len(),
+            observed = report.observed.len(),
+            staged = report.staged.len(),
+            promoted = report.promoted.len(),
+            expired = report.expired.len(),
+            "auto evolution completed"
+        ),
+        Err(error) => {
+            tracing::warn!(tape = %ctx.tape_name, error = %error, "auto evolution failed")
+        }
     }
 }
 
@@ -893,6 +960,37 @@ mod tests {
         // Non-overlapping keys are preserved from both plugins.
         assert_eq!(state["only_first"], Value::String("yes".into()));
         assert_eq!(state["only_second"], Value::String("yes".into()));
+    }
+
+    #[test]
+    fn test_auto_evolution_context_uses_runtime_paths() {
+        let mut state = State::new();
+        state.insert(
+            RUNTIME_WORKSPACE_KEY.to_owned(),
+            Value::String("/tmp/workspace".into()),
+        );
+        state.insert(
+            RUNTIME_TAPES_DIR_KEY.to_owned(),
+            Value::String("/tmp/tapes".into()),
+        );
+        let ctx = auto_evolution_context("cli:test", &state).unwrap();
+        assert_eq!(ctx.workspace, std::path::PathBuf::from("/tmp/workspace"));
+        assert_eq!(ctx.tapes_dir, std::path::PathBuf::from("/tmp/tapes"));
+        assert_eq!(
+            ctx.tape_name,
+            crate::builtin::tape::TapeService::session_tape_name(
+                "cli:test",
+                std::path::Path::new("/tmp/workspace"),
+            )
+        );
+    }
+
+    #[test]
+    fn test_auto_evolution_context_honors_kill_switch() {
+        unsafe { std::env::set_var("ELI_EVOLUTION_DISABLED", "1") };
+        let ctx = auto_evolution_context("cli:test", &State::new());
+        unsafe { std::env::remove_var("ELI_EVOLUTION_DISABLED") };
+        assert!(ctx.is_none());
     }
 
     // -- hook_report ----------------------------------------------------------
