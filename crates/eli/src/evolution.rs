@@ -320,10 +320,17 @@ impl EvolutionStore {
 
     pub fn evaluate(&self, id: &str) -> anyhow::Result<EvaluationRun> {
         let candidate = self.read_candidate(id)?;
+        let source_tape = candidate.source_tape.clone();
         ensure_evaluable(&candidate)?;
         let run = eval::evaluate_candidate(self, &candidate)?;
         self.write_evaluation(&run)?;
         self.write_candidate(&with_evaluation(candidate, &run))?;
+        self.record_candidate_action(
+            id,
+            &source_tape,
+            AutoJournalAction::Evaluated,
+            format!("manual evaluation {} score {}", run.id, run.score),
+        )?;
         Ok(run)
     }
 
@@ -332,6 +339,12 @@ impl EvolutionStore {
         ensure_pending(&candidate)?;
         let rejected = with_status(candidate, CandidateStatus::Rejected, None);
         self.write_candidate(&rejected)?;
+        self.record_candidate_action(
+            &rejected.id,
+            &rejected.source_tape,
+            AutoJournalAction::Rejected,
+            format!("candidate '{}' rejected manually", rejected.title),
+        )?;
         Ok(rejected)
     }
 
@@ -345,6 +358,12 @@ impl EvolutionStore {
         self.write_promotion_record_file(&record)?;
         let promoted = with_promotion(candidate, target.clone());
         self.write_candidate(&promoted)?;
+        self.record_candidate_action(
+            &promoted.id,
+            &promoted.source_tape,
+            AutoJournalAction::Promoted,
+            format!("manual promotion to {}", target.display()),
+        )?;
         Ok(PromotionOutcome {
             candidate: promoted,
             target,
@@ -363,6 +382,12 @@ impl EvolutionStore {
         }
         let rolled_back = with_status(candidate, CandidateStatus::RolledBack, Some(target.clone()));
         self.write_candidate(&rolled_back)?;
+        self.record_candidate_action(
+            &rolled_back.id,
+            &rolled_back.source_tape,
+            AutoJournalAction::RolledBack,
+            format!("manual rollback restored {}", target.display()),
+        )?;
         Ok(RollbackOutcome {
             candidate: rolled_back,
             target,
@@ -636,6 +661,23 @@ impl EvolutionStore {
 
     fn refresh_prompt_rules_bundle(&self) -> anyhow::Result<()> {
         auto::refresh_prompt_rules_bundle(self)
+    }
+
+    fn record_candidate_action(
+        &self,
+        candidate_id: &str,
+        source_tape: &Option<String>,
+        action: AutoJournalAction,
+        detail: String,
+    ) -> anyhow::Result<()> {
+        self.append_auto_journal(&AutoJournalEntry {
+            id: new_candidate_id(),
+            tape: source_tape.clone().unwrap_or_default(),
+            candidate_id: Some(candidate_id.to_owned()),
+            action,
+            detail,
+            created_at: now_rfc3339(),
+        })
     }
 
     fn rules_bundle_path(&self) -> PathBuf {
@@ -1074,6 +1116,11 @@ mod tests {
         let candidate = skill_candidate(&store(&tmp));
         let rejected = store(&tmp).reject(&candidate.id).unwrap();
         assert_eq!(rejected.status, CandidateStatus::Rejected);
+        let history = store(&tmp).load_auto_journal().unwrap();
+        assert!(history.iter().any(|entry| {
+            entry.candidate_id.as_deref() == Some(candidate.id.as_str())
+                && entry.action == AutoJournalAction::Rejected
+        }));
     }
 
     #[test]
@@ -1163,5 +1210,36 @@ mod tests {
         assert!(rules.contains("Prefer evidence two"));
         assert!(!rules.contains("Prefer evidence one"));
         assert_eq!(outcome.candidate.status, CandidateStatus::RolledBack);
+    }
+
+    #[test]
+    fn test_manual_actions_are_written_to_journal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let candidate = store(&tmp)
+            .capture_rule(
+                "Prefer evidence",
+                "Cite files",
+                "- Cite file paths.",
+                Some("workspace__local".to_owned()),
+                "test",
+            )
+            .unwrap();
+        let run = store(&tmp).evaluate(&candidate.id).unwrap();
+        store(&tmp).promote(&candidate.id, false).unwrap();
+        store(&tmp).rollback(&candidate.id).unwrap();
+        let journal = store(&tmp).load_auto_journal().unwrap();
+        assert!(journal.iter().any(|entry| {
+            entry.candidate_id.as_deref() == Some(candidate.id.as_str())
+                && entry.action == AutoJournalAction::Evaluated
+                && entry.detail.contains(&run.id)
+        }));
+        assert!(journal.iter().any(|entry| {
+            entry.candidate_id.as_deref() == Some(candidate.id.as_str())
+                && entry.action == AutoJournalAction::Promoted
+        }));
+        assert!(journal.iter().any(|entry| {
+            entry.candidate_id.as_deref() == Some(candidate.id.as_str())
+                && entry.action == AutoJournalAction::RolledBack
+        }));
     }
 }

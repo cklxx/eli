@@ -71,6 +71,8 @@ pub enum AutoJournalAction {
     Observed,
     Staged,
     Promoted,
+    Rejected,
+    RolledBack,
     Expired,
     Held,
 }
@@ -713,6 +715,17 @@ mod tests {
             fs::read_to_string(tmp.path().join(".agents/evolution/rules.bundle.md")).unwrap();
         assert!(bundle.contains("## Legacy"));
         assert!(bundle.find("## A").unwrap() < bundle.find("## B").unwrap());
+    }
+
+    #[test]
+    fn test_refresh_bundle_removes_stale_bundle_when_rules_are_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store(&tmp);
+        let bundle = tmp.path().join(".agents/evolution/rules.bundle.md");
+        fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+        fs::write(&bundle, "## Stale\n- Old rule\n").unwrap();
+        refresh_prompt_rules_bundle(&store).unwrap();
+        assert!(!bundle.exists());
     }
 
     #[test]

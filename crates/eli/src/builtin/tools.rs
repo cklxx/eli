@@ -1800,7 +1800,7 @@ fn render_distill_result(outcome: &DistillOutcome) -> String {
 fn render_history_output(entries: &[AutoJournalEntry], limit: usize) -> String {
     let lines = history_lines(entries, limit);
     if lines.is_empty() {
-        "No automation history.".to_owned()
+        "No evolution history.".to_owned()
     } else {
         lines.join("\n")
     }
@@ -1867,6 +1867,8 @@ fn render_action(action: AutoJournalAction) -> &'static str {
         AutoJournalAction::Observed => "observed",
         AutoJournalAction::Staged => "staged",
         AutoJournalAction::Promoted => "promoted",
+        AutoJournalAction::Rejected => "rejected",
+        AutoJournalAction::RolledBack => "rolled_back",
         AutoJournalAction::Expired => "expired",
         AutoJournalAction::Held => "held",
     }

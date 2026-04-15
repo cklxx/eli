@@ -218,7 +218,7 @@ fn render_auto_run_result(outcome: &crate::evolution::AutoEvolutionReport) -> St
 fn render_history_output(entries: &[AutoJournalEntry], limit: usize) -> String {
     let lines = history_lines(entries, limit);
     if lines.is_empty() {
-        "No automation history.".to_owned()
+        "No evolution history.".to_owned()
     } else {
         lines.join("\n")
     }
@@ -272,6 +272,8 @@ fn render_action(action: crate::evolution::AutoJournalAction) -> &'static str {
         crate::evolution::AutoJournalAction::Observed => "observed",
         crate::evolution::AutoJournalAction::Staged => "staged",
         crate::evolution::AutoJournalAction::Promoted => "promoted",
+        crate::evolution::AutoJournalAction::Rejected => "rejected",
+        crate::evolution::AutoJournalAction::RolledBack => "rolled_back",
         crate::evolution::AutoJournalAction::Expired => "expired",
         crate::evolution::AutoJournalAction::Held => "held",
     }
@@ -355,7 +357,21 @@ mod tests {
 
     #[test]
     fn test_history_lines_handles_empty_workspace() {
-        assert_eq!(render_history_output(&[], 5), "No automation history.");
+        assert_eq!(render_history_output(&[], 5), "No evolution history.");
+    }
+
+    #[test]
+    fn test_history_lines_renders_manual_actions() {
+        let lines = history_lines(
+            &[entry(
+                "1",
+                "tape-a",
+                crate::evolution::AutoJournalAction::RolledBack,
+            )],
+            1,
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("rolled_back"));
     }
 
     fn entry(
