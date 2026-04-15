@@ -94,9 +94,18 @@ Eli now includes a governed self-evolution loop.
 distill -> evaluate -> canary -> observe -> promote / rollback
 ```
 
+Candidates share one lifecycle across four unified artifact kinds:
+
+| Kind | Materialized to |
+|---|---|
+| `prompt_rule` | `.agents/evolution/rules/` (bundle: `rules.bundle.md`) |
+| `compiled_knowledge` | `.agents/evolution/knowledge/` (bundle: `knowledge.bundle.md`) |
+| `runtime_policy` | `.agents/evolution/runtime-policies/` (bundle: `runtime_policy.bundle.json`) |
+| `skill` | `.agents/skills/<name>/SKILL.md` |
+
 What is automated:
 
-- Tape evidence can be distilled into `prompt_rule` candidates.
+- Tape evidence can be distilled into candidates of any artifact kind.
 - Candidates are deterministically evaluated before promotion.
 - Low-risk candidates can be auto-staged as canaries.
 - Repeated observations can auto-promote a canary.
@@ -105,7 +114,7 @@ What is automated:
 What stays governed:
 
 - Core persona prompt is not live-edited.
-- Prompt rules are materialized as managed fragments, not opaque prompt mutations.
+- Every artifact is materialized as a managed fragment, not an opaque prompt mutation.
 - Rollback stays local to the promoted fragment.
 
 Example commands:
@@ -114,11 +123,11 @@ Example commands:
 eli evolution distill <tape> --persist
 eli evolution evaluate <candidate_id>
 eli evolution auto-run <tape>
+eli evolution capture-knowledge <artifact> --summary "…" --content "…"
+eli evolution capture-runtime-policy <artifact> --summary "…" --content '{…}'
 eli evolution history --limit 20
 eli evolution list
 ```
-
-Generated prompt rules land in `.agents/evolution/rules/`, with a bundled view in `.agents/evolution/rules.bundle.md`.
 
 ## CLI Surface
 
