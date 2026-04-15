@@ -1380,15 +1380,16 @@ fn tool_skill() -> Tool {
 fn tool_evolution_capture() -> Tool {
     Tool::with_context(
         "evolution.capture",
-        "Capture a governed self-evolution candidate for later review.\n\nExamples: save a stable collaboration rule learned during a task, draft a reusable procedure as a skill candidate, record a prompt refinement without applying it immediately.",
+        "Capture a governed self-evolution candidate for later review.\n\nExamples: save a stable collaboration rule learned during a task, draft a reusable procedure as a skill candidate, compile reusable knowledge into a searchable artifact, or record a runtime policy without applying it immediately.",
         serde_json::json!({
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "enum": ["prompt_rule", "skill"]},
+                "kind": {"type": "string", "enum": ["prompt_rule", "skill", "compiled_knowledge", "runtime_policy"]},
                 "title": {"type": "string"},
                 "summary": {"type": "string"},
                 "content": {"type": "string"},
-                "skill_name": {"type": "string", "description": "Required when kind=skill."}
+                "skill_name": {"type": "string", "description": "Required when kind=skill."},
+                "artifact_name": {"type": "string", "description": "Required when kind=compiled_knowledge or kind=runtime_policy."}
             },
             "required": ["kind", "title", "summary", "content"]
         }),
@@ -1606,12 +1607,15 @@ async fn run_evolution_auto_run(args: Value, ctx: Option<ToolContext>) -> ToolRe
     maybe_send_user_facing_notice("evolution.auto_run", ctx.as_ref(), &args).await;
     let tape = args.require_str_field("tape").map_err(invalid_input)?;
     let store = EvolutionStore::new(workspace_from_context(ctx.as_ref()));
+    let policy = store
+        .load_runtime_policy()
+        .map_err(tool_error)?
+        .apply_to_auto_policy(AutoEvolutionPolicy::default())
+        .ok_or_else(|| {
+            ConduitError::new(ErrorKind::Tool, "auto evolution disabled by runtime policy")
+        })?;
     let outcome = store
-        .auto_evolve_tape(
-            &tapes_dir_from_context(ctx.as_ref()),
-            tape,
-            AutoEvolutionPolicy::default(),
-        )
+        .auto_evolve_tape(&tapes_dir_from_context(ctx.as_ref()), tape, policy)
         .map_err(tool_error)?;
     ok_val(render_auto_run_result(&outcome))
 }
@@ -1685,9 +1689,15 @@ fn capture_candidate(
             .capture_rule(title, summary, content, tape, "tool")
             .map_err(tool_error),
         "skill" => capture_skill_candidate(store, title, summary, content, args, tape),
+        "compiled_knowledge" => {
+            capture_knowledge_candidate(store, title, summary, content, args, tape)
+        }
+        "runtime_policy" => {
+            capture_runtime_policy_candidate(store, title, summary, content, args, tape)
+        }
         _ => Err(ConduitError::new(
             ErrorKind::InvalidInput,
-            "kind must be 'prompt_rule' or 'skill'",
+            "kind must be 'prompt_rule', 'skill', 'compiled_knowledge', or 'runtime_policy'",
         )),
     }
 }
@@ -1705,6 +1715,38 @@ fn capture_skill_candidate(
         .map_err(invalid_input)?;
     store
         .capture_skill(skill_name, title, summary, content, tape, "tool")
+        .map_err(tool_error)
+}
+
+fn capture_knowledge_candidate(
+    store: &EvolutionStore,
+    title: &str,
+    summary: &str,
+    content: &str,
+    args: &Value,
+    tape: Option<String>,
+) -> Result<crate::evolution::EvolutionCandidate, ConduitError> {
+    let artifact_name = args
+        .require_str_field("artifact_name")
+        .map_err(invalid_input)?;
+    store
+        .capture_compiled_knowledge(artifact_name, title, summary, content, tape, "tool")
+        .map_err(tool_error)
+}
+
+fn capture_runtime_policy_candidate(
+    store: &EvolutionStore,
+    title: &str,
+    summary: &str,
+    content: &str,
+    args: &Value,
+    tape: Option<String>,
+) -> Result<crate::evolution::EvolutionCandidate, ConduitError> {
+    let artifact_name = args
+        .require_str_field("artifact_name")
+        .map_err(invalid_input)?;
+    store
+        .capture_runtime_policy(artifact_name, title, summary, content, tape, "tool")
         .map_err(tool_error)
 }
 

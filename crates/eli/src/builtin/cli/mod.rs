@@ -198,6 +198,34 @@ pub enum EvolutionAction {
         #[arg(long)]
         content: String,
     },
+    /// Capture a compiled-knowledge candidate.
+    CaptureKnowledge {
+        /// Knowledge artifact name.
+        artifact_name: String,
+        /// Optional display title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Short summary.
+        #[arg(long)]
+        summary: String,
+        /// Final markdown content.
+        #[arg(long)]
+        content: String,
+    },
+    /// Capture a runtime-policy candidate.
+    CaptureRuntimePolicy {
+        /// Runtime policy artifact name.
+        artifact_name: String,
+        /// Optional display title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Short summary.
+        #[arg(long)]
+        summary: String,
+        /// Final JSON content.
+        #[arg(long)]
+        content: String,
+    },
     /// Promote a pending candidate.
     Promote {
         /// Candidate ID.
@@ -325,6 +353,21 @@ pub async fn execute(cmd: CliCommand) -> anyhow::Result<()> {
                 description,
                 content,
             } => evolution::capture_skill_command(skill_name, title, description, content).await,
+            EvolutionAction::CaptureKnowledge {
+                artifact_name,
+                title,
+                summary,
+                content,
+            } => evolution::capture_knowledge_command(artifact_name, title, summary, content).await,
+            EvolutionAction::CaptureRuntimePolicy {
+                artifact_name,
+                title,
+                summary,
+                content,
+            } => {
+                evolution::capture_runtime_policy_command(artifact_name, title, summary, content)
+                    .await
+            }
             EvolutionAction::Promote { id, force } => evolution::promote_command(id, force).await,
             EvolutionAction::Reject { id } => evolution::reject_command(id).await,
             EvolutionAction::Rollback { id } => evolution::rollback_command(id).await,
@@ -440,6 +483,48 @@ mod tests {
             CliCommand::Evolution {
                 action: EvolutionAction::History { limit },
             } => assert_eq!(limit, 7),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_evolution_capture_knowledge() {
+        let cmd = TestCli::try_parse_from([
+            "eli",
+            "evolution",
+            "capture-knowledge",
+            "incident-handbook",
+            "--summary",
+            "Escalation notes",
+            "--content",
+            "body",
+        ])
+        .unwrap();
+        match cmd.command {
+            CliCommand::Evolution {
+                action: EvolutionAction::CaptureKnowledge { artifact_name, .. },
+            } => assert_eq!(artifact_name, "incident-handbook"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_evolution_capture_runtime_policy() {
+        let cmd = TestCli::try_parse_from([
+            "eli",
+            "evolution",
+            "capture-runtime-policy",
+            "auto-evolution",
+            "--summary",
+            "Tune thresholds",
+            "--content",
+            "{\"auto_evolution\":{\"min_score\":95}}",
+        ])
+        .unwrap();
+        match cmd.command {
+            CliCommand::Evolution {
+                action: EvolutionAction::CaptureRuntimePolicy { artifact_name, .. },
+            } => assert_eq!(artifact_name, "auto-evolution"),
             other => panic!("unexpected command: {other:?}"),
         }
     }

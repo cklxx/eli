@@ -13,8 +13,9 @@ use crate::skills::discover_skills;
 use sha2::{Digest, Sha256};
 
 use super::{
-    CandidateKind, EvolutionCandidate, EvolutionStore, now_rfc3339, read_optional, render_skill,
-    rule_block, trimmed,
+    CandidateKind, EvolutionCandidate, EvolutionStore, compiled_knowledge_block, now_rfc3339,
+    parse_runtime_policy_text, read_optional, render_compiled_knowledge, render_runtime_policy,
+    render_skill, rule_block, trimmed,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +43,8 @@ pub(super) fn evaluate_candidate(
     let checks = match candidate.kind {
         CandidateKind::PromptRule => evaluate_prompt_rule(store, candidate)?,
         CandidateKind::Skill => evaluate_skill(store, candidate)?,
+        CandidateKind::CompiledKnowledge => evaluate_compiled_knowledge(store, candidate)?,
+        CandidateKind::RuntimePolicy => evaluate_runtime_policy(store, candidate)?,
     };
     Ok(build_run(candidate, checks))
 }
@@ -66,6 +69,49 @@ fn evaluate_skill(
         skill_target_check(store, candidate)?,
         skill_materialization_check(candidate)?,
         skill_fingerprint_check(store, candidate)?,
+    ])
+}
+
+fn evaluate_compiled_knowledge(
+    store: &EvolutionStore,
+    candidate: &EvolutionCandidate,
+) -> anyhow::Result<Vec<EvaluationCheck>> {
+    Ok(vec![
+        target_available_check(
+            store,
+            candidate,
+            "knowledge_target_available",
+            "target knowledge file already exists",
+        )?,
+        compiled_knowledge_materialization_check(store, candidate)?,
+        target_fingerprint_check(
+            store,
+            candidate,
+            &render_compiled_knowledge(candidate),
+            "knowledge_fingerprint_conflict",
+        )?,
+    ])
+}
+
+fn evaluate_runtime_policy(
+    store: &EvolutionStore,
+    candidate: &EvolutionCandidate,
+) -> anyhow::Result<Vec<EvaluationCheck>> {
+    Ok(vec![
+        target_available_check(
+            store,
+            candidate,
+            "runtime_policy_target_available",
+            "target runtime policy file already exists",
+        )?,
+        runtime_policy_parse_check(candidate)?,
+        runtime_policy_materialization_check(store, candidate)?,
+        target_fingerprint_check(
+            store,
+            candidate,
+            &render_runtime_policy(candidate)?,
+            "runtime_policy_fingerprint_conflict",
+        )?,
     ])
 }
 
@@ -114,13 +160,12 @@ fn skill_target_check(
     store: &EvolutionStore,
     candidate: &EvolutionCandidate,
 ) -> anyhow::Result<EvaluationCheck> {
-    let target = store.target_path(candidate);
-    let passes = !target.exists();
-    Ok(pass_fail(
+    target_available_check(
+        store,
+        candidate,
         "skill_target_available",
-        passes,
         "target skill already exists",
-    ))
+    )
 }
 
 fn skill_materialization_check(candidate: &EvolutionCandidate) -> anyhow::Result<EvaluationCheck> {
@@ -144,17 +189,8 @@ fn skill_fingerprint_check(
     store: &EvolutionStore,
     candidate: &EvolutionCandidate,
 ) -> anyhow::Result<EvaluationCheck> {
-    let target = store.target_path(candidate);
     let rendered = render_skill(candidate, candidate.skill_name.as_deref().unwrap_or(""));
-    let current = read_optional(&target)?;
-    let expected = rendered_fingerprint(candidate.kind, &rendered);
-    let current_fingerprint = rendered_fingerprint(candidate.kind, &current);
-    let detail = fingerprint_failure_detail(current.is_empty(), current_fingerprint == expected);
-    Ok(pass_fail(
-        "skill_fingerprint_conflict",
-        current.is_empty(),
-        &detail,
-    ))
+    target_fingerprint_check(store, candidate, &rendered, "skill_fingerprint_conflict")
 }
 
 fn replay_prompt(
@@ -176,6 +212,81 @@ fn write_rules_workspace(
     let rules = super::append_rule_block(current, candidate);
     let path = workspace.join(".agents/evolution/rules.md");
     write_text(&path, &rules)
+}
+
+fn compiled_knowledge_materialization_check(
+    _store: &EvolutionStore,
+    candidate: &EvolutionCandidate,
+) -> anyhow::Result<EvaluationCheck> {
+    let tmp = tempfile::tempdir()?;
+    let workspace = tmp.path();
+    let path = workspace.join(".agents/evolution/knowledge").join(format!(
+        "{}.md",
+        candidate.target_name().unwrap_or("knowledge")
+    ));
+    write_text(&path, &render_compiled_knowledge(candidate))?;
+    let bundle = super::load_compiled_knowledge_for_workspace(workspace)?;
+    Ok(pass_fail(
+        "compiled_knowledge_materializes",
+        bundle.contains(trimmed(&compiled_knowledge_block(candidate))),
+        "compiled knowledge bundle did not include the candidate block",
+    ))
+}
+
+fn runtime_policy_parse_check(candidate: &EvolutionCandidate) -> anyhow::Result<EvaluationCheck> {
+    Ok(pass_fail(
+        "runtime_policy_parses",
+        parse_runtime_policy_text(&candidate.content).is_ok(),
+        "runtime policy JSON is invalid or contains unsupported fields",
+    ))
+}
+
+fn runtime_policy_materialization_check(
+    _store: &EvolutionStore,
+    candidate: &EvolutionCandidate,
+) -> anyhow::Result<EvaluationCheck> {
+    let tmp = tempfile::tempdir()?;
+    let workspace = tmp.path();
+    let path = workspace
+        .join(".agents/evolution/runtime-policies")
+        .join(format!(
+            "{}.json",
+            candidate.target_name().unwrap_or("policy")
+        ));
+    write_text(&path, &render_runtime_policy(candidate)?)?;
+    let merged = super::load_runtime_policy_for_workspace(workspace)?;
+    let rendered = parse_runtime_policy_text(&candidate.content)?;
+    Ok(pass_fail(
+        "runtime_policy_materializes",
+        merged == rendered,
+        "runtime policy bundle did not match the candidate document",
+    ))
+}
+
+fn target_available_check(
+    store: &EvolutionStore,
+    candidate: &EvolutionCandidate,
+    name: &str,
+    detail: &str,
+) -> anyhow::Result<EvaluationCheck> {
+    Ok(pass_fail(
+        name,
+        !store.target_path(candidate).exists(),
+        detail,
+    ))
+}
+
+fn target_fingerprint_check(
+    store: &EvolutionStore,
+    candidate: &EvolutionCandidate,
+    rendered: &str,
+    name: &str,
+) -> anyhow::Result<EvaluationCheck> {
+    let current = read_optional(&store.target_path(candidate))?;
+    let expected = rendered_fingerprint(candidate.kind, rendered);
+    let current_fingerprint = rendered_fingerprint(candidate.kind, &current);
+    let detail = fingerprint_failure_detail(current.is_empty(), current_fingerprint == expected);
+    Ok(pass_fail(name, current.is_empty(), &detail))
 }
 
 fn write_rendered_skill(

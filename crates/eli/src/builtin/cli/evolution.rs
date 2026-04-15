@@ -40,11 +40,14 @@ pub(crate) async fn distill_command(tape: String, persist: bool) -> anyhow::Resu
 }
 
 pub(crate) async fn auto_run_command(tape: String) -> anyhow::Result<()> {
-    let outcome = default_store()?.auto_evolve_tape(
-        &default_tapes_dir()?,
-        &tape,
-        AutoEvolutionPolicy::default(),
-    )?;
+    let store = default_store()?;
+    let Some(policy) = store
+        .load_runtime_policy()?
+        .apply_to_auto_policy(AutoEvolutionPolicy::default())
+    else {
+        anyhow::bail!("auto evolution disabled by runtime policy");
+    };
+    let outcome = store.auto_evolve_tape(&default_tapes_dir()?, &tape, policy)?;
     println!("{}", render_auto_run_result(&outcome));
     Ok(())
 }
@@ -75,6 +78,44 @@ pub(crate) async fn capture_skill_command(
     let candidate =
         default_store()?.capture_skill(&skill_name, &title, &description, &content, None, "cli")?;
     println!("Captured skill candidate {}", candidate.id);
+    Ok(())
+}
+
+pub(crate) async fn capture_knowledge_command(
+    artifact_name: String,
+    title: Option<String>,
+    summary: String,
+    content: String,
+) -> anyhow::Result<()> {
+    let title = title.unwrap_or_else(|| artifact_name.clone());
+    let candidate = default_store()?.capture_compiled_knowledge(
+        &artifact_name,
+        &title,
+        &summary,
+        &content,
+        None,
+        "cli",
+    )?;
+    println!("Captured compiled-knowledge candidate {}", candidate.id);
+    Ok(())
+}
+
+pub(crate) async fn capture_runtime_policy_command(
+    artifact_name: String,
+    title: Option<String>,
+    summary: String,
+    content: String,
+) -> anyhow::Result<()> {
+    let title = title.unwrap_or_else(|| artifact_name.clone());
+    let candidate = default_store()?.capture_runtime_policy(
+        &artifact_name,
+        &title,
+        &summary,
+        &content,
+        None,
+        "cli",
+    )?;
+    println!("Captured runtime-policy candidate {}", candidate.id);
     Ok(())
 }
 
@@ -228,6 +269,8 @@ fn kind_label(kind: CandidateKind) -> &'static str {
     match kind {
         CandidateKind::PromptRule => "prompt_rule",
         CandidateKind::Skill => "skill",
+        CandidateKind::CompiledKnowledge => "compiled_knowledge",
+        CandidateKind::RuntimePolicy => "runtime_policy",
     }
 }
 

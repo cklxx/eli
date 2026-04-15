@@ -22,6 +22,12 @@ const SNAPSHOTS_DIR: &str = "snapshots";
 const RULES_FILE: &str = "rules.md";
 const RULES_BUNDLE_FILE: &str = "rules.bundle.md";
 const RULES_FRAGMENTS_DIR: &str = "rules";
+const KNOWLEDGE_FILE: &str = "knowledge.md";
+const KNOWLEDGE_BUNDLE_FILE: &str = "knowledge.bundle.md";
+const KNOWLEDGE_FRAGMENTS_DIR: &str = "knowledge";
+const RUNTIME_POLICY_FILE: &str = "runtime_policy.json";
+const RUNTIME_POLICY_BUNDLE_FILE: &str = "runtime_policy.bundle.json";
+const RUNTIME_POLICY_FRAGMENTS_DIR: &str = "runtime-policies";
 const AUTO_DIR: &str = "auto";
 const AUTO_CANARIES_DIR: &str = "canaries";
 const AUTO_JOURNAL_FILE: &str = "journal.jsonl";
@@ -38,6 +44,8 @@ pub use eval::{EvaluationCheck, EvaluationRun};
 pub enum CandidateKind {
     PromptRule,
     Skill,
+    CompiledKnowledge,
+    RuntimePolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +73,8 @@ pub struct EvolutionCandidate {
     pub title: String,
     pub summary: String,
     pub content: String,
+    #[serde(default)]
+    pub artifact_name: Option<String>,
     pub skill_name: Option<String>,
     pub source_tape: Option<String>,
     pub source: String,
@@ -101,15 +111,14 @@ impl EvolutionCandidate {
 
     pub fn effective_fingerprint(&self) -> String {
         if self.fingerprint.is_empty() {
-            candidate_fingerprint(
-                self.kind,
-                &self.title,
-                &self.content,
-                self.skill_name.as_deref(),
-            )
+            candidate_fingerprint(self.kind, &self.title, &self.content, self.target_name())
         } else {
             self.fingerprint.clone()
         }
+    }
+
+    pub fn target_name(&self) -> Option<&str> {
+        self.artifact_name.as_deref().or(self.skill_name.as_deref())
     }
 }
 
@@ -143,11 +152,30 @@ pub struct EvolutionStore {
     workspace: PathBuf,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RuntimePolicyDocument {
+    pub auto_evolution: RuntimeAutoEvolutionPolicy,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RuntimeAutoEvolutionPolicy {
+    pub enabled: Option<bool>,
+    pub min_evidence: Option<usize>,
+    pub min_score: Option<u8>,
+    pub canary_observations: Option<usize>,
+    pub canary_ttl_hours: Option<i64>,
+    pub max_auto_risk: Option<RiskLevel>,
+    pub max_direct_promote_risk: Option<RiskLevel>,
+}
+
 struct NewCandidate {
     kind: CandidateKind,
     title: String,
     summary: String,
     content: String,
+    artifact_name: Option<String>,
     skill_name: Option<String>,
     source_tape: Option<String>,
     source: String,
@@ -163,6 +191,8 @@ impl CandidateKind {
         match self {
             Self::PromptRule => "prompt_rule",
             Self::Skill => "skill",
+            Self::CompiledKnowledge => "compiled_knowledge",
+            Self::RuntimePolicy => "runtime_policy",
         }
     }
 }
@@ -212,12 +242,11 @@ impl NewCandidate {
         source_tape: Option<String>,
         source: &str,
     ) -> anyhow::Result<Self> {
-        Self::build(
+        Self::base(
             CandidateKind::PromptRule,
             title,
             summary,
             content,
-            None,
             source_tape,
             source,
         )
@@ -231,23 +260,64 @@ impl NewCandidate {
         source_tape: Option<String>,
         source: &str,
     ) -> anyhow::Result<Self> {
-        Self::build(
+        let mut candidate = Self::base(
             CandidateKind::Skill,
             title,
             summary,
             content,
-            Some(skill_name.to_owned()),
             source_tape,
             source,
-        )
+        )?;
+        candidate.artifact_name = Some(skill_name.to_owned());
+        candidate.skill_name = Some(skill_name.to_owned());
+        Ok(candidate)
     }
 
-    fn build(
+    fn compiled_knowledge(
+        artifact_name: &str,
+        title: &str,
+        summary: &str,
+        content: &str,
+        source_tape: Option<String>,
+        source: &str,
+    ) -> anyhow::Result<Self> {
+        let mut candidate = Self::base(
+            CandidateKind::CompiledKnowledge,
+            title,
+            summary,
+            content,
+            source_tape,
+            source,
+        )?;
+        candidate.artifact_name = Some(artifact_name.to_owned());
+        Ok(candidate)
+    }
+
+    fn runtime_policy(
+        artifact_name: &str,
+        title: &str,
+        summary: &str,
+        content: &str,
+        source_tape: Option<String>,
+        source: &str,
+    ) -> anyhow::Result<Self> {
+        let mut candidate = Self::base(
+            CandidateKind::RuntimePolicy,
+            title,
+            summary,
+            content,
+            source_tape,
+            source,
+        )?;
+        candidate.artifact_name = Some(artifact_name.to_owned());
+        Ok(candidate)
+    }
+
+    fn base(
         kind: CandidateKind,
         title: &str,
         summary: &str,
         content: &str,
-        skill_name: Option<String>,
         source_tape: Option<String>,
         source: &str,
     ) -> anyhow::Result<Self> {
@@ -256,7 +326,8 @@ impl NewCandidate {
             title: require_text("title", title)?,
             summary: require_text("summary", summary)?,
             content: require_text("content", content)?,
-            skill_name,
+            artifact_name: None,
+            skill_name: None,
             source_tape,
             source: require_text("source", source)?,
         })
@@ -295,6 +366,53 @@ impl EvolutionStore {
     ) -> anyhow::Result<EvolutionCandidate> {
         validate_skill_name(skill_name)?;
         let input = NewCandidate::skill(skill_name, title, summary, content, source_tape, source)?;
+        let candidate = self.new_candidate(input)?;
+        self.write_candidate(&candidate)?;
+        Ok(candidate)
+    }
+
+    pub fn capture_compiled_knowledge(
+        &self,
+        artifact_name: &str,
+        title: &str,
+        summary: &str,
+        content: &str,
+        source_tape: Option<String>,
+        source: &str,
+    ) -> anyhow::Result<EvolutionCandidate> {
+        validate_artifact_name(artifact_name)?;
+        let input = NewCandidate::compiled_knowledge(
+            artifact_name,
+            title,
+            summary,
+            content,
+            source_tape,
+            source,
+        )?;
+        let candidate = self.new_candidate(input)?;
+        self.write_candidate(&candidate)?;
+        Ok(candidate)
+    }
+
+    pub fn capture_runtime_policy(
+        &self,
+        artifact_name: &str,
+        title: &str,
+        summary: &str,
+        content: &str,
+        source_tape: Option<String>,
+        source: &str,
+    ) -> anyhow::Result<EvolutionCandidate> {
+        validate_artifact_name(artifact_name)?;
+        parse_runtime_policy_text(content)?;
+        let input = NewCandidate::runtime_policy(
+            artifact_name,
+            title,
+            summary,
+            content,
+            source_tape,
+            source,
+        )?;
         let candidate = self.new_candidate(input)?;
         self.write_candidate(&candidate)?;
         Ok(candidate)
@@ -377,9 +495,7 @@ impl EvolutionStore {
         let target = PathBuf::from(&record.target);
         self.restore_target(&record, &target)?;
         self.write_promotion_record_file(&with_rollback_record(record))?;
-        if candidate.kind == CandidateKind::PromptRule {
-            self.refresh_prompt_rules_bundle()?;
-        }
+        self.refresh_materialized_view(candidate.kind)?;
         let rolled_back = with_status(candidate, CandidateStatus::RolledBack, Some(target.clone()));
         self.write_candidate(&rolled_back)?;
         self.record_candidate_action(
@@ -397,6 +513,16 @@ impl EvolutionStore {
     pub fn load_prompt_rules(&self) -> anyhow::Result<String> {
         self.refresh_prompt_rules_bundle()?;
         load_prompt_rules_for_workspace(&self.workspace)
+    }
+
+    pub fn load_compiled_knowledge(&self) -> anyhow::Result<String> {
+        self.refresh_compiled_knowledge_bundle()?;
+        load_compiled_knowledge_for_workspace(&self.workspace)
+    }
+
+    pub fn load_runtime_policy(&self) -> anyhow::Result<RuntimePolicyDocument> {
+        self.refresh_runtime_policy_bundle()?;
+        load_runtime_policy_for_workspace(&self.workspace)
     }
 
     pub fn auto_evolve_tape(
@@ -478,6 +604,10 @@ impl EvolutionStore {
         match candidate.kind {
             CandidateKind::PromptRule => self.append_prompt_rule(candidate, target),
             CandidateKind::Skill => self.write_skill(candidate, target, force),
+            CandidateKind::CompiledKnowledge => {
+                self.write_compiled_knowledge(candidate, target, force)
+            }
+            CandidateKind::RuntimePolicy => self.write_runtime_policy(candidate, target, force),
         }
     }
 
@@ -506,13 +636,42 @@ impl EvolutionStore {
         Ok(())
     }
 
+    fn write_compiled_knowledge(
+        &self,
+        candidate: &EvolutionCandidate,
+        path: &Path,
+        force: bool,
+    ) -> anyhow::Result<()> {
+        ensure_writable_target(path, force)?;
+        ensure_parent(path)?;
+        fs::write(path, render_compiled_knowledge(candidate))?;
+        self.refresh_compiled_knowledge_bundle()?;
+        Ok(())
+    }
+
+    fn write_runtime_policy(
+        &self,
+        candidate: &EvolutionCandidate,
+        path: &Path,
+        force: bool,
+    ) -> anyhow::Result<()> {
+        ensure_writable_target(path, force)?;
+        ensure_parent(path)?;
+        fs::write(path, render_runtime_policy(candidate)?)?;
+        self.refresh_runtime_policy_bundle()?;
+        Ok(())
+    }
+
     fn new_candidate(&self, input: NewCandidate) -> anyhow::Result<EvolutionCandidate> {
         let timestamp = now_rfc3339();
         let fingerprint = candidate_fingerprint(
             input.kind,
             &input.title,
             &input.content,
-            input.skill_name.as_deref(),
+            input
+                .artifact_name
+                .as_deref()
+                .or(input.skill_name.as_deref()),
         );
         let evidence_ids = input
             .source_tape
@@ -525,6 +684,7 @@ impl EvolutionStore {
             title: input.title,
             summary: input.summary,
             content: input.content,
+            artifact_name: input.artifact_name,
             skill_name: input.skill_name,
             source_tape: input.source_tape,
             source: input.source,
@@ -585,6 +745,16 @@ impl EvolutionStore {
         self.rules_bundle_path()
     }
 
+    fn knowledge_path(&self, artifact_name: &str) -> PathBuf {
+        self.knowledge_fragment_dir()
+            .join(format!("{artifact_name}.md"))
+    }
+
+    fn runtime_policy_path(&self, artifact_name: &str) -> PathBuf {
+        self.runtime_policy_fragment_dir()
+            .join(format!("{artifact_name}.json"))
+    }
+
     fn skill_path(&self, skill_name: &str) -> PathBuf {
         self.workspace
             .join(".agents/skills")
@@ -599,7 +769,13 @@ impl EvolutionStore {
     fn target_path(&self, candidate: &EvolutionCandidate) -> PathBuf {
         match candidate.kind {
             CandidateKind::PromptRule => self.rules_fragment_path(&candidate.id),
-            CandidateKind::Skill => self.skill_path(candidate.skill_name.as_deref().unwrap_or("")),
+            CandidateKind::Skill => self.skill_path(candidate.target_name().unwrap_or("")),
+            CandidateKind::CompiledKnowledge => {
+                self.knowledge_path(candidate.target_name().unwrap_or(""))
+            }
+            CandidateKind::RuntimePolicy => {
+                self.runtime_policy_path(candidate.target_name().unwrap_or(""))
+            }
         }
     }
 
@@ -663,6 +839,25 @@ impl EvolutionStore {
         auto::refresh_prompt_rules_bundle(self)
     }
 
+    fn refresh_compiled_knowledge_bundle(&self) -> anyhow::Result<()> {
+        let knowledge = load_local_compiled_knowledge_for_workspace(&self.workspace)?;
+        write_optional_text(&self.knowledge_bundle_path(), &knowledge)
+    }
+
+    fn refresh_runtime_policy_bundle(&self) -> anyhow::Result<()> {
+        let policy = load_local_runtime_policy_for_workspace(&self.workspace)?;
+        write_optional_json(&self.runtime_policy_bundle_path(), &policy)
+    }
+
+    fn refresh_materialized_view(&self, kind: CandidateKind) -> anyhow::Result<()> {
+        match kind {
+            CandidateKind::PromptRule => self.refresh_prompt_rules_bundle(),
+            CandidateKind::CompiledKnowledge => self.refresh_compiled_knowledge_bundle(),
+            CandidateKind::RuntimePolicy => self.refresh_runtime_policy_bundle(),
+            CandidateKind::Skill => Ok(()),
+        }
+    }
+
     fn record_candidate_action(
         &self,
         candidate_id: &str,
@@ -684,8 +879,24 @@ impl EvolutionStore {
         self.evolution_root().join(RULES_BUNDLE_FILE)
     }
 
+    fn knowledge_bundle_path(&self) -> PathBuf {
+        self.evolution_root().join(KNOWLEDGE_BUNDLE_FILE)
+    }
+
+    fn runtime_policy_bundle_path(&self) -> PathBuf {
+        self.evolution_root().join(RUNTIME_POLICY_BUNDLE_FILE)
+    }
+
     fn rules_fragment_dir(&self) -> PathBuf {
         self.evolution_root().join(RULES_FRAGMENTS_DIR)
+    }
+
+    fn knowledge_fragment_dir(&self) -> PathBuf {
+        self.evolution_root().join(KNOWLEDGE_FRAGMENTS_DIR)
+    }
+
+    fn runtime_policy_fragment_dir(&self) -> PathBuf {
+        self.evolution_root().join(RUNTIME_POLICY_FRAGMENTS_DIR)
     }
 
     fn rules_fragment_path(&self, id: &str) -> PathBuf {
@@ -694,6 +905,14 @@ impl EvolutionStore {
 
     fn legacy_rules_path(&self) -> PathBuf {
         self.evolution_root().join(RULES_FILE)
+    }
+
+    fn legacy_knowledge_path(&self) -> PathBuf {
+        self.evolution_root().join(KNOWLEDGE_FILE)
+    }
+
+    fn legacy_runtime_policy_path(&self) -> PathBuf {
+        self.evolution_root().join(RUNTIME_POLICY_FILE)
     }
 
     fn auto_root(&self) -> PathBuf {
@@ -723,8 +942,58 @@ pub(super) fn load_local_prompt_rules_for_workspace(workspace: &Path) -> anyhow:
     load_local_prompt_rules_from_paths(&store.legacy_rules_path(), &store.rules_fragment_dir())
 }
 
+pub fn load_compiled_knowledge_for_workspace(workspace: &Path) -> anyhow::Result<String> {
+    let store = EvolutionStore::new(workspace);
+    load_markdown_bundle(
+        &global_knowledge_path(),
+        &store.legacy_knowledge_path(),
+        &store.knowledge_fragment_dir(),
+    )
+}
+
+pub fn load_runtime_policy_for_workspace(
+    workspace: &Path,
+) -> anyhow::Result<RuntimePolicyDocument> {
+    let store = EvolutionStore::new(workspace);
+    load_runtime_policy_from_paths(
+        &global_runtime_policy_path(),
+        &store.legacy_runtime_policy_path(),
+        &store.runtime_policy_fragment_dir(),
+    )
+}
+
+pub(super) fn load_local_compiled_knowledge_for_workspace(
+    workspace: &Path,
+) -> anyhow::Result<String> {
+    let store = EvolutionStore::new(workspace);
+    load_markdown_bundle(
+        Path::new(""),
+        &store.legacy_knowledge_path(),
+        &store.knowledge_fragment_dir(),
+    )
+}
+
+pub(super) fn load_local_runtime_policy_for_workspace(
+    workspace: &Path,
+) -> anyhow::Result<RuntimePolicyDocument> {
+    let store = EvolutionStore::new(workspace);
+    load_runtime_policy_from_paths(
+        Path::new(""),
+        &store.legacy_runtime_policy_path(),
+        &store.runtime_policy_fragment_dir(),
+    )
+}
+
 fn global_rules_path() -> PathBuf {
     eli_home().join("evolution").join(RULES_FILE)
+}
+
+fn global_knowledge_path() -> PathBuf {
+    eli_home().join("evolution").join(KNOWLEDGE_FILE)
+}
+
+fn global_runtime_policy_path() -> PathBuf {
+    eli_home().join("evolution").join(RUNTIME_POLICY_FILE)
 }
 
 fn load_prompt_rules_from_paths(
@@ -732,21 +1001,27 @@ fn load_prompt_rules_from_paths(
     local: &Path,
     fragments_dir: &Path,
 ) -> anyhow::Result<String> {
-    let mut sources = vec![read_optional(global)?, read_optional(local)?];
-    sources.extend(read_rule_fragments(fragments_dir)?);
-    Ok(join_rule_sources(sources))
+    load_markdown_bundle(global, local, fragments_dir)
 }
 
 fn load_local_prompt_rules_from_paths(
     local: &Path,
     fragments_dir: &Path,
 ) -> anyhow::Result<String> {
-    let mut sources = vec![read_optional(local)?];
-    sources.extend(read_rule_fragments(fragments_dir)?);
-    Ok(join_rule_sources(sources))
+    load_markdown_bundle(Path::new(""), local, fragments_dir)
 }
 
-fn read_rule_fragments(dir: &Path) -> anyhow::Result<Vec<String>> {
+fn load_markdown_bundle(
+    global: &Path,
+    local: &Path,
+    fragments_dir: &Path,
+) -> anyhow::Result<String> {
+    let mut sources = vec![read_optional(global)?, read_optional(local)?];
+    sources.extend(read_markdown_fragments(fragments_dir)?);
+    Ok(join_markdown_sources(sources))
+}
+
+fn read_markdown_fragments(dir: &Path) -> anyhow::Result<Vec<String>> {
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -758,13 +1033,50 @@ fn read_rule_fragments(dir: &Path) -> anyhow::Result<Vec<String>> {
     paths.into_iter().map(|path| read_optional(&path)).collect()
 }
 
-fn join_rule_sources(parts: Vec<String>) -> String {
+fn join_markdown_sources(parts: Vec<String>) -> String {
     parts
         .into_iter()
         .map(|part| part.trim().to_owned())
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn load_runtime_policy_from_paths(
+    global: &Path,
+    local: &Path,
+    fragments_dir: &Path,
+) -> anyhow::Result<RuntimePolicyDocument> {
+    let mut document = RuntimePolicyDocument::default();
+    merge_runtime_policy_text(&mut document, &read_optional(global)?)?;
+    merge_runtime_policy_text(&mut document, &read_optional(local)?)?;
+    for path in sorted_json_fragments(fragments_dir)? {
+        merge_runtime_policy_text(&mut document, &read_optional(&path)?)?;
+    }
+    Ok(document)
+}
+
+fn sorted_json_fragments(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut paths = fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    Ok(paths)
+}
+
+fn merge_runtime_policy_text(
+    document: &mut RuntimePolicyDocument,
+    text: &str,
+) -> anyhow::Result<()> {
+    if trimmed(text).is_empty() {
+        return Ok(());
+    }
+    document.merge(parse_runtime_policy_text(text)?);
+    Ok(())
 }
 
 fn sort_candidates(mut candidates: Vec<EvolutionCandidate>) -> Vec<EvolutionCandidate> {
@@ -826,6 +1138,15 @@ fn rule_block(candidate: &EvolutionCandidate) -> String {
     )
 }
 
+fn compiled_knowledge_block(candidate: &EvolutionCandidate) -> String {
+    format!(
+        "## {}\n{}\n\n{}",
+        candidate.title.trim(),
+        candidate.summary.trim(),
+        candidate.content.trim()
+    )
+}
+
 fn render_skill(candidate: &EvolutionCandidate, skill_name: &str) -> String {
     format!(
         "---\nname: {skill_name}\ndescription: {}\n---\n{}{}\n",
@@ -833,6 +1154,15 @@ fn render_skill(candidate: &EvolutionCandidate, skill_name: &str) -> String {
         render_skill_title(candidate),
         candidate.content.trim()
     )
+}
+
+fn render_compiled_knowledge(candidate: &EvolutionCandidate) -> String {
+    format!("{}\n", compiled_knowledge_block(candidate))
+}
+
+fn render_runtime_policy(candidate: &EvolutionCandidate) -> anyhow::Result<String> {
+    let body = serde_json::to_string_pretty(&parse_runtime_policy_text(&candidate.content)?)?;
+    Ok(format!("{body}\n"))
 }
 
 fn render_skill_title(candidate: &EvolutionCandidate) -> String {
@@ -881,6 +1211,9 @@ fn display_string(path: PathBuf) -> String {
 }
 
 fn hydrate_candidate(mut candidate: EvolutionCandidate) -> EvolutionCandidate {
+    if candidate.artifact_name.is_none() && candidate.kind == CandidateKind::Skill {
+        candidate.artifact_name = candidate.skill_name.clone();
+    }
     if candidate.fingerprint.is_empty() {
         candidate.fingerprint = candidate.effective_fingerprint();
         candidate.risk_level = risk_level_for(candidate.kind);
@@ -951,6 +1284,13 @@ fn validate_skill_name(skill_name: &str) -> anyhow::Result<()> {
     anyhow::bail!("invalid skill name: {skill_name}")
 }
 
+fn validate_artifact_name(name: &str) -> anyhow::Result<()> {
+    if is_valid_skill_name(name) {
+        return Ok(());
+    }
+    anyhow::bail!("invalid artifact name: {name}")
+}
+
 fn require_text(field: &str, value: &str) -> anyhow::Result<String> {
     let text = value.trim();
     if !text.is_empty() {
@@ -964,6 +1304,22 @@ fn write_json_file(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
     let body = serde_json::to_string_pretty(value)?;
     fs::write(path, format!("{body}\n"))?;
     Ok(())
+}
+
+fn write_optional_text(path: &Path, text: &str) -> anyhow::Result<()> {
+    if trimmed(text).is_empty() {
+        return remove_target_if_exists(path);
+    }
+    ensure_parent(path)?;
+    fs::write(path, ensure_trailing_newline(text.to_owned()))?;
+    Ok(())
+}
+
+fn write_optional_json(path: &Path, value: &RuntimePolicyDocument) -> anyhow::Result<()> {
+    if value.is_empty() {
+        return remove_target_if_exists(path);
+    }
+    write_json_file(path, value)
 }
 
 fn remove_target_if_exists(path: &Path) -> anyhow::Result<()> {
@@ -981,6 +1337,8 @@ fn risk_level_for(kind: CandidateKind) -> RiskLevel {
     match kind {
         CandidateKind::PromptRule => RiskLevel::Medium,
         CandidateKind::Skill => RiskLevel::High,
+        CandidateKind::CompiledKnowledge => RiskLevel::Low,
+        CandidateKind::RuntimePolicy => RiskLevel::High,
     }
 }
 
@@ -988,17 +1346,84 @@ fn candidate_fingerprint(
     kind: CandidateKind,
     title: &str,
     content: &str,
-    skill_name: Option<&str>,
+    target_name: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(kind.as_str());
     hasher.update("\n");
-    hasher.update(skill_name.unwrap_or(""));
+    hasher.update(target_name.unwrap_or(""));
     hasher.update("\n");
     hasher.update(trimmed(title));
     hasher.update("\n");
     hasher.update(trimmed(content));
     format!("{:x}", hasher.finalize())
+}
+
+fn parse_runtime_policy_text(text: &str) -> anyhow::Result<RuntimePolicyDocument> {
+    Ok(serde_json::from_str(text)?)
+}
+
+impl RuntimePolicyDocument {
+    pub fn is_empty(&self) -> bool {
+        self.auto_evolution.is_empty()
+    }
+
+    pub fn apply_to_auto_policy(&self, base: AutoEvolutionPolicy) -> Option<AutoEvolutionPolicy> {
+        if self.auto_evolution.enabled == Some(false) {
+            return None;
+        }
+        Some(self.auto_evolution.apply(base))
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.auto_evolution.merge(other.auto_evolution);
+    }
+}
+
+impl RuntimeAutoEvolutionPolicy {
+    fn is_empty(&self) -> bool {
+        self.enabled.is_none()
+            && self.min_evidence.is_none()
+            && self.min_score.is_none()
+            && self.canary_observations.is_none()
+            && self.canary_ttl_hours.is_none()
+            && self.max_auto_risk.is_none()
+            && self.max_direct_promote_risk.is_none()
+    }
+
+    fn apply(&self, mut base: AutoEvolutionPolicy) -> AutoEvolutionPolicy {
+        if let Some(value) = self.min_evidence {
+            base.min_evidence = value;
+        }
+        if let Some(value) = self.min_score {
+            base.min_score = value;
+        }
+        if let Some(value) = self.canary_observations {
+            base.canary_observations = value;
+        }
+        if let Some(value) = self.canary_ttl_hours {
+            base.canary_ttl_hours = value;
+        }
+        if let Some(value) = self.max_auto_risk {
+            base.max_auto_risk = value;
+        }
+        if let Some(value) = self.max_direct_promote_risk {
+            base.max_direct_promote_risk = value;
+        }
+        base
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.enabled = other.enabled.or(self.enabled);
+        self.min_evidence = other.min_evidence.or(self.min_evidence);
+        self.min_score = other.min_score.or(self.min_score);
+        self.canary_observations = other.canary_observations.or(self.canary_observations);
+        self.canary_ttl_hours = other.canary_ttl_hours.or(self.canary_ttl_hours);
+        self.max_auto_risk = other.max_auto_risk.or(self.max_auto_risk);
+        self.max_direct_promote_risk = other
+            .max_direct_promote_risk
+            .or(self.max_direct_promote_risk);
+    }
 }
 
 fn new_candidate_id() -> String {
@@ -1050,6 +1475,35 @@ mod tests {
                 "Deploy docs",
                 "Deploy docs to the site",
                 "## When to Use\nWhen the docs need publishing.\n\n## Procedure\n1. Run deploy.\n",
+                Some("workspace__local".to_owned()),
+                "test",
+            )
+            .unwrap()
+    }
+
+    fn knowledge_candidate(store: &EvolutionStore) -> EvolutionCandidate {
+        store
+            .capture_compiled_knowledge(
+                "incident-handbook",
+                "Incident Handbook",
+                "Escalation notes",
+                "- Page infra first.\n- Capture timeline and blast radius.\n",
+                Some("workspace__local".to_owned()),
+                "test",
+            )
+            .unwrap()
+    }
+
+    fn runtime_policy_candidate(store: &EvolutionStore, enabled: bool) -> EvolutionCandidate {
+        let content = format!(
+            "{{\n  \"auto_evolution\": {{\n    \"enabled\": {enabled},\n    \"min_score\": 95,\n    \"canary_observations\": 3\n  }}\n}}"
+        );
+        store
+            .capture_runtime_policy(
+                "auto-evolution",
+                "Auto Evolution Policy",
+                "Tune auto evolution thresholds",
+                &content,
                 Some("workspace__local".to_owned()),
                 "test",
             )
@@ -1111,6 +1565,31 @@ mod tests {
     }
 
     #[test]
+    fn test_promote_compiled_knowledge_writes_fragment_and_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let candidate = knowledge_candidate(&store(&tmp));
+        store(&tmp).evaluate(&candidate.id).unwrap();
+        let outcome = store(&tmp).promote(&candidate.id, false).unwrap();
+        let fragment = fs::read_to_string(outcome.target).unwrap();
+        let bundle = store(&tmp).load_compiled_knowledge().unwrap();
+        assert!(fragment.contains("Incident Handbook"));
+        assert!(bundle.contains("Capture timeline and blast radius"));
+    }
+
+    #[test]
+    fn test_promote_runtime_policy_writes_fragment_and_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let candidate = runtime_policy_candidate(&store(&tmp), true);
+        store(&tmp).evaluate(&candidate.id).unwrap();
+        let outcome = store(&tmp).promote(&candidate.id, false).unwrap();
+        let fragment = fs::read_to_string(outcome.target).unwrap();
+        let bundle = store(&tmp).load_runtime_policy().unwrap();
+        assert!(fragment.contains("\"min_score\": 95"));
+        assert_eq!(bundle.auto_evolution.min_score, Some(95));
+        assert_eq!(bundle.auto_evolution.canary_observations, Some(3));
+    }
+
+    #[test]
     fn test_reject_updates_status() {
         let tmp = tempfile::tempdir().unwrap();
         let candidate = skill_candidate(&store(&tmp));
@@ -1139,6 +1618,46 @@ mod tests {
         assert!(rules.contains("## Global"));
         assert!(rules.contains("## Local"));
         assert!(rules.find("## A").unwrap() < rules.find("## B").unwrap());
+    }
+
+    #[test]
+    fn test_load_runtime_policy_merges_global_local_and_fragments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let global = tmp.path().join("global.json");
+        let local = tmp.path().join("local.json");
+        let fragments = tmp.path().join("runtime-policies");
+        fs::write(
+            &global,
+            "{\n  \"auto_evolution\": {\"min_score\": 90, \"enabled\": true}\n}",
+        )
+        .unwrap();
+        fs::write(&local, "{\n  \"auto_evolution\": {\"min_evidence\": 2}\n}").unwrap();
+        fs::create_dir_all(&fragments).unwrap();
+        fs::write(
+            fragments.join("z.json"),
+            "{\n  \"auto_evolution\": {\"canary_observations\": 4}\n}",
+        )
+        .unwrap();
+        let policy = load_runtime_policy_from_paths(&global, &local, &fragments).unwrap();
+        assert_eq!(policy.auto_evolution.enabled, Some(true));
+        assert_eq!(policy.auto_evolution.min_score, Some(90));
+        assert_eq!(policy.auto_evolution.min_evidence, Some(2));
+        assert_eq!(policy.auto_evolution.canary_observations, Some(4));
+    }
+
+    #[test]
+    fn test_runtime_policy_can_disable_auto_policy() {
+        let candidate = RuntimePolicyDocument {
+            auto_evolution: RuntimeAutoEvolutionPolicy {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        };
+        assert!(
+            candidate
+                .apply_to_auto_policy(AutoEvolutionPolicy::default())
+                .is_none()
+        );
     }
 
     #[test]

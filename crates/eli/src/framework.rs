@@ -13,7 +13,9 @@ use nexil::CancellationToken;
 use crate::builtin::config::EliConfig;
 use crate::control_plane::{BudgetLedger, DispatchFn, TurnContext, turn_usage, with_turn_context};
 use crate::envelope::{ValueExt, unpack_batch_vec};
-use crate::evolution::{AutoEvolutionLoop, AutoEvolutionPolicy};
+use crate::evolution::{
+    AutoEvolutionLoop, AutoEvolutionPolicy, EvolutionStore, load_runtime_policy_for_workspace,
+};
 use crate::hooks::{ChannelHook, EliHookSpec, HookRuntime, TapeStoreKind};
 use crate::types::{
     Envelope, MessageHandler, PromptValue, RUNTIME_SYSTEM_PROMPT_KEY, RUNTIME_TAPES_DIR_KEY,
@@ -264,8 +266,8 @@ impl EliFramework {
             return;
         };
         tokio::spawn(async move {
-            let result = AutoEvolutionLoop::new(AutoEvolutionPolicy::default()).run(
-                &crate::evolution::EvolutionStore::new(&ctx.workspace),
+            let result = AutoEvolutionLoop::new(ctx.policy.clone()).run(
+                &EvolutionStore::new(&ctx.workspace),
                 &ctx.tapes_dir,
                 &ctx.tape_name,
             );
@@ -538,19 +540,20 @@ struct AutoEvolutionContext {
     workspace: PathBuf,
     tapes_dir: PathBuf,
     tape_name: String,
+    policy: AutoEvolutionPolicy,
 }
 
 fn auto_evolution_context(session_id: &str, state: &State) -> Option<AutoEvolutionContext> {
     if auto_evolution_disabled() {
         return None;
     }
+    let workspace = runtime_path(state, RUNTIME_WORKSPACE_KEY)?;
+    let policy = auto_evolution_policy(&workspace)?;
     Some(AutoEvolutionContext {
-        workspace: runtime_path(state, RUNTIME_WORKSPACE_KEY)?,
+        workspace: workspace.clone(),
         tapes_dir: runtime_path(state, RUNTIME_TAPES_DIR_KEY)?,
-        tape_name: crate::builtin::tape::TapeService::session_tape_name(
-            session_id,
-            &runtime_path(state, RUNTIME_WORKSPACE_KEY)?,
-        ),
+        tape_name: crate::builtin::tape::TapeService::session_tape_name(session_id, &workspace),
+        policy,
     })
 }
 
@@ -563,6 +566,11 @@ fn auto_evolution_disabled() -> bool {
         std::env::var("ELI_EVOLUTION_DISABLED").ok().as_deref(),
         Some("1" | "true" | "TRUE" | "yes" | "YES")
     )
+}
+
+fn auto_evolution_policy(workspace: &std::path::Path) -> Option<AutoEvolutionPolicy> {
+    let policy = load_runtime_policy_for_workspace(workspace).ok()?;
+    policy.apply_to_auto_policy(AutoEvolutionPolicy::default())
 }
 
 fn log_auto_evolution_result(
@@ -965,23 +973,25 @@ mod tests {
     #[test]
     fn test_auto_evolution_context_uses_runtime_paths() {
         let mut state = State::new();
+        let tmp = tempfile::tempdir().unwrap();
         state.insert(
             RUNTIME_WORKSPACE_KEY.to_owned(),
-            Value::String("/tmp/workspace".into()),
+            Value::String(tmp.path().display().to_string()),
         );
         state.insert(
             RUNTIME_TAPES_DIR_KEY.to_owned(),
             Value::String("/tmp/tapes".into()),
         );
         let ctx = auto_evolution_context("cli:test", &state).unwrap();
-        assert_eq!(ctx.workspace, std::path::PathBuf::from("/tmp/workspace"));
+        assert_eq!(ctx.workspace, tmp.path());
         assert_eq!(ctx.tapes_dir, std::path::PathBuf::from("/tmp/tapes"));
         assert_eq!(
             ctx.tape_name,
-            crate::builtin::tape::TapeService::session_tape_name(
-                "cli:test",
-                std::path::Path::new("/tmp/workspace"),
-            )
+            crate::builtin::tape::TapeService::session_tape_name("cli:test", tmp.path(),)
+        );
+        assert_eq!(
+            ctx.policy.min_score,
+            AutoEvolutionPolicy::default().min_score
         );
     }
 
@@ -991,6 +1001,52 @@ mod tests {
         let ctx = auto_evolution_context("cli:test", &State::new());
         unsafe { std::env::remove_var("ELI_EVOLUTION_DISABLED") };
         assert!(ctx.is_none());
+    }
+
+    #[test]
+    fn test_auto_evolution_context_honors_runtime_policy_disable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".agents/evolution/runtime-policies");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("auto-evolution.json"),
+            "{\n  \"auto_evolution\": {\"enabled\": false}\n}",
+        )
+        .unwrap();
+        let mut state = State::new();
+        state.insert(
+            RUNTIME_WORKSPACE_KEY.to_owned(),
+            Value::String(tmp.path().display().to_string()),
+        );
+        state.insert(
+            RUNTIME_TAPES_DIR_KEY.to_owned(),
+            Value::String("/tmp/tapes".into()),
+        );
+        assert!(auto_evolution_context("cli:test", &state).is_none());
+    }
+
+    #[test]
+    fn test_auto_evolution_context_applies_runtime_policy_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".agents/evolution/runtime-policies");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("auto-evolution.json"),
+            "{\n  \"auto_evolution\": {\"min_score\": 91, \"canary_observations\": 4}\n}",
+        )
+        .unwrap();
+        let mut state = State::new();
+        state.insert(
+            RUNTIME_WORKSPACE_KEY.to_owned(),
+            Value::String(tmp.path().display().to_string()),
+        );
+        state.insert(
+            RUNTIME_TAPES_DIR_KEY.to_owned(),
+            Value::String("/tmp/tapes".into()),
+        );
+        let ctx = auto_evolution_context("cli:test", &state).unwrap();
+        assert_eq!(ctx.policy.min_score, 91);
+        assert_eq!(ctx.policy.canary_observations, 4);
     }
 
     // -- hook_report ----------------------------------------------------------
