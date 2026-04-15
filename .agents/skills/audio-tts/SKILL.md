@@ -25,13 +25,13 @@ Generate speech audio using macOS built-in `say` command and convert to m4a form
 
 | Intent | Command | Key Params |
 |--------|---------|------------|
-| Speak text | `python3 $SKILL_DIR/run.py speak --text '...'` | `--text` (required) |
-| Custom voice | `python3 $SKILL_DIR/run.py speak --text '...' --voice Samantha` | `--voice` |
+| Speak text | `$PYTHON $SKILL_DIR/run.py speak --text '...'` | `--text` (required) |
+| Custom voice | `$PYTHON $SKILL_DIR/run.py speak --text '...' --voice Samantha` | `--voice` |
 
 ## Usage
 
 ```bash
-python3 $SKILL_DIR/run.py speak --text 'Hello, this is a speech test'
+$PYTHON $SKILL_DIR/run.py speak --text 'Hello, this is a speech test'
 ```
 
 ## Parameters

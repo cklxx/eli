@@ -24,6 +24,8 @@ priority: 6
 requires_tools: [bash]
 max_tokens: 4000
 cooldown: 10
+enabled: false
+disabled_reason: "Depends on the external opencli binary plus browser/site logins; not self-contained in this workspace."
 ---
 
 # opencli

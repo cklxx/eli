@@ -21,7 +21,7 @@ Generate short videos via the ARK Seedance backend.
 ## Usage
 
 ```bash
-python3 $SKILL_DIR/run.py generate --prompt 'cute cat animation' --duration 5 --output /tmp/cat.mp4
+$PYTHON $SKILL_DIR/run.py generate --prompt 'cute cat animation' --duration 5 --output /tmp/cat.mp4
 ```
 
 ## Parameters

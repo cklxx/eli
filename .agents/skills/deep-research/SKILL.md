@@ -29,14 +29,14 @@ Multi-source search, evidence compilation, and structured report generation for 
 
 | Intent | Command | Key Params |
 |--------|---------|------------|
-| Basic research | `python3 $SKILL_DIR/run.py --topic '...'` | `--topic` (required) |
-| Custom queries | `python3 $SKILL_DIR/run.py --topic '...' --queries '[...]'` | `--queries` |
-| Advanced depth | `python3 $SKILL_DIR/run.py --topic '...' --depth advanced` | `--depth` |
+| Basic research | `$PYTHON $SKILL_DIR/run.py --topic '...'` | `--topic` (required) |
+| Custom queries | `$PYTHON $SKILL_DIR/run.py --topic '...' --queries '[...]'` | `--queries` |
+| Advanced depth | `$PYTHON $SKILL_DIR/run.py --topic '...' --depth advanced` | `--depth` |
 
 ## Usage
 
 ```bash
-python3 $SKILL_DIR/run.py --topic 'Research topic' --queries '["keyword1","keyword2"]' --max_results 5 --depth basic
+$PYTHON $SKILL_DIR/run.py --topic 'Research topic' --queries '["keyword1","keyword2"]' --max_results 5 --depth basic
 ```
 
 ## Parameters

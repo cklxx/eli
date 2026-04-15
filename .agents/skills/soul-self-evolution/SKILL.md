@@ -36,10 +36,10 @@ Perform controlled updates to `SOUL.md` (typically `.agents/SOUL.md` or `~/.eli/
 
 ```bash
 # Apply a change to an evolvable section
-python3 $SKILL_DIR/run.py apply --path .agents/SOUL.md --changes '[{"section":"## Collaboration Preferences","content":"- Keep updates concise."}]'
+$PYTHON $SKILL_DIR/run.py apply --path .agents/SOUL.md --changes '[{"section":"## Collaboration Preferences","content":"- Keep updates concise."}]'
 
 # List available rollback checkpoints
-python3 $SKILL_DIR/run.py list_checkpoints
+$PYTHON $SKILL_DIR/run.py list_checkpoints
 ```
 
 ## Parameters

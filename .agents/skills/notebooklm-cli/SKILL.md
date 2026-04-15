@@ -11,6 +11,8 @@ priority: 7
 requires_tools: [bash]
 max_tokens: 200
 cooldown: 20
+enabled: false
+disabled_reason: "Depends on the external nlm CLI and NotebookLM auth state; not self-contained in this workspace."
 ---
 
 # notebooklm-cli
@@ -33,7 +35,7 @@ Local CLI wrapper around `nlm` for managing NotebookLM resources. Unified `comma
 ## Usage
 
 ```bash
-python3 $SKILL_DIR/run.py <command> [op] [--flag value ...]
+$PYTHON $SKILL_DIR/run.py <command> [op] [--flag value ...]
 ```
 
 ## Progressive Help
@@ -41,10 +43,10 @@ python3 $SKILL_DIR/run.py <command> [op] [--flag value ...]
 Retrieve contract documentation for LLM or human consumption:
 
 ```bash
-python3 $SKILL_DIR/run.py help --topic overview      # entry point, env vars, command summary
-python3 $SKILL_DIR/run.py help --topic schema         # full command contracts (machine-readable)
-python3 $SKILL_DIR/run.py help --topic progressive    # overview + per-command contract chain
-python3 $SKILL_DIR/run.py help --topic source --include_cli true   # include raw CLI help
+$PYTHON $SKILL_DIR/run.py help --topic overview      # entry point, env vars, command summary
+$PYTHON $SKILL_DIR/run.py help --topic schema         # full command contracts (machine-readable)
+$PYTHON $SKILL_DIR/run.py help --topic progressive    # overview + per-command contract chain
+$PYTHON $SKILL_DIR/run.py help --topic source --include_cli true   # include raw CLI help
 ```
 
 ## Input Contract
@@ -69,12 +71,12 @@ python3 $SKILL_DIR/run.py help --topic source --include_cli true   # include raw
 ## Minimal End-to-End Example
 
 ```bash
-python3 $SKILL_DIR/run.py auth check
-python3 $SKILL_DIR/run.py notebook create --title 'NLM E2E'
-python3 $SKILL_DIR/run.py source add_url --notebook_id '<nb-id>' --url https://example.com/article
-python3 $SKILL_DIR/run.py query --notebook_id '<nb-id>' --question 'Summarize 3 key conclusions'
-python3 $SKILL_DIR/run.py report --notebook_id '<nb-id>' --confirm true
-python3 $SKILL_DIR/run.py studio status --notebook_id '<nb-id>'
+$PYTHON $SKILL_DIR/run.py auth check
+$PYTHON $SKILL_DIR/run.py notebook create --title 'NLM E2E'
+$PYTHON $SKILL_DIR/run.py source add_url --notebook_id '<nb-id>' --url https://example.com/article
+$PYTHON $SKILL_DIR/run.py query --notebook_id '<nb-id>' --question 'Summarize 3 key conclusions'
+$PYTHON $SKILL_DIR/run.py report --notebook_id '<nb-id>' --confirm true
+$PYTHON $SKILL_DIR/run.py studio status --notebook_id '<nb-id>'
 ```
 
 ## Constraints

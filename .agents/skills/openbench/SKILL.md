@@ -11,6 +11,8 @@ priority: 6
 requires_tools: [bash]
 max_tokens: 200
 cooldown: 60
+enabled: false
+disabled_reason: "Depends on the external openbench CLI/repo and is not self-contained in this workspace."
 ---
 
 # openbench
@@ -116,5 +118,3 @@ experiment = Experiment(
 - "Be careful" > 步骤列表 → 姿态 > 流程
 
 ## 安装位置
-
-`/Users/bytedance/code/openbench`

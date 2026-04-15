@@ -21,29 +21,29 @@ Unified reminder scheduler covering two capabilities: one-time reminders (delaye
 
 | Intent | Command | Key Params |
 |--------|---------|------------|
-| Set one-time reminder | `python3 $SKILL_DIR/run.py set_once --delay 30m --task "..."` | `--delay`, `--task` |
-| List one-time reminders | `python3 $SKILL_DIR/run.py list_once` | none |
-| Cancel one-time reminder | `python3 $SKILL_DIR/run.py cancel_once --id timer-12345` | `--id` |
-| Create/update plan | `python3 $SKILL_DIR/run.py upsert_plan --name ... --schedule "..." --task "..."` | `--name`, `--schedule`, `--task` |
-| List plans | `python3 $SKILL_DIR/run.py list_plans` | none |
-| Scan due plans | `python3 $SKILL_DIR/run.py due_plans` | `--now` (optional) |
-| Delete plan | `python3 $SKILL_DIR/run.py delete_plan --name ...` | `--name` or `--id` |
-| Advance plan | `python3 $SKILL_DIR/run.py touch_plan --name ... --next-run-at ...` | `--name`/`--id`, `--next-run-at` |
+| Set one-time reminder | `$PYTHON $SKILL_DIR/run.py set_once --delay 30m --task "..."` | `--delay`, `--task` |
+| List one-time reminders | `$PYTHON $SKILL_DIR/run.py list_once` | none |
+| Cancel one-time reminder | `$PYTHON $SKILL_DIR/run.py cancel_once --id timer-12345` | `--id` |
+| Create/update plan | `$PYTHON $SKILL_DIR/run.py upsert_plan --name ... --schedule "..." --task "..."` | `--name`, `--schedule`, `--task` |
+| List plans | `$PYTHON $SKILL_DIR/run.py list_plans` | none |
+| Scan due plans | `$PYTHON $SKILL_DIR/run.py due_plans` | `--now` (optional) |
+| Delete plan | `$PYTHON $SKILL_DIR/run.py delete_plan --name ...` | `--name` or `--id` |
+| Advance plan | `$PYTHON $SKILL_DIR/run.py touch_plan --name ... --next-run-at ...` | `--name`/`--id`, `--next-run-at` |
 
 ## Usage
 
 ```bash
 # One-time reminders
-python3 $SKILL_DIR/run.py set_once --delay 30m --task "Drink water"
-python3 $SKILL_DIR/run.py list_once
-python3 $SKILL_DIR/run.py cancel_once --id timer-12345
+$PYTHON $SKILL_DIR/run.py set_once --delay 30m --task "Drink water"
+$PYTHON $SKILL_DIR/run.py list_once
+$PYTHON $SKILL_DIR/run.py cancel_once --id timer-12345
 
 # Recurring plans
-python3 $SKILL_DIR/run.py upsert_plan --name weekly-retro --schedule "0 18 * * 5" --task "Send retro reminder" --next-run-at 2026-03-06T10:00:00Z
-python3 $SKILL_DIR/run.py list_plans
-python3 $SKILL_DIR/run.py due_plans --now 2026-03-06T10:00:00Z
-python3 $SKILL_DIR/run.py delete_plan --name weekly-retro
-python3 $SKILL_DIR/run.py touch_plan --name weekly-retro --next-run-at 2026-03-13T10:00:00Z
+$PYTHON $SKILL_DIR/run.py upsert_plan --name weekly-retro --schedule "0 18 * * 5" --task "Send retro reminder" --next-run-at 2026-03-06T10:00:00Z
+$PYTHON $SKILL_DIR/run.py list_plans
+$PYTHON $SKILL_DIR/run.py due_plans --now 2026-03-06T10:00:00Z
+$PYTHON $SKILL_DIR/run.py delete_plan --name weekly-retro
+$PYTHON $SKILL_DIR/run.py touch_plan --name weekly-retro --next-run-at 2026-03-13T10:00:00Z
 ```
 
 ## Parameters

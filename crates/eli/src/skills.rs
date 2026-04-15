@@ -31,6 +31,17 @@ const SKILL_SOURCES: [&str; 2] = ["project", "global"];
 pub(crate) struct SkillFrontmatter {
     name: String,
     description: String,
+    #[serde(default = "default_skill_enabled")]
+    enabled: bool,
+}
+
+fn default_skill_enabled() -> bool {
+    true
+}
+
+enum ReadSkillResult {
+    Enabled(SkillMetadata),
+    Disabled(String),
 }
 
 #[derive(Debug)]
@@ -109,50 +120,97 @@ impl SkillMetadata {
 pub fn discover_skills(workspace_path: &Path) -> Vec<SkillMetadata> {
     let mut skills_by_name: std::collections::HashMap<String, SkillMetadata> =
         std::collections::HashMap::new();
+    let mut disabled_skills = std::collections::HashSet::new();
 
     for (root, source) in iter_skill_roots(workspace_path) {
-        if !root.is_dir() {
-            continue;
-        }
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(&root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .collect();
-        entries.sort();
-
-        for skill_dir in entries {
-            if let Some(metadata) = read_skill(&skill_dir, &source) {
-                let key = metadata.name.to_lowercase();
-                skills_by_name.entry(key).or_insert(metadata);
-            }
-        }
+        discover_skill_root(&root, &source, &mut skills_by_name, &mut disabled_skills);
     }
 
-    let mut result: Vec<SkillMetadata> = skills_by_name.into_values().collect();
+    sort_skills(skills_by_name)
+}
+
+fn read_skill(skill_dir: &Path, source: &str) -> Option<ReadSkillResult> {
+    let skill_file = skill_dir.join(SKILL_FILE_NAME);
+    let (frontmatter, metadata) = parse_skill_file(&skill_file)?;
+    if !is_valid_frontmatter(skill_dir, &frontmatter) {
+        return None;
+    }
+    Some(skill_result(frontmatter, metadata, skill_file, source))
+}
+
+fn discover_skill_root(
+    root: &Path,
+    source: &str,
+    skills_by_name: &mut std::collections::HashMap<String, SkillMetadata>,
+    disabled_skills: &mut std::collections::HashSet<String>,
+) {
+    for skill_dir in sorted_skill_dirs(root) {
+        let Some(result) = read_skill(&skill_dir, source) else {
+            continue;
+        };
+        apply_skill_result(result, skills_by_name, disabled_skills);
+    }
+}
+
+fn sorted_skill_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut entries = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
+fn apply_skill_result(
+    result: ReadSkillResult,
+    skills_by_name: &mut std::collections::HashMap<String, SkillMetadata>,
+    disabled_skills: &mut std::collections::HashSet<String>,
+) {
+    let key = result.name().to_lowercase();
+    match result {
+        ReadSkillResult::Enabled(metadata) if !disabled_skills.contains(&key) => {
+            skills_by_name.entry(key).or_insert(metadata);
+        }
+        ReadSkillResult::Enabled(_) => {}
+        ReadSkillResult::Disabled(_) => {
+            disabled_skills.insert(key.clone());
+            skills_by_name.remove(&key);
+        }
+    }
+}
+
+fn sort_skills(
+    skills_by_name: std::collections::HashMap<String, SkillMetadata>,
+) -> Vec<SkillMetadata> {
+    let mut result = skills_by_name.into_values().collect::<Vec<_>>();
     result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     result
 }
 
-fn read_skill(skill_dir: &Path, source: &str) -> Option<SkillMetadata> {
-    let skill_file = skill_dir.join(SKILL_FILE_NAME);
+fn parse_skill_file(
+    skill_file: &Path,
+) -> Option<(SkillFrontmatter, std::collections::HashMap<String, String>)> {
     if !skill_file.is_file() {
         return None;
     }
-
-    let content = std::fs::read_to_string(&skill_file).ok()?;
+    let content = std::fs::read_to_string(skill_file).ok()?;
     let parsed = parse_skill_frontmatter(&content)?;
-    let ParsedFrontmatter {
-        frontmatter,
-        metadata,
-    } = parsed;
-    if !is_valid_frontmatter(skill_dir, &frontmatter) {
-        return None;
-    }
+    Some((parsed.frontmatter, parsed.metadata))
+}
 
-    Some(SkillMetadata {
+fn skill_result(
+    frontmatter: SkillFrontmatter,
+    metadata: std::collections::HashMap<String, String>,
+    skill_file: PathBuf,
+    source: &str,
+) -> ReadSkillResult {
+    if !frontmatter.enabled {
+        return ReadSkillResult::Disabled(frontmatter.name);
+    }
+    ReadSkillResult::Enabled(SkillMetadata {
         name: frontmatter.name,
         description: frontmatter.description,
         location: skill_file
@@ -162,6 +220,15 @@ fn read_skill(skill_dir: &Path, source: &str) -> Option<SkillMetadata> {
         metadata,
         content: None,
     })
+}
+
+impl ReadSkillResult {
+    fn name(&self) -> &str {
+        match self {
+            Self::Enabled(skill) => &skill.name,
+            Self::Disabled(name) => name,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -313,6 +380,19 @@ mod tests {
         skill_file
     }
 
+    fn write_skill_with_frontmatter(
+        root: &Path,
+        name: &str,
+        frontmatter: &str,
+        body: &str,
+    ) -> PathBuf {
+        let skill_dir = root.join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_file = skill_dir.join(SKILL_FILE_NAME);
+        std::fs::write(&skill_file, format!("---\n{frontmatter}\n---\n{body}")).unwrap();
+        skill_file
+    }
+
     fn skill_metadata(name: &str, description: &str, location: PathBuf) -> SkillMetadata {
         SkillMetadata {
             name: name.to_owned(),
@@ -384,10 +464,25 @@ mod tests {
         write_skill(tmp.path(), "my-skill", "A skill", "Body");
         let result = read_skill(&tmp.path().join("my-skill"), "project");
         assert!(result.is_some());
-        let skill = result.unwrap();
-        assert_eq!(skill.name, "my-skill");
-        assert_eq!(skill.description, "A skill");
-        assert_eq!(skill.source, "project");
+        match result.unwrap() {
+            ReadSkillResult::Enabled(skill) => {
+                assert_eq!(skill.name, "my-skill");
+                assert_eq!(skill.description, "A skill");
+                assert_eq!(skill.source, "project");
+            }
+            ReadSkillResult::Disabled(_) => panic!("expected enabled skill"),
+        }
+    }
+
+    #[test]
+    fn test_read_skill_defaults_enabled_when_field_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill(tmp.path(), "my-skill", "A skill", "Body");
+        let parsed = parse_skill_frontmatter(
+            &std::fs::read_to_string(tmp.path().join("my-skill").join(SKILL_FILE_NAME)).unwrap(),
+        )
+        .unwrap();
+        assert!(parsed.frontmatter.enabled);
     }
 
     #[test]
@@ -408,6 +503,39 @@ mod tests {
         assert!(result.is_none());
     }
 
+    #[test]
+    fn test_read_skill_preserves_metadata_for_disabled_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill_with_frontmatter(
+            tmp.path(),
+            "disabled-skill",
+            "name: disabled-skill\ndescription: Disabled\nenabled: false\ndisabled_reason: retired",
+            "Body",
+        );
+        let content =
+            std::fs::read_to_string(tmp.path().join("disabled-skill").join(SKILL_FILE_NAME))
+                .unwrap();
+        let parsed = parse_skill_frontmatter(&content).unwrap();
+        assert_eq!(parsed.metadata.get("enabled").unwrap(), "false");
+        assert_eq!(parsed.metadata.get("disabled_reason").unwrap(), "retired");
+        assert!(!parsed.frontmatter.enabled);
+    }
+
+    #[test]
+    fn test_read_skill_returns_disabled_for_flagged_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill_with_frontmatter(
+            tmp.path(),
+            "disabled-skill",
+            "name: disabled-skill\ndescription: Disabled\nenabled: false",
+            "Body",
+        );
+        match read_skill(&tmp.path().join("disabled-skill"), "project").unwrap() {
+            ReadSkillResult::Disabled(name) => assert_eq!(name, "disabled-skill"),
+            ReadSkillResult::Enabled(_) => panic!("expected disabled skill"),
+        }
+    }
+
     // -- discover_skills tests ------------------------------------------------
 
     #[test]
@@ -425,6 +553,23 @@ mod tests {
             assert_eq!(skill.description, "project version");
             assert_eq!(skill.source, "project");
         }
+    }
+
+    #[test]
+    fn test_discover_skills_skips_disabled_project_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().join(".agents/skills");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        write_skill_with_frontmatter(
+            &project_root,
+            "shared",
+            "name: shared\ndescription: disabled project\nenabled: false",
+            "body",
+        );
+
+        let discovered = discover_skills(tmp.path());
+        assert!(discovered.iter().all(|skill| skill.name != "shared"));
     }
 
     // -- render_skills_prompt tests -------------------------------------------

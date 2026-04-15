@@ -13,6 +13,8 @@ priority: 7
 requires_tools: [bash]
 max_tokens: 200
 cooldown: 60
+enabled: false
+disabled_reason: "Depends on the external Mermaid CLI (mmdc) in PATH; not self-contained in this workspace."
 ---
 
 # diagram-to-image
@@ -23,14 +25,14 @@ Render Mermaid code into PNG or SVG image files.
 
 | Intent | Command | Key Params |
 |--------|---------|------------|
-| Render PNG | `python3 $SKILL_DIR/run.py render --code '...'` | `--code` (required) |
-| Render SVG | `python3 $SKILL_DIR/run.py render --code '...' --format svg` | `--format` |
-| Custom output | `python3 $SKILL_DIR/run.py render --code '...' --output /path/to/file.png` | `--output` |
+| Render PNG | `$PYTHON $SKILL_DIR/run.py render --code '...'` | `--code` (required) |
+| Render SVG | `$PYTHON $SKILL_DIR/run.py render --code '...' --format svg` | `--format` |
+| Custom output | `$PYTHON $SKILL_DIR/run.py render --code '...' --output /path/to/file.png` | `--output` |
 
 ## Usage
 
 ```bash
-python3 $SKILL_DIR/run.py render --code 'graph LR
+$PYTHON $SKILL_DIR/run.py render --code 'graph LR
 A[Client] --> B[API]
 B --> C[(DB)]' --format png --theme default --output /tmp/diagram_arch.png
 ```

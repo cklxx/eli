@@ -39,10 +39,10 @@ Generate images via Seedream text-to-image, or refine existing images with image
 
 ```bash
 # Text to image
-python3 $SKILL_DIR/run.py generate --prompt 'white cat in moonlight' --style realistic --watermark false
+$PYTHON $SKILL_DIR/run.py generate --prompt 'white cat in moonlight' --style realistic --watermark false
 
 # Image to image
-python3 $SKILL_DIR/run.py refine --image_path /tmp/cat.png --prompt 'add starry sky background' --watermark false
+$PYTHON $SKILL_DIR/run.py refine --image_path /tmp/cat.png --prompt 'add starry sky background' --watermark false
 ```
 
 ## Parameters

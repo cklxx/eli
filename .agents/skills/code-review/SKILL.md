@@ -21,10 +21,10 @@ Run a multi-dimensional code review (SOLID architecture, security, quality, edge
 
 | Intent | Command | Key Params |
 |--------|---------|------------|
-| Review current diff | `python3 $SKILL_DIR/run.py review` | none |
+| Review current diff | `$PYTHON $SKILL_DIR/run.py review` | none |
 
 ## Usage
 
 ```bash
-python3 $SKILL_DIR/run.py review
+$PYTHON $SKILL_DIR/run.py review
 ```

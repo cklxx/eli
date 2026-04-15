@@ -11,6 +11,8 @@ priority: 7
 requires_tools: [bash]
 max_tokens: 200
 cooldown: 60
+enabled: false
+disabled_reason: "Depends on the external openmax CLI/repo and is not self-contained in this workspace."
 ---
 
 # openmax
@@ -94,5 +96,3 @@ openmax doctor            # 环境健康检查
 openmax 自动识别项目类型（Web App / CLI / API / Library / Refactor），应用对应的分解策略和反模式检查。可在 `.openmax/archetypes/*.yaml` 自定义。
 
 ## 安装位置
-
-`/Users/bytedance/code/openmax`

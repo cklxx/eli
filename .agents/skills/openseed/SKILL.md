@@ -15,6 +15,8 @@ priority: 7
 requires_tools: [bash]
 max_tokens: 200
 cooldown: 60
+enabled: false
+disabled_reason: "Depends on the external openseed CLI/repo and external research services; not self-contained in this workspace."
 ---
 
 # openseed
@@ -101,5 +103,3 @@ openseed 同时提供 MCP server，已注册到 Claude Code。在对话中可直
 **工具选择原则**：优先用便宜工具（stats → search → get_paper），自己推理；只在无法回答时才用 `ask_research`。
 
 ## 安装位置
-
-`/Users/bytedance/code/openseed`

@@ -21,12 +21,12 @@ macOS desktop automation: run AppleScript to control applications.
 
 | Intent | Command | Key Params |
 |--------|---------|------------|
-| Run AppleScript | `python3 $SKILL_DIR/run.py run --script '...'` | `--script` |
-| Open an app | `python3 $SKILL_DIR/run.py open_app --app Safari` | `--app` |
+| Run AppleScript | `$PYTHON $SKILL_DIR/run.py run --script '...'` | `--script` |
+| Open an app | `$PYTHON $SKILL_DIR/run.py open_app --app Safari` | `--app` |
 
 ## Usage
 
 ```bash
-python3 $SKILL_DIR/run.py run --script 'tell application "Finder" to activate'
-python3 $SKILL_DIR/run.py open_app --app Safari
+$PYTHON $SKILL_DIR/run.py run --script 'tell application "Finder" to activate'
+$PYTHON $SKILL_DIR/run.py open_app --app Safari
 ```
