@@ -1,6 +1,6 @@
 ---
 name: openmax
-description: 多智能体并行编排 — 将任务分解为子任务，分派到多个 AI agent 并行执行，自动合并结果。
+description: 多智能体并行编排 — 通过 REST API 远程调度 openMax，将任务分解为子任务分派到多个 AI agent 并行执行。
 triggers:
   intent_patterns:
     - "parallel|并行|多agent|分解任务|openmax|dispatch|多线程开发"
@@ -11,88 +11,114 @@ priority: 7
 requires_tools: [bash]
 max_tokens: 200
 cooldown: 60
-enabled: false
-disabled_reason: "Depends on the external openmax CLI/repo and is not self-contained in this workspace."
+enabled: true
 ---
 
-# openmax
+# openMax Remote Control
 
-多智能体并行任务编排。一条命令，多个 AI agent，零人工看护。
+通过 REST API 远程调度 openMax 多智能体编排。
 
-openmax 将复杂任务自动分解为可并行的子任务，分派到独立终端窗格中的 AI agent（Claude Code / Codex / OpenCode），监控执行进度，验证交付物，合并结果。
+## 前置条件
 
-## 使用场景
+openMax server 必须已启动：
 
-| 场景 | 示例 |
-|------|------|
-| **并行功能开发** | 同时构建 API、前端 UI、测试 |
-| **批量修 bug** | 一次性并行修复多个 issue |
-| **全栈重构** | 自动按架构分解，schema → API + 前端并行 → 集成测试 |
-| **多仓库协同** | 不同 cwd 下并行执行任务 |
-| **晨间启动** | 从文件加载今日任务，一键并行分派 |
+```bash
+# 在 openMax 机器上
+openmax serve --api-key YOUR_KEY
+```
 
-## 调用
+## 配置
 
-### 基础并行
+环境变量（在 Eli 的 `.env` 或 shell 中设置）：
+
+```
+OPENMAX_URL=http://localhost:7862    # openMax server 地址
+OPENMAX_API_KEY=YOUR_KEY             # API key（如果设置了）
+```
+
+## 操作流程
+
+### 1. 创建任务
+
+```bash
+curl -s -X POST "${OPENMAX_URL:-http://localhost:7862}/api/remote/tasks" \
+  -H "Authorization: Bearer ${OPENMAX_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"task":"任务描述","cwd":"/project/path"}'
+```
+
+返回：`{"task_id":"abc123","status":"submitted","stream_url":"/api/remote/tasks/abc123/stream"}`
+
+### 2. 订阅进度（SSE）
+
+```bash
+curl -s -N "${OPENMAX_URL:-http://localhost:7862}/api/remote/tasks/TASK_ID/stream" \
+  -H "Authorization: Bearer ${OPENMAX_API_KEY}" \
+  -H "Accept: text/event-stream"
+```
+
+事件类型：
+- `progress` — 子任务进度（pct, msg）
+- `done` — 子任务完成（summary）
+- `input_needed` — 需要人工输入（request_id, question, choices）
+- `completed` — 全部完成
+
+### 3. 回复审批
+
+当收到 `input_needed` 事件时：
+
+```bash
+curl -s -X POST "${OPENMAX_URL:-http://localhost:7862}/api/remote/tasks/TASK_ID/reply" \
+  -H "Authorization: Bearer ${OPENMAX_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"request_id":"REQUEST_ID","text":"用户的回答"}'
+```
+
+### 4. 发送文本到 agent（"继续"）
+
+```bash
+curl -s -X POST "${OPENMAX_URL:-http://localhost:7862}/api/remote/tasks/TASK_ID/send" \
+  -H "Authorization: Bearer ${OPENMAX_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"pane_id":1,"text":"yes"}'
+```
+
+### 5. 查询状态
+
+```bash
+# 单个任务
+curl -s "${OPENMAX_URL:-http://localhost:7862}/api/remote/tasks/TASK_ID" \
+  -H "Authorization: Bearer ${OPENMAX_API_KEY}"
+
+# 所有任务
+curl -s "${OPENMAX_URL:-http://localhost:7862}/api/remote/tasks" \
+  -H "Authorization: Bearer ${OPENMAX_API_KEY}"
+```
+
+### 6. 取消任务
+
+```bash
+curl -s -X DELETE "${OPENMAX_URL:-http://localhost:7862}/api/remote/tasks/TASK_ID" \
+  -H "Authorization: Bearer ${OPENMAX_API_KEY}"
+```
+
+## 完整工作流示例
+
+当用户要求并行执行任务时：
+
+1. 用 `bash` 工具调用 `curl` 创建 openMax 任务
+2. 轮询或 SSE 监控进度
+3. 将进度事件翻译为人类可读消息返回给用户
+4. 如果收到 `input_needed`，向用户提问，再用 `/reply` 回复
+5. 任务完成后汇总结果
+
+## CLI 模式（本地直接调用）
+
+如果 openMax CLI 在本机可用，也可直接调用：
 
 ```bash
 openmax run "Build REST API" "Add auth middleware" "Write integration tests"
-```
-
-### 从文件加载任务
-
-```bash
-openmax run -f tasks.txt
-```
-
-### 指定模型和 agent
-
-```bash
 openmax run "重构支付模块" --model claude-opus-4-20250805 --agents claude-code,codex
-```
-
-### 高质量模式（写 → 审 → 挑战 → 重写）
-
-```bash
-openmax run "实现用户鉴权" --quality
-```
-
-### 会话恢复
-
-```bash
-openmax run "继续上次任务" --session-id abc123 --resume
-```
-
-## 常用参数
-
-| 参数 | 说明 |
-|------|------|
-| `--cwd PATH` | 工作目录 |
-| `--model MODEL` | lead agent 模型（默认 sonnet） |
-| `--agents LIST` | 逗号分隔的 agent 偏好，如 `claude-code,codex` |
-| `--max-turns N` | 最大编排轮次 |
-| `--keep-panes` | 完成后保留终端窗格 |
-| `--quality / -q` | 高质量模式 |
-| `--verbose / -v` | 显示子任务详细输出 |
-| `--no-confirm` | 跳过计划确认 |
-| `-f FILE` | 从文件加载任务（每行一条） |
-| `--session-id ID` | 指定会话 ID |
-| `--resume` | 恢复中断的会话 |
-
-## 管理命令
-
-```bash
 openmax sessions          # 列出已完成会话
-openmax inspect [ID]      # 查看会话详情
-openmax usage             # 查看 token/费用统计
-openmax log               # 查看事件日志
 openmax status            # 检查环境就绪状态
-openmax agents            # 列出可用 agent
-openmax doctor            # 环境健康检查
 ```
-
-## 项目感知
-
-openmax 自动识别项目类型（Web App / CLI / API / Library / Refactor），应用对应的分解策略和反模式检查。可在 `.openmax/archetypes/*.yaml` 自定义。
-
-## 安装位置
