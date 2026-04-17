@@ -30,6 +30,7 @@ fn provider_alias(provider_name: &str) -> String {
     match provider_name_key(provider_name).as_str() {
         "claude" | "anthropic" => "anthropic".to_owned(),
         "copilot" | "github-copilot" => "github-copilot".to_owned(),
+        "agent-infer" | "agent_infer" | "agentinfer" => "agent-infer".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -46,6 +47,7 @@ pub fn default_api_base(provider_name: &str) -> String {
         "openai" => "https://api.openai.com/v1".to_owned(),
         "openrouter" => "https://openrouter.ai/api/v1".to_owned(),
         "github-copilot" => "https://api.githubcopilot.com".to_owned(),
+        "agent-infer" => "http://127.0.0.1:8000/v1".to_owned(),
         other => format!("https://api.{other}.com/v1"),
     }
 }
@@ -56,6 +58,11 @@ pub fn default_model_for_provider(provider_name: &str) -> &'static str {
         "openai" => "openai:gpt-5.4-mini",
         "anthropic" => "anthropic:claude-sonnet-4-6",
         "github-copilot" => "github-copilot:gpt-5.4-mini",
+        // agent-infer has no fixed cloud default; the login flow queries
+        // /v1/models and writes the real served model into the profile.
+        // This placeholder is only used when no profile exists and the user
+        // has not set ELI_MODEL — it matches the README's canonical example.
+        "agent-infer" => "agent-infer:Qwen/Qwen3-4B",
         _ => "openrouter:openai/gpt-5.4-mini",
     }
 }
@@ -145,6 +152,9 @@ mod tests {
         assert_eq!(normalized_provider_name("copilot"), "github-copilot");
         assert_eq!(normalized_provider_name("openai"), "openai");
         assert_eq!(normalized_provider_name(" Claude "), "anthropic");
+        assert_eq!(normalized_provider_name("agent-infer"), "agent-infer");
+        assert_eq!(normalized_provider_name("agent_infer"), "agent-infer");
+        assert_eq!(normalized_provider_name("AgentInfer"), "agent-infer");
     }
 
     #[test]
@@ -152,6 +162,8 @@ mod tests {
         assert_eq!(default_api_base("claude"), "https://api.anthropic.com/v1");
         assert_eq!(default_api_base("copilot"), "https://api.githubcopilot.com");
         assert_eq!(default_api_base("cohere"), "https://api.cohere.com/v1");
+        assert_eq!(default_api_base("agent-infer"), "http://127.0.0.1:8000/v1");
+        assert_eq!(default_api_base("agent_infer"), "http://127.0.0.1:8000/v1");
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use super::detect;
 use crate::builtin::config::{EliConfig, Profile, default_model_for_provider, normalize_provider};
 
 /// Mask an account ID for display: show first 3 and last 3 chars only.
@@ -33,9 +34,10 @@ pub(crate) async fn login_command(
             }
         }
         "github-copilot" | "copilot" => login_github_copilot(browser, timeout).await,
+        "agent-infer" | "agent_infer" | "agentinfer" => login_agent_infer().await,
         _ => anyhow::bail!(
             "Unsupported auth provider: {provider}\n\
-             Supported providers: openai, claude, github-copilot"
+             Supported providers: openai, claude, github-copilot, agent-infer"
         ),
     }
 }
@@ -44,6 +46,19 @@ pub(crate) async fn login_command(
 fn post_login_save_profile(provider_raw: &str) -> anyhow::Result<()> {
     let provider = normalize_provider(provider_raw);
     let model = default_model_for_provider(&provider);
+    save_profile_with_overrides(&provider, model, None)
+}
+
+/// Persist a profile with explicit model and optional api_base override.
+///
+/// Used by login flows that discover the model/endpoint at runtime
+/// (e.g. `eli login agent-infer` probing `/v1/models`).
+fn save_profile_with_overrides(
+    provider_raw: &str,
+    model: &str,
+    api_base: Option<String>,
+) -> anyhow::Result<()> {
+    let provider = normalize_provider(provider_raw);
     let profile_name = provider.clone();
 
     let mut config = EliConfig::load();
@@ -54,6 +69,7 @@ fn post_login_save_profile(provider_raw: &str) -> anyhow::Result<()> {
         Profile {
             provider: provider.clone(),
             model: model.to_string(),
+            api_base: api_base.clone(),
         },
     );
 
@@ -67,6 +83,9 @@ fn post_login_save_profile(provider_raw: &str) -> anyhow::Result<()> {
     println!("  Profile:  {profile_name}");
     println!("  Provider: {provider}");
     println!("  Model:    {model}");
+    if let Some(base) = api_base {
+        println!("  Endpoint: {base}");
+    }
 
     if had_active {
         let current = config.active_profile.as_deref().unwrap_or("(none)");
@@ -204,6 +223,70 @@ async fn login_claude_api_key() -> anyhow::Result<()> {
 
     post_login_save_profile("anthropic")?;
 
+    Ok(())
+}
+
+/// Auto-detect a running agent-infer server and persist a profile for it.
+///
+/// Probes candidate endpoints (`$AGENT_INFER_URL`, `127.0.0.1:8000`,
+/// `127.0.0.1:8012`), reads the served model from `/v1/models`, prompts the
+/// user to confirm, then writes a profile with both the discovered model and
+/// the `api_base` override so future requests hit the right endpoint.
+async fn login_agent_infer() -> anyhow::Result<()> {
+    use std::io::{self, Write};
+
+    println!("🔍 Probing agent-infer...");
+
+    let hit = match detect::detect_agent_infer().await {
+        Some(h) => h,
+        None => {
+            eprintln!();
+            eprintln!("No agent-infer server responded on any candidate endpoint.");
+            eprintln!();
+            eprintln!("Tried:");
+            for candidate in detect::agent_infer_candidates() {
+                eprintln!("  - {candidate}");
+            }
+            eprintln!();
+            eprintln!("Start agent-infer first:");
+            eprintln!("  # Apple Silicon");
+            eprintln!("  cd ~/code/agent-infer && ./scripts/start_metal_serve.sh");
+            eprintln!("  # Linux + CUDA");
+            eprintln!(
+                "  docker run --gpus all -v /path/to/model:/model \\\n    \
+                 ghcr.io/cklxx/agent-infer:latest --model-path /model --port 8000"
+            );
+            eprintln!();
+            eprintln!("Or override the endpoint:");
+            eprintln!("  AGENT_INFER_URL=http://host:port eli login agent-infer");
+            anyhow::bail!("agent-infer not reachable");
+        }
+    };
+
+    println!("  Endpoint: {}", hit.api_base);
+    println!("  Model:    {}", hit.model_id);
+    println!();
+    print!("Save as profile 'agent-infer' and set active? [y/N] ");
+    io::stdout().flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    let answer = answer.trim().to_ascii_lowercase();
+    if answer != "y" && answer != "yes" {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    let model_id = if hit.model_id.contains(':') {
+        hit.model_id.clone()
+    } else {
+        format!("agent-infer:{}", hit.model_id)
+    };
+
+    save_profile_with_overrides("agent-infer", &model_id, Some(hit.api_base))?;
+
+    println!();
+    println!("Done. Try: eli chat");
     Ok(())
 }
 

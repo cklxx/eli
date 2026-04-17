@@ -68,6 +68,13 @@ impl ProviderRegistry {
             "github-copilot".to_owned(),
             ProviderConfig::new("https://api.githubcopilot.com", ApiFormat::Auto),
         );
+        // Local agent-infer server (OpenAI Chat Completions compatible).
+        // Default base matches agent-infer's own default bind (127.0.0.1:8000);
+        // per-profile `api_base` overrides this for alt ports or remote hosts.
+        providers.insert(
+            "agent-infer".to_owned(),
+            ProviderConfig::new("http://127.0.0.1:8000/v1", ApiFormat::Responses),
+        );
 
         Self { providers }
     }
@@ -110,7 +117,16 @@ mod tests {
         assert!(reg.contains("openai"));
         assert!(reg.contains("openrouter"));
         assert!(reg.contains("github-copilot"));
+        assert!(reg.contains("agent-infer"));
         assert!(!reg.contains("custom-provider"));
+    }
+
+    #[test]
+    fn agent_infer_defaults() {
+        let reg = ProviderRegistry::new();
+        let cfg = reg.get("agent-infer").expect("agent-infer registered");
+        assert_eq!(cfg.api_base, "http://127.0.0.1:8000/v1");
+        assert_eq!(cfg.api_format, ApiFormat::Responses);
     }
 
     #[test]

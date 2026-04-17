@@ -2,6 +2,7 @@
 
 mod chat;
 mod decisions;
+mod detect;
 mod evolution;
 mod gateway;
 mod login;
@@ -71,8 +72,9 @@ pub enum CliCommand {
     },
     /// Switch active provider profile.
     Use {
-        /// Profile name (e.g. "openai", "anthropic", "copilot").
-        profile: String,
+        /// Profile name (e.g. "openai", "anthropic", "copilot"). Omit to
+        /// launch an interactive picker.
+        profile: Option<String>,
     },
     /// Show authentication and configuration status.
     Status,

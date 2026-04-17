@@ -22,6 +22,14 @@ pub fn eli_home() -> PathBuf {
 pub struct Profile {
     pub provider: String,
     pub model: String,
+    /// Optional per-profile API base URL override.
+    ///
+    /// When set, this overrides the provider's registry default base URL for
+    /// requests made under this profile. Enables pointing the same provider
+    /// name at a different endpoint (e.g. a local inference server like
+    /// agent-infer, Ollama, or vLLM).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_base: Option<String>,
 }
 
 /// Default greeting shown when `enabled = true` but no custom message is set.
@@ -138,6 +146,16 @@ impl EliConfig {
         self.active_profile().map(|p| p.provider.clone())
     }
 
+    /// Resolve the API base URL override from the active profile, if any.
+    ///
+    /// Returns `None` when no profile is active or when the active profile
+    /// does not carry an `api_base` override (use the provider default).
+    pub fn resolve_api_base(&self) -> Option<String> {
+        self.active_profile()
+            .and_then(|p| p.api_base.clone())
+            .filter(|s| !s.trim().is_empty())
+    }
+
     /// Switch the active profile. Returns `true` if the profile exists.
     pub fn set_active(&mut self, name: &str) -> bool {
         if self.profiles.contains_key(name) {
@@ -186,6 +204,7 @@ impl EliConfig {
                 Profile {
                     provider: provider.clone(),
                     model,
+                    api_base: None,
                 },
             );
             config.active_profile = Some(provider);
@@ -475,6 +494,7 @@ mod tests {
             Profile {
                 provider: "openai".to_string(),
                 model: "openai:gpt-5-codex-mini".to_string(),
+                api_base: None,
             },
         );
         config.active_profile = Some("openai".to_string());
@@ -506,6 +526,7 @@ mod tests {
             Profile {
                 provider: "anthropic".to_string(),
                 model: "anthropic:claude-sonnet-4-20250514".to_string(),
+                api_base: None,
             },
         );
         config.active_profile = Some("anthropic".to_string());
@@ -539,6 +560,7 @@ mod tests {
             Profile {
                 provider: "openai".to_string(),
                 model: "openai:gpt-5-codex-mini".to_string(),
+                api_base: None,
             },
         );
         assert!(config.set_active("openai"));
@@ -612,6 +634,62 @@ mod tests {
     }
 
     #[test]
+    fn test_profile_api_base_round_trip() {
+        let mut config = EliConfig::default();
+        config.add_profile(
+            "agent-infer",
+            Profile {
+                provider: "agent-infer".to_string(),
+                model: "agent-infer:Qwen3-4B".to_string(),
+                api_base: Some("http://127.0.0.1:8000/v1".to_string()),
+            },
+        );
+        config.active_profile = Some("agent-infer".to_string());
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let loaded: EliConfig = toml::from_str(&toml_str).unwrap();
+
+        let profile = loaded.profiles.get("agent-infer").unwrap();
+        assert_eq!(
+            profile.api_base.as_deref(),
+            Some("http://127.0.0.1:8000/v1")
+        );
+        assert_eq!(
+            loaded.resolve_api_base().as_deref(),
+            Some("http://127.0.0.1:8000/v1")
+        );
+    }
+
+    #[test]
+    fn test_profile_api_base_skipped_when_none() {
+        let mut config = EliConfig::default();
+        config.add_profile(
+            "openai",
+            Profile {
+                provider: "openai".to_string(),
+                model: "openai:gpt-5.4-mini".to_string(),
+                api_base: None,
+            },
+        );
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        // Missing field should not appear in serialized TOML when None.
+        assert!(!toml_str.contains("api_base"));
+    }
+
+    #[test]
+    fn test_profile_api_base_deserializes_when_missing() {
+        let toml_str = r#"
+active_profile = "openai"
+
+[profiles.openai]
+provider = "openai"
+model = "openai:gpt-5.4-mini"
+"#;
+        let loaded: EliConfig = toml::from_str(toml_str).unwrap();
+        assert!(loaded.profiles.get("openai").unwrap().api_base.is_none());
+    }
+
+    #[test]
     fn test_multiple_profiles() {
         let mut config = EliConfig::default();
         config.add_profile(
@@ -619,6 +697,7 @@ mod tests {
             Profile {
                 provider: "openai".to_string(),
                 model: "openai:gpt-5-codex-mini".to_string(),
+                api_base: None,
             },
         );
         config.add_profile(
@@ -626,6 +705,7 @@ mod tests {
             Profile {
                 provider: "anthropic".to_string(),
                 model: "anthropic:claude-sonnet-4-20250514".to_string(),
+                api_base: None,
             },
         );
         config.add_profile(
@@ -633,6 +713,7 @@ mod tests {
             Profile {
                 provider: "github-copilot".to_string(),
                 model: "github-copilot:gpt-4o".to_string(),
+                api_base: None,
             },
         );
         config.active_profile = Some("anthropic".to_string());

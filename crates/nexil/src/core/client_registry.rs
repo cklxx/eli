@@ -168,7 +168,13 @@ impl ClientRegistry {
         is_anthropic: bool,
         is_oauth_token: bool,
     ) {
-        let Some(key) = api_key else { return };
+        // Skip auth entirely when no key is supplied OR the key is empty/whitespace.
+        // Local inference servers (agent-infer, Ollama, vLLM, LM Studio) expose
+        // no-auth endpoints; sending a malformed `Bearer ` header causes them
+        // to reject the request.
+        let Some(key) = api_key.map(str::trim).filter(|k| !k.is_empty()) else {
+            return;
+        };
         if is_anthropic && !is_oauth_token {
             if let Ok(val) = reqwest::header::HeaderValue::from_str(key)
                 && let Ok(name) = reqwest::header::HeaderName::from_bytes(b"x-api-key")
@@ -262,5 +268,42 @@ mod tests {
         assert!(!registry.is_empty());
         registry.clear();
         assert!(registry.is_empty());
+    }
+
+    fn extract_auth_header(api_key: Option<&str>, provider: &str) -> Option<String> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let is_anthropic = provider.eq_ignore_ascii_case("anthropic");
+        let is_oauth_token =
+            api_key.is_some_and(|k| k.to_ascii_lowercase().starts_with("sk-ant-oat"));
+        ClientRegistry::insert_auth_header(&mut headers, api_key, is_anthropic, is_oauth_token);
+        headers
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned())
+            .or_else(|| {
+                headers
+                    .get("x-api-key")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_owned())
+            })
+    }
+
+    #[test]
+    fn test_no_auth_header_when_key_is_none() {
+        assert!(extract_auth_header(None, "agent-infer").is_none());
+    }
+
+    #[test]
+    fn test_no_auth_header_when_key_is_empty() {
+        assert!(extract_auth_header(Some(""), "agent-infer").is_none());
+        assert!(extract_auth_header(Some("   "), "agent-infer").is_none());
+    }
+
+    #[test]
+    fn test_bearer_auth_for_non_empty_key() {
+        assert_eq!(
+            extract_auth_header(Some("sk-123"), "openai").as_deref(),
+            Some("Bearer sk-123")
+        );
     }
 }

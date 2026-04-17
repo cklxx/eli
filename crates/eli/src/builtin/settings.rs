@@ -170,6 +170,39 @@ fn resolve_api_credentials() -> (ApiKeyConfig, ApiBaseConfig) {
     (api_key, api_base)
 }
 
+/// Merge the active profile's `api_base` override into the env-resolved
+/// [`ApiBaseConfig`].
+///
+/// Precedence: any env-supplied `api_base` wins. When env did not target
+/// this profile's provider, the profile override is inserted so local
+/// inference servers (e.g. agent-infer at `127.0.0.1:8000`) are reachable
+/// without requiring users to duplicate the URL in `ELI_<PROVIDER>_API_BASE`.
+fn merge_profile_api_base(
+    current: ApiBaseConfig,
+    provider: Option<&str>,
+    profile_api_base: Option<&str>,
+) -> ApiBaseConfig {
+    let (Some(provider), Some(profile_api_base)) = (provider, profile_api_base) else {
+        return current;
+    };
+    let provider_key =
+        nexil::core::provider_policies::normalized_provider_name(provider).to_lowercase();
+
+    match current {
+        ApiBaseConfig::Single(s) => ApiBaseConfig::Single(s),
+        ApiBaseConfig::None => {
+            let mut map = HashMap::new();
+            map.insert(provider_key, profile_api_base.to_owned());
+            ApiBaseConfig::PerProvider(map)
+        }
+        ApiBaseConfig::PerProvider(mut map) => {
+            map.entry(provider_key)
+                .or_insert_with(|| profile_api_base.to_owned());
+            ApiBaseConfig::PerProvider(map)
+        }
+    }
+}
+
 /// Collapse a `HashMap` into a config enum: empty → `none`, single "default"
 /// entry → `single(value)`, otherwise → `per_provider(map)`.
 fn collapse_config_map<T>(
@@ -228,6 +261,13 @@ impl AgentSettings {
         let config = crate::builtin::config::EliConfig::load();
         let model = EnvConfig::model(&config);
         let (api_key, api_base) = EnvConfig::api_credentials();
+        // Profile-level api_base fills in for providers the env did not
+        // explicitly target. Env-supplied values always win.
+        let api_base = merge_profile_api_base(
+            api_base,
+            config.resolve_provider().as_deref(),
+            config.resolve_api_base().as_deref(),
+        );
 
         // Bug G: validate context_window so a misconfigured ELI_CONTEXT_WINDOW
         // (e.g. zero, absurdly large) doesn't cause handoff math to go haywire.
@@ -309,6 +349,72 @@ mod tests {
         let config = ApiKeyConfig::PerProvider(map);
         match config {
             ApiKeyConfig::PerProvider(m) => assert_eq!(m["openai"], "sk-openai"),
+            _ => panic!("expected PerProvider"),
+        }
+    }
+
+    // -- merge_profile_api_base -----------------------------------------------
+
+    #[test]
+    fn test_merge_profile_api_base_into_none() {
+        let merged = merge_profile_api_base(
+            ApiBaseConfig::None,
+            Some("agent-infer"),
+            Some("http://127.0.0.1:8000/v1"),
+        );
+        match merged {
+            ApiBaseConfig::PerProvider(m) => {
+                assert_eq!(m["agent-infer"], "http://127.0.0.1:8000/v1");
+            }
+            _ => panic!("expected PerProvider"),
+        }
+    }
+
+    #[test]
+    fn test_merge_profile_api_base_preserves_env_per_provider() {
+        let mut map = HashMap::new();
+        map.insert("agent-infer".into(), "http://192.168.1.10:9000/v1".into());
+        let merged = merge_profile_api_base(
+            ApiBaseConfig::PerProvider(map),
+            Some("agent-infer"),
+            Some("http://127.0.0.1:8000/v1"),
+        );
+        match merged {
+            ApiBaseConfig::PerProvider(m) => {
+                // Env entry must win.
+                assert_eq!(m["agent-infer"], "http://192.168.1.10:9000/v1");
+            }
+            _ => panic!("expected PerProvider"),
+        }
+    }
+
+    #[test]
+    fn test_merge_profile_api_base_single_is_pass_through() {
+        // Global ELI_API_BASE is a broad directive; don't fight it.
+        let merged = merge_profile_api_base(
+            ApiBaseConfig::Single("http://proxy.example.com/v1".into()),
+            Some("agent-infer"),
+            Some("http://127.0.0.1:8000/v1"),
+        );
+        match merged {
+            ApiBaseConfig::Single(s) => assert_eq!(s, "http://proxy.example.com/v1"),
+            _ => panic!("expected Single"),
+        }
+    }
+
+    #[test]
+    fn test_merge_profile_api_base_normalizes_alias() {
+        // "agent_infer" alias must land in the "agent-infer" slot so the
+        // downstream provider lookup finds it.
+        let merged = merge_profile_api_base(
+            ApiBaseConfig::None,
+            Some("agent_infer"),
+            Some("http://127.0.0.1:8012/v1"),
+        );
+        match merged {
+            ApiBaseConfig::PerProvider(m) => {
+                assert!(m.contains_key("agent-infer"));
+            }
             _ => panic!("expected PerProvider"),
         }
     }
