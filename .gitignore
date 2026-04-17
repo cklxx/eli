@@ -38,3 +38,6 @@ site/*.tmp
 site/*.swp
 .context/
 .claude/worktrees/
+
+# Evolution runtime output (rules/candidates/evaluations emitted by eli)
+.agents/evolution/
