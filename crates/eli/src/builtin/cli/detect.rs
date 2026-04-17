@@ -30,20 +30,23 @@ struct ModelEntry {
 
 /// Build the ordered list of candidate base URLs for agent-infer.
 ///
-/// Precedence: `$AGENT_INFER_URL` → default 8000 → Metal alt port 8012.
+/// If `$AGENT_INFER_URL` is set (non-empty), it is the *only* candidate —
+/// explicit configuration shouldn't silently fall back to localhost if the
+/// intended endpoint is unreachable, since that masks typos and stale env.
+/// Otherwise we probe the default bind (8000) then the Metal alt port (8012).
 /// Candidates are normalized to always end in `/v1` (the path `/v1/models`
 /// is appended by the probe).
 pub(crate) fn agent_infer_candidates() -> Vec<String> {
-    let mut out = Vec::with_capacity(3);
     if let Ok(url) = std::env::var("AGENT_INFER_URL") {
         let url = url.trim();
         if !url.is_empty() {
-            out.push(normalize_base(url));
+            return vec![normalize_base(url)];
         }
     }
-    out.push("http://127.0.0.1:8000/v1".to_owned());
-    out.push("http://127.0.0.1:8012/v1".to_owned());
-    dedup_preserve_order(out)
+    vec![
+        "http://127.0.0.1:8000/v1".to_owned(),
+        "http://127.0.0.1:8012/v1".to_owned(),
+    ]
 }
 
 fn normalize_base(raw: &str) -> String {
@@ -53,14 +56,6 @@ fn normalize_base(raw: &str) -> String {
     } else {
         format!("{trimmed}/v1")
     }
-}
-
-fn dedup_preserve_order(items: Vec<String>) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    items
-        .into_iter()
-        .filter(|s| seen.insert(s.clone()))
-        .collect()
 }
 
 /// Parse a `/v1/models` response body, returning the first model id.
@@ -170,14 +165,17 @@ mod tests {
     }
 
     #[test]
-    fn dedup_preserves_first_occurrence() {
-        let deduped = dedup_preserve_order(vec![
-            "a".to_owned(),
-            "b".to_owned(),
-            "a".to_owned(),
-            "c".to_owned(),
-        ]);
-        assert_eq!(deduped, vec!["a", "b", "c"]);
+    fn candidates_env_var_is_exclusive() {
+        // SAFETY: env mutation is confined to this test thread; AGENT_INFER_URL
+        // is restored/removed before return so other tests are unaffected.
+        unsafe {
+            std::env::set_var("AGENT_INFER_URL", "http://explicit-host:9000");
+        }
+        let candidates = agent_infer_candidates();
+        unsafe {
+            std::env::remove_var("AGENT_INFER_URL");
+        }
+        assert_eq!(candidates, vec!["http://explicit-host:9000/v1".to_owned()]);
     }
 
     #[tokio::test]

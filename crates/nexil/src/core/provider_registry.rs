@@ -73,7 +73,7 @@ impl ProviderRegistry {
         // per-profile `api_base` overrides this for alt ports or remote hosts.
         providers.insert(
             "agent-infer".to_owned(),
-            ProviderConfig::new("http://127.0.0.1:8000/v1", ApiFormat::Responses),
+            ProviderConfig::new("http://127.0.0.1:8000/v1", ApiFormat::Completion),
         );
 
         Self { providers }
@@ -126,7 +126,7 @@ mod tests {
         let reg = ProviderRegistry::new();
         let cfg = reg.get("agent-infer").expect("agent-infer registered");
         assert_eq!(cfg.api_base, "http://127.0.0.1:8000/v1");
-        assert_eq!(cfg.api_format, ApiFormat::Responses);
+        assert_eq!(cfg.api_format, ApiFormat::Completion);
     }
 
     #[test]

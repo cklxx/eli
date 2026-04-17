@@ -46,7 +46,7 @@ pub(crate) async fn login_command(
 fn post_login_save_profile(provider_raw: &str) -> anyhow::Result<()> {
     let provider = normalize_provider(provider_raw);
     let model = default_model_for_provider(&provider);
-    save_profile_with_overrides(&provider, model, None)
+    save_profile_with_overrides(&provider, model, None, false)
 }
 
 /// Persist a profile with explicit model and optional api_base override.
@@ -57,6 +57,7 @@ fn save_profile_with_overrides(
     provider_raw: &str,
     model: &str,
     api_base: Option<String>,
+    set_active: bool,
 ) -> anyhow::Result<()> {
     let provider = normalize_provider(provider_raw);
     let profile_name = provider.clone();
@@ -73,9 +74,12 @@ fn save_profile_with_overrides(
         },
     );
 
-    if !had_active {
+    let became_active = if set_active || !had_active {
         config.active_profile = Some(profile_name.clone());
-    }
+        true
+    } else {
+        false
+    };
 
     config.save()?;
 
@@ -87,15 +91,19 @@ fn save_profile_with_overrides(
         println!("  Endpoint: {base}");
     }
 
-    if had_active {
+    if became_active {
+        if had_active {
+            println!("  Active:   yes");
+        } else {
+            println!("  Active:   yes (auto-selected as first profile)");
+        }
+    } else {
         let current = config.active_profile.as_deref().unwrap_or("(none)");
         if current != profile_name {
             println!();
             println!("  Tip: run `eli use {profile_name}` to switch to this profile");
             println!("  (current active profile: {current})");
         }
-    } else {
-        println!("  Active:   yes (auto-selected as first profile)");
     }
 
     Ok(())
@@ -249,9 +257,9 @@ async fn login_agent_infer() -> anyhow::Result<()> {
             }
             eprintln!();
             eprintln!("Start agent-infer first:");
-            eprintln!("  # Apple Silicon");
-            eprintln!("  cd ~/code/agent-infer && ./scripts/start_metal_serve.sh");
-            eprintln!("  # Linux + CUDA");
+            eprintln!("  cd ~/code/agent-infer && ./scripts/start_infer.sh");
+            eprintln!("    # optional: ./scripts/start_infer.sh models/Qwen3-4B 8000");
+            eprintln!("  # Docker (Linux + CUDA)");
             eprintln!(
                 "  docker run --gpus all -v /path/to/model:/model \\\n    \
                  ghcr.io/cklxx/agent-infer:latest --model-path /model --port 8000"
@@ -283,7 +291,7 @@ async fn login_agent_infer() -> anyhow::Result<()> {
         format!("agent-infer:{}", hit.model_id)
     };
 
-    save_profile_with_overrides("agent-infer", &model_id, Some(hit.api_base))?;
+    save_profile_with_overrides("agent-infer", &model_id, Some(hit.api_base), true)?;
 
     println!();
     println!("Done. Try: eli chat");
