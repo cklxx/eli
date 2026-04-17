@@ -1,8 +1,50 @@
 //! Model management: show, list, switch.
+//!
+//! All provider-touching operations route through [`RequestContext`], a
+//! profile-derived bundle that mirrors the runtime resolution path
+//! (profile → env override → provider default). New backends only need
+//! to register a default `api_base` in `provider_policies`; auth is
+//! optional so local servers (agent-infer, ollama, vllm, lmstudio) work
+//! without provider-specific surgery here.
 
 use crate::builtin::config::EliConfig;
 use crate::builtin::settings::EnvConfig;
 use nexil::core::provider_policies::{default_api_base, normalized_provider_name};
+
+/// Resolved request context for an active profile.
+///
+/// Mirrors the runtime path's view of "where do I call this provider":
+/// `api_base` is the profile override or the registry default; `api_key`
+/// is whatever any auth source produced, or `None` for keyless backends.
+struct RequestContext {
+    provider: String,
+    api_base: String,
+    api_key: Option<String>,
+}
+
+impl RequestContext {
+    /// Build a request context from the active profile, applying the same
+    /// precedence used by the runtime (`profile.api_base` overrides the
+    /// provider registry default; missing API key is allowed).
+    fn from_active(config: &EliConfig) -> anyhow::Result<Self> {
+        let profile = config.active_profile().ok_or_else(|| {
+            anyhow::anyhow!(
+                "No active profile configured.\nRun `eli login <provider>` to get started."
+            )
+        })?;
+        let provider = normalized_provider_name(&profile.provider);
+        let api_base = profile
+            .api_base
+            .clone()
+            .unwrap_or_else(|| default_api_base(&provider));
+        let api_key = resolve_api_key_optional(&provider);
+        Ok(Self {
+            provider,
+            api_base,
+            api_key,
+        })
+    }
+}
 
 /// Manage model selection: show, list, or switch.
 pub(crate) async fn model_command(name: Option<String>) -> anyhow::Result<()> {
@@ -39,15 +81,17 @@ fn model_show() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolve an API key for the given provider for model listing purposes.
-fn resolve_api_key_for_provider(provider: &str) -> anyhow::Result<String> {
+/// Best-effort API key resolution. Returns `None` for keyless / unknown
+/// backends; callers are responsible for surfacing a useful error if the
+/// downstream HTTP call fails with 401.
+fn resolve_api_key_optional(provider: &str) -> Option<String> {
     if let Some(key) = resolve_from_env(provider) {
-        return Ok(key);
+        return Some(key);
     }
     if let Some(key) = resolve_from_config(provider) {
-        return Ok(key);
+        return Some(key);
     }
-    resolve_via_oauth(provider)
+    resolve_via_oauth(provider).ok()
 }
 
 fn resolve_from_env(provider: &str) -> Option<String> {
@@ -109,18 +153,34 @@ fn resolve_github_copilot_oauth() -> Option<String> {
     resolver("github-copilot")
 }
 
-/// Fetch available models from a provider's API.
-async fn fetch_models(provider: &str, api_key: &str) -> anyhow::Result<Vec<String>> {
+/// Fetch available models for the given request context.
+///
+/// Provider-specific overrides (Codex backend, Copilot session token) are
+/// retained because they hit non-standard endpoints. Everything else
+/// (openrouter, agent-infer, ollama, vllm, lmstudio, custom) flows through
+/// the generic OpenAI-compatible `/v1/models` path keyed on `ctx.api_base`.
+async fn fetch_models(ctx: &RequestContext) -> anyhow::Result<Vec<String>> {
     let client = reqwest::Client::new();
-    match normalized_provider_name(provider).as_str() {
-        "openai" => fetch_models_openai_codex(&client, api_key).await,
+    match ctx.provider.as_str() {
+        "openai" => {
+            let key = ctx.api_key.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No API key found for OpenAI.\nRun `eli login openai` or set OPENAI_API_KEY."
+                )
+            })?;
+            fetch_models_openai_codex(&client, key).await
+        }
         // Anthropic's model list is curated — no dynamic API needed.
         "anthropic" => Ok(known_models("anthropic")),
-        "github-copilot" => fetch_models_github_copilot(&client, api_key).await,
-        _ => {
-            let api_base = default_api_base(provider);
-            fetch_models_openai_compatible(&client, api_key, &api_base).await
+        "github-copilot" => {
+            let key = ctx.api_key.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No GitHub token found for Copilot.\nRun `eli login github-copilot` or set GITHUB_TOKEN."
+                )
+            })?;
+            fetch_models_github_copilot(&client, key).await
         }
+        _ => fetch_models_openai_compatible(&client, ctx.api_key.as_deref(), &ctx.api_base).await,
     }
 }
 
@@ -135,7 +195,8 @@ async fn fetch_models_openai_codex(
         .await?;
 
     if !resp.status().is_success() {
-        return fetch_models_openai_compatible(client, api_key, "https://api.openai.com/v1").await;
+        return fetch_models_openai_compatible(client, Some(api_key), "https://api.openai.com/v1")
+            .await;
     }
 
     let body: serde_json::Value = resp.json().await?;
@@ -153,14 +214,20 @@ async fn fetch_models_openai_codex(
     Ok(models)
 }
 
-/// Fetch models from an OpenAI-compatible API (OpenAI, OpenRouter, etc.).
+/// Fetch models from an OpenAI-compatible API (OpenAI, OpenRouter, agent-infer,
+/// ollama, vllm, lmstudio, …). `api_key` is optional: keyless local backends
+/// skip the `Authorization` header entirely rather than sending `Bearer `.
 async fn fetch_models_openai_compatible(
     client: &reqwest::Client,
-    api_key: &str,
+    api_key: Option<&str>,
     api_base: &str,
 ) -> anyhow::Result<Vec<String>> {
     let url = format!("{}/models", api_base.trim_end_matches('/'));
-    let resp = client.get(&url).bearer_auth(api_key).send().await?;
+    let mut req = client.get(&url);
+    if let Some(key) = api_key.map(str::trim).filter(|k| !k.is_empty()) {
+        req = req.bearer_auth(key);
+    }
+    let resp = req.send().await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -360,40 +427,41 @@ fn known_models(provider: &str) -> Vec<String> {
 /// List available models from the active provider.
 async fn model_list() -> anyhow::Result<()> {
     let config = EliConfig::load();
-    let profile = config.active_profile().ok_or_else(|| {
-        anyhow::anyhow!("No active profile configured.\nRun `eli login <provider>` to get started.")
-    })?;
+    let ctx = RequestContext::from_active(&config)?;
 
-    let provider = normalized_provider_name(profile.provider.as_str());
-    println!("Fetching models from {provider}...");
+    println!(
+        "Fetching models from {} ({})...",
+        ctx.provider, ctx.api_base
+    );
     println!();
 
-    let mut models = fetch_or_fallback_models(&provider).await;
+    let mut models = fetch_or_fallback_models(&ctx).await;
     models.sort();
     models.dedup();
 
-    print_model_list(&provider, &models, &config);
+    print_model_list(&ctx.provider, &models, &config);
     Ok(())
 }
 
-async fn fetch_or_fallback_models(provider: &str) -> Vec<String> {
-    match resolve_api_key_for_provider(provider) {
-        Ok(key) => match fetch_models(provider, &key).await {
-            Ok(m) => {
-                let filtered = filter_chat_models(provider, &m);
-                if filtered.is_empty() { m } else { filtered }
-            }
-            Err(e) => {
-                eprintln!("  (API fetch failed: {e})");
+async fn fetch_or_fallback_models(ctx: &RequestContext) -> Vec<String> {
+    match fetch_models(ctx).await {
+        Ok(m) => {
+            let filtered = filter_chat_models(&ctx.provider, &m);
+            if filtered.is_empty() { m } else { filtered }
+        }
+        Err(e) => {
+            eprintln!("  (API fetch failed: {e})");
+            let fallback = known_models(&ctx.provider);
+            if fallback.is_empty() {
+                eprintln!(
+                    "  No fallback model list registered for '{}'.",
+                    ctx.provider
+                );
+            } else {
                 eprintln!("  Showing known models instead.");
-                eprintln!();
-                known_models(provider)
             }
-        },
-        Err(_) => {
-            eprintln!("  (No API key available, showing known models)");
             eprintln!();
-            known_models(provider)
+            fallback
         }
     }
 }
