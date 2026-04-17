@@ -68,11 +68,14 @@ impl ProviderRegistry {
             "github-copilot".to_owned(),
             ProviderConfig::new("https://api.githubcopilot.com", ApiFormat::Auto),
         );
-        // Local agent-infer server (OpenAI Chat Completions compatible).
-        // Default base matches agent-infer's own default bind (127.0.0.1:8000);
-        // per-profile `api_base` overrides this for alt ports or remote hosts.
+        // Generic local OpenAI-Chat-Completions-compatible backend.
+        // One slot covers agent-infer / ollama / vllm / lmstudio / llama.cpp /
+        // any other keyless local server — the brand only differs in the
+        // saved profile label and the default port we autodetect against.
+        // Per-profile `api_base` is the source of truth at request time;
+        // this default is just a fallback for profiles missing api_base.
         providers.insert(
-            "agent-infer".to_owned(),
+            "local".to_owned(),
             ProviderConfig::new("http://127.0.0.1:8000/v1", ApiFormat::Completion),
         );
 
@@ -84,14 +87,19 @@ impl ProviderRegistry {
         self.providers.insert(name.into(), config);
     }
 
-    /// Look up a provider by name (case-insensitive).
+    /// Look up a provider by name. Aliases (`agent-infer`, `ollama`,
+    /// `claude`, …) resolve via [`normalized_provider_name`] so callers
+    /// can use whatever string the user typed.
     pub fn get(&self, name: &str) -> Option<&ProviderConfig> {
-        self.providers.get(&name.to_lowercase())
+        let key = super::provider_policies::normalized_provider_name(name);
+        self.providers.get(&key)
     }
 
-    /// Return `true` if the registry contains a config for `name`.
+    /// Return `true` if the registry contains a config for `name`
+    /// (alias-aware, mirroring [`Self::get`]).
     pub fn contains(&self, name: &str) -> bool {
-        self.providers.contains_key(&name.to_lowercase())
+        let key = super::provider_policies::normalized_provider_name(name);
+        self.providers.contains_key(&key)
     }
 
     /// Iterate over all registered `(name, config)` pairs.
@@ -117,14 +125,14 @@ mod tests {
         assert!(reg.contains("openai"));
         assert!(reg.contains("openrouter"));
         assert!(reg.contains("github-copilot"));
-        assert!(reg.contains("agent-infer"));
+        assert!(reg.contains("local"));
         assert!(!reg.contains("custom-provider"));
     }
 
     #[test]
-    fn agent_infer_defaults() {
+    fn local_provider_defaults() {
         let reg = ProviderRegistry::new();
-        let cfg = reg.get("agent-infer").expect("agent-infer registered");
+        let cfg = reg.get("local").expect("local registered");
         assert_eq!(cfg.api_base, "http://127.0.0.1:8000/v1");
         assert_eq!(cfg.api_format, ApiFormat::Completion);
     }

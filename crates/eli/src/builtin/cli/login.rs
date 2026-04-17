@@ -34,10 +34,19 @@ pub(crate) async fn login_command(
             }
         }
         "github-copilot" | "copilot" => login_github_copilot(browser, timeout).await,
-        "agent-infer" | "agent_infer" | "agentinfer" => login_agent_infer().await,
+        // All keyless local OpenAI-compatible servers share one detection
+        // + save flow. The brand only affects the saved profile name and
+        // the "how to start" hint shown when no server responds.
+        "local" => login_local(None).await,
+        "agent-infer" | "agent_infer" | "agentinfer" => login_local(Some("agent-infer")).await,
+        "ollama" => login_local(Some("ollama")).await,
+        "vllm" => login_local(Some("vllm")).await,
+        "lmstudio" => login_local(Some("lmstudio")).await,
+        "llama-cpp" | "llamacpp" | "llama.cpp" => login_local(Some("llama-cpp")).await,
         _ => anyhow::bail!(
             "Unsupported auth provider: {provider}\n\
-             Supported providers: openai, claude, github-copilot, agent-infer"
+             Supported providers: openai, claude, github-copilot, \
+             local (or any of: agent-infer, ollama, vllm, lmstudio, llama-cpp)"
         ),
     }
 }
@@ -46,21 +55,26 @@ pub(crate) async fn login_command(
 fn post_login_save_profile(provider_raw: &str) -> anyhow::Result<()> {
     let provider = normalize_provider(provider_raw);
     let model = default_model_for_provider(&provider);
-    save_profile_with_overrides(&provider, model, None, false)
+    save_profile_with_overrides(&provider, None, model, None, false)
 }
 
 /// Persist a profile with explicit model and optional api_base override.
 ///
 /// Used by login flows that discover the model/endpoint at runtime
-/// (e.g. `eli login agent-infer` probing `/v1/models`).
+/// (e.g. `eli login local` probing `/v1/models`). `profile_name_override`
+/// lets brand-named entries (`agent-infer`, `ollama`, …) save under a
+/// distinct user-facing label while sharing one underlying provider type.
 fn save_profile_with_overrides(
     provider_raw: &str,
+    profile_name_override: Option<&str>,
     model: &str,
     api_base: Option<String>,
     set_active: bool,
 ) -> anyhow::Result<()> {
     let provider = normalize_provider(provider_raw);
-    let profile_name = provider.clone();
+    let profile_name = profile_name_override
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| provider.clone());
 
     let mut config = EliConfig::load();
     let had_active = config.active_profile.is_some();
@@ -234,47 +248,48 @@ async fn login_claude_api_key() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Auto-detect a running agent-infer server and persist a profile for it.
+/// Auto-detect a running local OpenAI-compatible server and persist a profile.
 ///
-/// Probes candidate endpoints (`$AGENT_INFER_URL`, `127.0.0.1:8000`,
-/// `127.0.0.1:8012`), reads the served model from `/v1/models`, prompts the
-/// user to confirm, then writes a profile with both the discovered model and
-/// the `api_base` override so future requests hit the right endpoint.
-async fn login_agent_infer() -> anyhow::Result<()> {
+/// Probes candidate endpoints (see `detect::local_candidates`: `ELI_LOCAL_URL`
+/// override, then default ports for agent-infer/vllm/llama.cpp/ollama/lmstudio,
+/// plus any `ELI_LOCAL_PORTS` extras). Reads the served model from
+/// `/v1/models`, prompts the user to confirm, then writes a profile with both
+/// the discovered model and the `api_base` override.
+///
+/// `brand_hint` is purely cosmetic: it picks the saved profile name and the
+/// "how to start" message shown when no server responds. `None` saves under
+/// the generic name `local`. The profile's `provider` field is always `local`
+/// so all brands share one runtime path.
+async fn login_local(brand_hint: Option<&str>) -> anyhow::Result<()> {
     use std::io::{self, Write};
 
-    println!("🔍 Probing agent-infer...");
+    let label = brand_hint.unwrap_or("local");
+    println!("🔍 Probing {label}...");
 
-    let hit = match detect::detect_agent_infer().await {
+    let hit = match detect::detect_local().await {
         Some(h) => h,
         None => {
             eprintln!();
-            eprintln!("No agent-infer server responded on any candidate endpoint.");
+            eprintln!("No local server responded on any candidate endpoint.");
             eprintln!();
             eprintln!("Tried:");
-            for candidate in detect::agent_infer_candidates() {
+            for candidate in detect::local_candidates() {
                 eprintln!("  - {candidate}");
             }
             eprintln!();
-            eprintln!("Start agent-infer first:");
-            eprintln!("  cd ~/code/agent-infer && ./scripts/start_infer.sh");
-            eprintln!("    # optional: ./scripts/start_infer.sh models/Qwen3-4B 8000");
-            eprintln!("  # Docker (Linux + CUDA)");
-            eprintln!(
-                "  docker run --gpus all -v /path/to/model:/model \\\n    \
-                 ghcr.io/cklxx/agent-infer:latest --model-path /model --port 8000"
-            );
+            print_start_hint(brand_hint);
             eprintln!();
             eprintln!("Or override the endpoint:");
-            eprintln!("  AGENT_INFER_URL=http://host:port eli login agent-infer");
-            anyhow::bail!("agent-infer not reachable");
+            eprintln!("  ELI_LOCAL_URL=http://host:port eli login {label}");
+            eprintln!("  ELI_LOCAL_PORTS=8090,9000 eli login {label}   # extra ports");
+            anyhow::bail!("{label} not reachable");
         }
     };
 
     println!("  Endpoint: {}", hit.api_base);
     println!("  Model:    {}", hit.model_id);
     println!();
-    print!("Save as profile 'agent-infer' and set active? [y/N] ");
+    print!("Save as profile '{label}' and set active? [y/N] ");
     io::stdout().flush()?;
 
     let mut answer = String::new();
@@ -285,17 +300,57 @@ async fn login_agent_infer() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let model_id = if hit.model_id.contains(':') {
-        hit.model_id.clone()
-    } else {
-        format!("agent-infer:{}", hit.model_id)
+    // Always prefix with `local:` unless the model id already starts with a
+    // known provider prefix. Ollama-style tags like `llama3.2:3b` contain a
+    // colon but the prefix is the model name, not a provider — so plain
+    // `contains(':')` would mis-strip the prefix and break runtime lookup.
+    let model_id = match hit.model_id.split_once(':') {
+        Some((prefix, _)) if nexil::core::provider_policies::is_known_provider(prefix) => {
+            hit.model_id.clone()
+        }
+        _ => format!("local:{}", hit.model_id),
     };
 
-    save_profile_with_overrides("agent-infer", &model_id, Some(hit.api_base), true)?;
+    save_profile_with_overrides("local", Some(label), &model_id, Some(hit.api_base), true)?;
 
     println!();
     println!("Done. Try: eli chat");
     Ok(())
+}
+
+/// Print a brand-specific "how to start the server" hint on the miss path.
+fn print_start_hint(brand: Option<&str>) {
+    eprintln!("Start a local server first:");
+    match brand {
+        Some("agent-infer") => {
+            eprintln!("  cd ~/code/agent-infer && ./scripts/start_infer.sh");
+            eprintln!("    # optional: ./scripts/start_infer.sh models/Qwen3-4B 8000");
+            eprintln!("  # Docker (Linux + CUDA)");
+            eprintln!(
+                "  docker run --gpus all -v /path/to/model:/model \\\n    \
+                 ghcr.io/cklxx/agent-infer:latest --model-path /model --port 8000"
+            );
+        }
+        Some("ollama") => {
+            eprintln!("  ollama serve                           # default port 11434");
+            eprintln!("  ollama pull llama3.2                   # in another shell");
+        }
+        Some("vllm") => {
+            eprintln!("  python -m vllm.entrypoints.openai.api_server \\");
+            eprintln!("    --model <hf-id-or-path> --port 8000");
+        }
+        Some("lmstudio") => {
+            eprintln!("  Open LM Studio → Local Server tab → Start Server (default :1234)");
+        }
+        Some("llama-cpp") => {
+            eprintln!("  llama-server -m <model.gguf> --port 8080");
+        }
+        _ => {
+            eprintln!("  Any OpenAI-compatible server on one of the probed ports above.");
+            eprintln!("  Common defaults: agent-infer/vllm:8000, llama.cpp:8080,");
+            eprintln!("                   ollama:11434, lmstudio:1234.");
+        }
+    }
 }
 
 /// GitHub Copilot device-flow login.

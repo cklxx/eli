@@ -359,12 +359,12 @@ mod tests {
     fn test_merge_profile_api_base_into_none() {
         let merged = merge_profile_api_base(
             ApiBaseConfig::None,
-            Some("agent-infer"),
+            Some("local"),
             Some("http://127.0.0.1:8000/v1"),
         );
         match merged {
             ApiBaseConfig::PerProvider(m) => {
-                assert_eq!(m["agent-infer"], "http://127.0.0.1:8000/v1");
+                assert_eq!(m["local"], "http://127.0.0.1:8000/v1");
             }
             _ => panic!("expected PerProvider"),
         }
@@ -373,16 +373,16 @@ mod tests {
     #[test]
     fn test_merge_profile_api_base_preserves_env_per_provider() {
         let mut map = HashMap::new();
-        map.insert("agent-infer".into(), "http://192.168.1.10:9000/v1".into());
+        map.insert("local".into(), "http://192.168.1.10:9000/v1".into());
         let merged = merge_profile_api_base(
             ApiBaseConfig::PerProvider(map),
-            Some("agent-infer"),
+            Some("local"),
             Some("http://127.0.0.1:8000/v1"),
         );
         match merged {
             ApiBaseConfig::PerProvider(m) => {
                 // Env entry must win.
-                assert_eq!(m["agent-infer"], "http://192.168.1.10:9000/v1");
+                assert_eq!(m["local"], "http://192.168.1.10:9000/v1");
             }
             _ => panic!("expected PerProvider"),
         }
@@ -393,7 +393,7 @@ mod tests {
         // Global ELI_API_BASE is a broad directive; don't fight it.
         let merged = merge_profile_api_base(
             ApiBaseConfig::Single("http://proxy.example.com/v1".into()),
-            Some("agent-infer"),
+            Some("local"),
             Some("http://127.0.0.1:8000/v1"),
         );
         match merged {
@@ -404,16 +404,17 @@ mod tests {
 
     #[test]
     fn test_merge_profile_api_base_normalizes_alias() {
-        // "agent_infer" alias must land in the "agent-infer" slot so the
-        // downstream provider lookup finds it.
+        // Brand aliases ("agent-infer", "ollama", …) must land in the "local"
+        // slot so the downstream provider lookup finds it.
         let merged = merge_profile_api_base(
             ApiBaseConfig::None,
-            Some("agent_infer"),
-            Some("http://127.0.0.1:8012/v1"),
+            Some("ollama"),
+            Some("http://127.0.0.1:11434/v1"),
         );
         match merged {
             ApiBaseConfig::PerProvider(m) => {
-                assert!(m.contains_key("agent-infer"));
+                assert!(m.contains_key("local"));
+                assert_eq!(m["local"], "http://127.0.0.1:11434/v1");
             }
             _ => panic!("expected PerProvider"),
         }

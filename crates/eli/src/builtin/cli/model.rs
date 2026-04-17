@@ -9,7 +9,9 @@
 
 use crate::builtin::config::EliConfig;
 use crate::builtin::settings::EnvConfig;
-use nexil::core::provider_policies::{default_api_base, normalized_provider_name};
+use nexil::core::provider_policies::{
+    default_api_base, is_known_provider, normalized_provider_name,
+};
 
 /// Resolved request context for an active profile.
 ///
@@ -496,10 +498,13 @@ fn model_switch(model_name: &str) -> anyhow::Result<()> {
 
     let old_model = profile.model.clone();
     let provider = normalized_provider_name(&profile.provider);
-    let new_model = if model_name.contains(':') {
-        model_name.to_string()
-    } else {
-        format!("{provider}:{model_name}")
+    // Treat the part before `:` as a provider prefix only if it normalizes to
+    // a real built-in provider. Ollama-style model tags (`llama3.2:3b`) carry
+    // colons in the *model name* — without this guard we'd store the tag as
+    // a phantom provider and the runtime would fail to route the request.
+    let new_model = match model_name.split_once(':') {
+        Some((prefix, _)) if is_known_provider(prefix) => model_name.to_string(),
+        _ => format!("{provider}:{model_name}"),
     };
     profile.model = new_model.clone();
     config.save()?;

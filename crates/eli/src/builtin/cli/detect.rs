@@ -1,12 +1,28 @@
 //! Local inference backend auto-detection.
 //!
 //! Probes a short ordered list of candidate URLs for an OpenAI-compatible
-//! `/v1/models` endpoint. Used by `eli login agent-infer` to locate a running
-//! local server without requiring the user to pass flags.
+//! `/v1/models` endpoint. Used by `eli login local` (and brand aliases:
+//! `agent-infer`, `ollama`, `vllm`, `lmstudio`, `llama-cpp`) to locate a
+//! running local server without flags.
+//!
+//! Default candidate ports cover the canonical defaults of the major local
+//! servers; users can extend the list via `ELI_LOCAL_PORTS=8090,9000` or
+//! pin a single endpoint via `ELI_LOCAL_URL=http://host:port` (which is
+//! exclusive — explicit config never silently falls back to defaults).
+//! `AGENT_INFER_URL` is honored as a back-compat alias of `ELI_LOCAL_URL`.
 
 use std::time::Duration;
 
 use serde::Deserialize;
+
+/// Built-in candidate ports for autodetection. Order matters — first hit wins.
+///
+/// 8000  — agent-infer / vllm default
+/// 8012  — agent-infer Metal alt port
+/// 8080  — llama.cpp `server` default
+/// 11434 — ollama default
+/// 1234  — lmstudio default
+const DEFAULT_LOCAL_PORTS: &[u16] = &[8000, 8012, 8080, 11434, 1234];
 
 /// Outcome of a successful probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,25 +44,53 @@ struct ModelEntry {
     id: String,
 }
 
-/// Build the ordered list of candidate base URLs for agent-infer.
+/// Build the ordered list of candidate base URLs for local-backend detection.
 ///
-/// If `$AGENT_INFER_URL` is set (non-empty), it is the *only* candidate —
-/// explicit configuration shouldn't silently fall back to localhost if the
-/// intended endpoint is unreachable, since that masks typos and stale env.
-/// Otherwise we probe the default bind (8000) then the Metal alt port (8012).
+/// Precedence:
+///   1. `$ELI_LOCAL_URL` (or legacy `$AGENT_INFER_URL`) — exclusive when set.
+///   2. Built-in default ports + any extras from `$ELI_LOCAL_PORTS` (a
+///      comma-separated list of u16, applied additively after defaults).
+///
 /// Candidates are normalized to always end in `/v1` (the path `/v1/models`
 /// is appended by the probe).
-pub(crate) fn agent_infer_candidates() -> Vec<String> {
-    if let Ok(url) = std::env::var("AGENT_INFER_URL") {
-        let url = url.trim();
-        if !url.is_empty() {
-            return vec![normalize_base(url)];
+pub(crate) fn local_candidates() -> Vec<String> {
+    if let Some(url) = exclusive_url_override() {
+        return vec![normalize_base(&url)];
+    }
+
+    let mut ports: Vec<u16> = DEFAULT_LOCAL_PORTS.to_vec();
+    for extra in extra_ports_from_env() {
+        if !ports.contains(&extra) {
+            ports.push(extra);
         }
     }
-    vec![
-        "http://127.0.0.1:8000/v1".to_owned(),
-        "http://127.0.0.1:8012/v1".to_owned(),
-    ]
+    ports
+        .into_iter()
+        .map(|p| format!("http://127.0.0.1:{p}/v1"))
+        .collect()
+}
+
+fn exclusive_url_override() -> Option<String> {
+    for var in ["ELI_LOCAL_URL", "AGENT_INFER_URL"] {
+        if let Ok(url) = std::env::var(var) {
+            let url = url.trim();
+            if !url.is_empty() {
+                return Some(url.to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn extra_ports_from_env() -> Vec<u16> {
+    std::env::var("ELI_LOCAL_PORTS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|s| s.trim().parse::<u16>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn normalize_base(raw: &str) -> String {
@@ -92,9 +136,9 @@ pub(crate) async fn probe(api_base: &str) -> Option<DetectResult> {
     })
 }
 
-/// Probe all agent-infer candidates in order; return the first that responds.
-pub(crate) async fn detect_agent_infer() -> Option<DetectResult> {
-    for candidate in agent_infer_candidates() {
+/// Probe all local candidates in order; return the first that responds.
+pub(crate) async fn detect_local() -> Option<DetectResult> {
+    for candidate in local_candidates() {
         if let Some(hit) = probe(&candidate).await {
             return Some(hit);
         }
@@ -105,6 +149,16 @@ pub(crate) async fn detect_agent_infer() -> Option<DetectResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn clear_local_env() {
+        // SAFETY: tests in this module run on a single thread under cargo test
+        // by default for env-mutating logic; we restore state on exit.
+        unsafe {
+            std::env::remove_var("ELI_LOCAL_URL");
+            std::env::remove_var("AGENT_INFER_URL");
+            std::env::remove_var("ELI_LOCAL_PORTS");
+        }
+    }
 
     #[test]
     fn parse_extracts_first_model_id() {
@@ -137,18 +191,17 @@ mod tests {
     }
 
     #[test]
-    fn candidates_use_defaults_without_env() {
-        // SAFETY: env mutation is confined to this test's thread; the default
-        // path does not read AGENT_INFER_URL when unset.
-        unsafe {
-            std::env::remove_var("AGENT_INFER_URL");
-        }
-        let candidates = agent_infer_candidates();
+    fn candidates_use_default_ports_without_env() {
+        clear_local_env();
+        let candidates = local_candidates();
         assert_eq!(
             candidates,
             vec![
                 "http://127.0.0.1:8000/v1".to_owned(),
                 "http://127.0.0.1:8012/v1".to_owned(),
+                "http://127.0.0.1:8080/v1".to_owned(),
+                "http://127.0.0.1:11434/v1".to_owned(),
+                "http://127.0.0.1:1234/v1".to_owned(),
             ]
         );
     }
@@ -165,17 +218,41 @@ mod tests {
     }
 
     #[test]
-    fn candidates_env_var_is_exclusive() {
-        // SAFETY: env mutation is confined to this test thread; AGENT_INFER_URL
-        // is restored/removed before return so other tests are unaffected.
+    fn candidates_local_url_env_is_exclusive() {
+        clear_local_env();
         unsafe {
-            std::env::set_var("AGENT_INFER_URL", "http://explicit-host:9000");
+            std::env::set_var("ELI_LOCAL_URL", "http://explicit-host:9000");
         }
-        let candidates = agent_infer_candidates();
-        unsafe {
-            std::env::remove_var("AGENT_INFER_URL");
-        }
+        let candidates = local_candidates();
+        clear_local_env();
         assert_eq!(candidates, vec!["http://explicit-host:9000/v1".to_owned()]);
+    }
+
+    #[test]
+    fn candidates_legacy_agent_infer_url_still_works() {
+        clear_local_env();
+        unsafe {
+            std::env::set_var("AGENT_INFER_URL", "http://legacy-host:7000");
+        }
+        let candidates = local_candidates();
+        clear_local_env();
+        assert_eq!(candidates, vec!["http://legacy-host:7000/v1".to_owned()]);
+    }
+
+    #[test]
+    fn candidates_extra_ports_appended_after_defaults() {
+        clear_local_env();
+        unsafe {
+            std::env::set_var("ELI_LOCAL_PORTS", "8000,9090, 7000 ,bogus,1234");
+        }
+        let candidates = local_candidates();
+        clear_local_env();
+        // 8000 and 1234 already in defaults → not duplicated; bogus dropped;
+        // 9090 and 7000 appended in order.
+        assert!(candidates.contains(&"http://127.0.0.1:9090/v1".to_owned()));
+        assert!(candidates.contains(&"http://127.0.0.1:7000/v1".to_owned()));
+        let port_count = candidates.iter().filter(|c| c.contains(":8000/")).count();
+        assert_eq!(port_count, 1, "8000 should not be duplicated");
     }
 
     #[tokio::test]

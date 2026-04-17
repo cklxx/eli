@@ -30,7 +30,12 @@ fn provider_alias(provider_name: &str) -> String {
     match provider_name_key(provider_name).as_str() {
         "claude" | "anthropic" => "anthropic".to_owned(),
         "copilot" | "github-copilot" => "github-copilot".to_owned(),
-        "agent-infer" | "agent_infer" | "agentinfer" => "agent-infer".to_owned(),
+        // All keyless OpenAI-Chat-Completions-compatible local servers
+        // (agent-infer, ollama, vllm, lmstudio, llama.cpp, …) collapse onto
+        // a single `local` provider. Brand names survive only as the
+        // user-facing profile label.
+        "local" | "agent-infer" | "agent_infer" | "agentinfer" | "ollama" | "vllm" | "lmstudio"
+        | "llama-cpp" | "llamacpp" | "llama.cpp" => "local".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -40,6 +45,19 @@ pub fn normalized_provider_name(provider_name: &str) -> String {
     provider_alias(provider_name)
 }
 
+/// Whether `name` (or one of its aliases) names a built-in provider.
+///
+/// Used by callers that need to decide whether a colon-bearing model id
+/// (e.g. `"openai:gpt-5"` vs ollama's `"llama3.2:3b"` tag syntax) already
+/// carries a provider prefix. The first segment is a real prefix only if
+/// it normalizes to one of the canonical built-in providers.
+pub fn is_known_provider(name: &str) -> bool {
+    matches!(
+        provider_alias(name).as_str(),
+        "anthropic" | "openai" | "openrouter" | "github-copilot" | "local"
+    )
+}
+
 /// Default API base URL for a provider.
 pub fn default_api_base(provider_name: &str) -> String {
     match provider_alias(provider_name).as_str() {
@@ -47,7 +65,10 @@ pub fn default_api_base(provider_name: &str) -> String {
         "openai" => "https://api.openai.com/v1".to_owned(),
         "openrouter" => "https://openrouter.ai/api/v1".to_owned(),
         "github-copilot" => "https://api.githubcopilot.com".to_owned(),
-        "agent-infer" => "http://127.0.0.1:8000/v1".to_owned(),
+        // The first port across the canonical local-LLM defaults
+        // (agent-infer/vllm:8000). Every saved profile is expected to carry
+        // its own `api_base` from autodetection, so this is a fallback only.
+        "local" => "http://127.0.0.1:8000/v1".to_owned(),
         other => format!("https://api.{other}.com/v1"),
     }
 }
@@ -58,11 +79,11 @@ pub fn default_model_for_provider(provider_name: &str) -> &'static str {
         "openai" => "openai:gpt-5.4-mini",
         "anthropic" => "anthropic:claude-sonnet-4-6",
         "github-copilot" => "github-copilot:gpt-5.4-mini",
-        // agent-infer has no fixed cloud default; the login flow queries
+        // Local backends have no canonical model; the login flow queries
         // /v1/models and writes the real served model into the profile.
         // This placeholder is only used when no profile exists and the user
         // has not set ELI_MODEL — it matches the README's canonical example.
-        "agent-infer" => "agent-infer:Qwen/Qwen3-4B",
+        "local" => "local:Qwen/Qwen3-4B",
         _ => "openrouter:openai/gpt-5.4-mini",
     }
 }
@@ -152,9 +173,33 @@ mod tests {
         assert_eq!(normalized_provider_name("copilot"), "github-copilot");
         assert_eq!(normalized_provider_name("openai"), "openai");
         assert_eq!(normalized_provider_name(" Claude "), "anthropic");
-        assert_eq!(normalized_provider_name("agent-infer"), "agent-infer");
-        assert_eq!(normalized_provider_name("agent_infer"), "agent-infer");
-        assert_eq!(normalized_provider_name("AgentInfer"), "agent-infer");
+        assert_eq!(normalized_provider_name("agent-infer"), "local");
+        assert_eq!(normalized_provider_name("agent_infer"), "local");
+        assert_eq!(normalized_provider_name("AgentInfer"), "local");
+        assert_eq!(normalized_provider_name("ollama"), "local");
+        assert_eq!(normalized_provider_name("vllm"), "local");
+        assert_eq!(normalized_provider_name("lmstudio"), "local");
+        assert_eq!(normalized_provider_name("llama-cpp"), "local");
+        assert_eq!(normalized_provider_name("llamacpp"), "local");
+        assert_eq!(normalized_provider_name("local"), "local");
+    }
+
+    #[test]
+    fn test_is_known_provider() {
+        // Built-in canonicals + their aliases all return true.
+        assert!(is_known_provider("openai"));
+        assert!(is_known_provider("anthropic"));
+        assert!(is_known_provider("claude"));
+        assert!(is_known_provider("github-copilot"));
+        assert!(is_known_provider("copilot"));
+        assert!(is_known_provider("openrouter"));
+        assert!(is_known_provider("local"));
+        assert!(is_known_provider("ollama"));
+        assert!(is_known_provider("llama-cpp"));
+        // The "prefix" part of an ollama tag like "llama3.2:3b" is NOT a provider.
+        assert!(!is_known_provider("llama3.2"));
+        assert!(!is_known_provider("qwen2.5"));
+        assert!(!is_known_provider("custom"));
     }
 
     #[test]
@@ -162,8 +207,10 @@ mod tests {
         assert_eq!(default_api_base("claude"), "https://api.anthropic.com/v1");
         assert_eq!(default_api_base("copilot"), "https://api.githubcopilot.com");
         assert_eq!(default_api_base("cohere"), "https://api.cohere.com/v1");
+        assert_eq!(default_api_base("local"), "http://127.0.0.1:8000/v1");
         assert_eq!(default_api_base("agent-infer"), "http://127.0.0.1:8000/v1");
-        assert_eq!(default_api_base("agent_infer"), "http://127.0.0.1:8000/v1");
+        assert_eq!(default_api_base("ollama"), "http://127.0.0.1:8000/v1");
+        assert_eq!(default_api_base("vllm"), "http://127.0.0.1:8000/v1");
     }
 
     #[test]
