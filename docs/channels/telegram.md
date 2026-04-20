@@ -25,6 +25,17 @@ Optional proxy:
 ELI_TELEGRAM_PROXY=http://127.0.0.1:7890
 ```
 
+Optional IP family:
+
+```bash
+ELI_TELEGRAM_IP_FAMILY=4
+```
+
+`telegram` in `sidecar/` now defaults to IPv4 on purpose. On some Node 24 +
+macOS/VPN paths, `api.telegram.org` over IPv6 or undici-backed fetch can stall
+or hit `fetch failed` / connect timeout. Set `ELI_TELEGRAM_IP_FAMILY=6` only if
+you know your IPv6 path is healthy.
+
 ## Message Behavior
 
 - Session id is `telegram:<chat_id>`.

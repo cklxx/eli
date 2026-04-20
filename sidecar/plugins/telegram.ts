@@ -1,15 +1,17 @@
 /**
  * Built-in Telegram channel plugin for the sidecar.
  *
- * Uses the Telegram Bot API directly via fetch() — no external dependencies.
- * Replaces the Rust teloxide-based implementation so all channels go through
- * the unified sidecar pipeline.
+ * Uses the Telegram Bot API directly via node:https.
+ * This avoids undici/connect-timeout regressions seen on some macOS/VPN/IPv6
+ * paths while keeping the channel dependency-free.
  *
  * Config: SIDECAR_TELEGRAM_TOKEN (or ELI_TELEGRAM_TOKEN for backward compat).
- * Optional: SIDECAR_TELEGRAM_ALLOW_USERS, SIDECAR_TELEGRAM_ALLOW_CHATS.
+ * Optional: SIDECAR_TELEGRAM_ALLOW_USERS, SIDECAR_TELEGRAM_ALLOW_CHATS,
+ * SIDECAR_TELEGRAM_IP_FAMILY.
  */
 
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { request as httpsRequest } from "node:https";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -24,6 +26,11 @@ import type {
 import { logger } from "../src/log.js";
 
 const log = logger("telegram");
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const LONG_POLL_GRACE_MS = 5_000;
+const DEFAULT_IP_FAMILY = 4;
+
+type TelegramIpFamily = 4 | 6;
 
 // ---------------------------------------------------------------------------
 // Telegram Bot API helpers
@@ -33,26 +40,101 @@ function apiUrl(token: string, method: string): string {
   return `https://api.telegram.org/bot${token}/${method}`;
 }
 
-async function callApi(token: string, method: string, params: Record<string, any> = {}): Promise<any> {
-  const resp = await fetch(apiUrl(token, method), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(params),
+export function parseIpFamily(value: unknown): TelegramIpFamily {
+  return String(value) === "6" ? 6 : 4;
+}
+
+export function resolveApiTimeoutMs(method: string, params: Record<string, any>): number {
+  if (method !== "getUpdates") return DEFAULT_REQUEST_TIMEOUT_MS;
+  const longPollMs = Number(params.timeout ?? 0) * 1000;
+  return Math.max(DEFAULT_REQUEST_TIMEOUT_MS, longPollMs + LONG_POLL_GRACE_MS);
+}
+
+function requestBuffer(
+  url: string,
+  options: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: Buffer;
+    family?: TelegramIpFamily;
+    timeoutMs?: number;
+  } = {},
+): Promise<{ statusCode: number; body: Buffer }> {
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(url, {
+      family: options.family ?? DEFAULT_IP_FAMILY,
+      method: options.method ?? "GET",
+      headers: options.headers,
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      res.on("end", () => {
+        resolve({
+          statusCode: res.statusCode ?? 0,
+          body: Buffer.concat(chunks),
+        });
+      });
+    });
+    req.setTimeout(options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, () => {
+      req.destroy(new Error("request timeout"));
+    });
+    req.on("error", reject);
+    if (options.body) req.write(options.body);
+    req.end();
   });
-  const data = await resp.json() as any;
+}
+
+async function requestJson<T>(
+  url: string,
+  options: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: Buffer;
+    family?: TelegramIpFamily;
+    timeoutMs?: number;
+  } = {},
+): Promise<T> {
+  const response = await requestBuffer(url, options);
+  const text = response.body.toString("utf8");
+  return JSON.parse(text) as T;
+}
+
+async function callApi(
+  token: string,
+  method: string,
+  params: Record<string, any> = {},
+  family: TelegramIpFamily = DEFAULT_IP_FAMILY,
+): Promise<any> {
+  const body = Buffer.from(JSON.stringify(params), "utf8");
+  const data = await requestJson<any>(apiUrl(token, method), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": String(body.length),
+    },
+    body,
+    family,
+    timeoutMs: resolveApiTimeoutMs(method, params),
+  });
   if (!data.ok) {
     throw new Error(`Telegram API ${method}: ${data.description ?? "unknown error"}`);
   }
   return data.result;
 }
 
-async function downloadFile(token: string, fileId: string): Promise<Buffer> {
-  const file = await callApi(token, "getFile", { file_id: fileId });
+async function downloadFile(
+  token: string,
+  fileId: string,
+  family: TelegramIpFamily = DEFAULT_IP_FAMILY,
+): Promise<Buffer> {
+  const file = await callApi(token, "getFile", { file_id: fileId }, family);
   const filePath = file.file_path;
   const url = `https://api.telegram.org/file/bot${token}/${filePath}`;
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`download failed: ${resp.status}`);
-  return Buffer.from(await resp.arrayBuffer());
+  const response = await requestBuffer(url, { family });
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new Error(`download failed: ${response.statusCode}`);
+  }
+  return response.body;
 }
 
 function saveTempFile(data: Buffer, ext: string): string {
@@ -152,6 +234,7 @@ interface TelegramConfig {
   token: string;
   allow_users: Set<string>;
   allow_chats: Set<string>;
+  ip_family: TelegramIpFamily;
 }
 
 function parseConfig(channelConfig: any): TelegramConfig {
@@ -177,7 +260,14 @@ function parseConfig(channelConfig: any): TelegramConfig {
     process.env.SIDECAR_TELEGRAM_ALLOW_CHATS
   );
 
-  return { token, allow_users, allow_chats };
+  const ip_family = parseIpFamily(
+    channelConfig?.ip_family ??
+    channelConfig?.accounts?.default?.ip_family ??
+    process.env.ELI_TELEGRAM_IP_FAMILY ??
+    process.env.SIDECAR_TELEGRAM_IP_FAMILY
+  );
+
+  return { token, allow_users, allow_chats, ip_family };
 }
 
 function checkAccess(msg: TgMessage, cfg: TelegramConfig): "allowed" | "denied_chat" | "denied_user" | "start" {
@@ -225,7 +315,7 @@ async function pollLoop(
   onMessage: (envelope: InboundEnvelope) => Promise<void>,
   abortSignal?: AbortSignal,
 ): Promise<void> {
-  const me = await callApi(cfg.token, "getMe");
+  const me = await callApi(cfg.token, "getMe", {}, cfg.ip_family);
   const botId: number = me.id;
   const botUsername: string = me.username ?? "";
   log.info("bot identity resolved", { id: botId, username: botUsername });
@@ -239,7 +329,7 @@ async function pollLoop(
         offset,
         timeout: 30,
         allowed_updates: ["message", "my_chat_member"],
-      });
+      }, cfg.ip_family);
     } catch (err: any) {
       if (abortSignal?.aborted) break;
       // Telegram returns "Conflict: terminated by other getUpdates request"
@@ -290,13 +380,13 @@ async function pollLoop(
           await callApi(cfg.token, "sendMessage", {
             chat_id: msg.chat.id,
             text: "You are not allowed to chat with me. Please deploy your own instance of Eli.",
-          }).catch(() => {});
+          }, cfg.ip_family).catch(() => {});
         }
         if (access === "denied_user") {
           await callApi(cfg.token, "sendMessage", {
             chat_id: msg.chat.id,
             text: "Access denied.",
-          }).catch(() => {});
+          }, cfg.ip_family).catch(() => {});
         }
         continue;
       }
@@ -305,7 +395,7 @@ async function pollLoop(
         await callApi(cfg.token, "sendMessage", {
           chat_id: msg.chat.id,
           text: "Eli is online. Send text to start.",
-        }).catch(() => {});
+        }, cfg.ip_family).catch(() => {});
         continue;
       }
 
@@ -327,7 +417,7 @@ async function pollLoop(
         const media = detectMediaType(source);
         if (!media) continue;
         try {
-          const data = await downloadFile(cfg.token, media.fileId);
+          const data = await downloadFile(cfg.token, media.fileId, cfg.ip_family);
           const path = saveTempFile(data, media.ext);
           mediaPaths.push(path);
           mediaTypes.push(media.type);
@@ -340,7 +430,7 @@ async function pollLoop(
       await callApi(cfg.token, "sendChatAction", {
         chat_id: msg.chat.id,
         action: "typing",
-      }).catch(() => {});
+      }, cfg.ip_family).catch(() => {});
 
       const envelope: InboundEnvelope = {
         channel: "telegram",
@@ -369,6 +459,7 @@ async function pollLoop(
 
 async function sendText(params: OutboundTextParams): Promise<OutboundResult> {
   const token = resolveToken(params.cfg);
+  const family = resolveIpFamily(params.cfg);
   if (!token) return { ok: false, error: "no telegram token" };
 
   const chatId = Number(params.to);
@@ -382,12 +473,12 @@ async function sendText(params: OutboundTextParams): Promise<OutboundResult> {
       chat_id: chatId,
       text: params.text,
       parse_mode: "MarkdownV2",
-    });
+    }, family);
   } catch {
     await callApi(token, "sendMessage", {
       chat_id: chatId,
       text: params.text,
-    });
+    }, family);
   }
 
   return { ok: true };
@@ -395,6 +486,7 @@ async function sendText(params: OutboundTextParams): Promise<OutboundResult> {
 
 async function sendMedia(params: OutboundMediaParams): Promise<OutboundResult> {
   const token = resolveToken(params.config);
+  const family = resolveIpFamily(params.config);
   if (!token) return { ok: false, error: "no telegram token" };
 
   const chatId = Number(params.target.chatId);
@@ -404,10 +496,6 @@ async function sendMedia(params: OutboundMediaParams): Promise<OutboundResult> {
   const data = readFileSync(params.mediaPath);
   const filename = params.mediaPath.split("/").pop() ?? "file";
 
-  const formData = new FormData();
-  formData.append("chat_id", String(chatId));
-
-  const blob = new Blob([data]);
   const method = {
     image: "sendPhoto",
     video: "sendVideo",
@@ -421,17 +509,56 @@ async function sendMedia(params: OutboundMediaParams): Promise<OutboundResult> {
     sendDocument: "document",
   }[method] ?? "document";
 
-  formData.append(fieldName, blob, filename);
-
-  const resp = await fetch(apiUrl(token, method), {
+  const boundary = `----eli-tg-${randomBytes(12).toString("hex")}`;
+  const body = buildMultipartBody(boundary, [
+    partFromText("chat_id", String(chatId)),
+    partFromFile(fieldName, filename, data),
+  ]);
+  const response = await requestJson<any>(apiUrl(token, method), {
     method: "POST",
-    body: formData,
+    headers: {
+      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      "Content-Length": String(body.length),
+    },
+    body,
+    family,
   });
-  const result = await resp.json() as any;
-  if (!result.ok) {
-    return { ok: false, error: result.description };
+  if (!response.ok) {
+    return { ok: false, error: response.description };
   }
   return { ok: true };
+}
+
+function buildMultipartBody(
+  boundary: string,
+  parts: Array<{ headers: string[]; body: Buffer }>,
+): Buffer {
+  const chunks = parts.flatMap((part) => [
+    Buffer.from(`--${boundary}\r\n${part.headers.join("\r\n")}\r\n\r\n`, "utf8"),
+    part.body,
+    Buffer.from("\r\n", "utf8"),
+  ]);
+  chunks.push(Buffer.from(`--${boundary}--\r\n`, "utf8"));
+  return Buffer.concat(chunks);
+}
+
+function partFromText(name: string, value: string): { headers: string[]; body: Buffer } {
+  return {
+    headers: [
+      `Content-Disposition: form-data; name="${name}"`,
+    ],
+    body: Buffer.from(value, "utf8"),
+  };
+}
+
+function partFromFile(name: string, filename: string, body: Buffer): { headers: string[]; body: Buffer } {
+  return {
+    headers: [
+      `Content-Disposition: form-data; name="${name}"; filename="${filename}"`,
+      "Content-Type: application/octet-stream",
+    ],
+    body,
+  };
 }
 
 function resolveToken(cfg: any): string {
@@ -441,6 +568,15 @@ function resolveToken(cfg: any): string {
     process.env.SIDECAR_TELEGRAM_TOKEN ??
     process.env.ELI_TELEGRAM_TOKEN ??
     ""
+  );
+}
+
+export function resolveIpFamily(cfg: any): TelegramIpFamily {
+  return parseIpFamily(
+    cfg?.channels?.telegram?.ip_family ??
+    cfg?.channels?.telegram?.accounts?.default?.ip_family ??
+    process.env.SIDECAR_TELEGRAM_IP_FAMILY ??
+    process.env.ELI_TELEGRAM_IP_FAMILY
   );
 }
 
