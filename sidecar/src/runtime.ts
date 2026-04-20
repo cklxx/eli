@@ -567,9 +567,9 @@ function loadBuiltinPlugins(config: SidecarConfig): void {
  * Discover and load all plugins listed in the config.
  * Each plugin's `register()` is called with a SidecarPluginApi instance.
  *
- * Under jiti (start.cjs), require() goes through Node's native CJS loader
- * with tryNative:true, so all CJS singletons (like LarkClient) share the
- * same module cache. No monkey-patching needed.
+ * Under jiti (start.cjs), require() is kept under jiti transforms so
+ * TypeScript-first plugins published from `node_modules` still load on
+ * modern Node.js runtimes that reject native type stripping there.
  */
 export async function loadPlugins(config: SidecarConfig): Promise<void> {
   loadBuiltinPlugins(config);

@@ -5,23 +5,9 @@ use std::sync::Arc;
 use base64::Engine;
 use serde_json::Value;
 
-use crate::channels::message::{ChannelMessage, MediaItem, MediaType};
-
 #[cfg(feature = "gateway")]
-fn find_sidecar_dir() -> Option<std::path::PathBuf> {
-    use std::path::PathBuf;
-
-    [
-        std::env::var("ELI_SIDECAR_DIR").ok().map(PathBuf::from),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("sidecar"))),
-        std::env::current_dir().ok().map(|d| d.join("sidecar")),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|d| d.join("start.cjs").exists())
-}
+use super::sidecar_support::{ensure_node_available, ensure_sidecar_deps, find_sidecar_dir};
+use crate::channels::message::{ChannelMessage, MediaItem, MediaType};
 
 #[cfg(feature = "gateway")]
 fn prompt_line(label: &str) -> String {
@@ -62,6 +48,8 @@ fn infer_channel_id(plugin: &str) -> String {
     const KNOWN_CHANNELS: &[(&str, &str)] = &[
         ("lark", "feishu"),
         ("feishu", "feishu"),
+        ("weixin", "openclaw-weixin"),
+        ("wechat", "openclaw-weixin"),
         ("dingtalk", "dingtalk"),
         ("discord", "discord"),
         ("slack", "slack"),
@@ -120,46 +108,17 @@ fn start_sidecar(wh: &crate::channels::webhook::WebhookSettings) -> Option<std::
     })?;
 
     if !ensure_node_available() {
+        eprintln!("Warning: `node` not found in PATH, cannot start sidecar");
         return None;
     }
-    if !ensure_sidecar_deps(&sidecar_dir) {
+    if !ensure_sidecar_deps(&sidecar_dir, false) {
+        eprintln!("Warning: `npm install` failed in {}", sidecar_dir.display());
         return None;
     }
     ensure_sidecar_config(&sidecar_dir);
 
     println!("Starting sidecar from {}...", sidecar_dir.display());
     spawn_sidecar_process(&sidecar_dir, wh)
-}
-
-#[cfg(feature = "gateway")]
-fn ensure_node_available() -> bool {
-    let ok = std::process::Command::new("node")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok();
-    if !ok {
-        eprintln!("Warning: `node` not found in PATH, cannot start sidecar");
-    }
-    ok
-}
-
-#[cfg(feature = "gateway")]
-fn ensure_sidecar_deps(sidecar_dir: &std::path::Path) -> bool {
-    if sidecar_dir.join("node_modules").exists() {
-        return true;
-    }
-    println!("Installing sidecar dependencies...");
-    let ok = std::process::Command::new("npm")
-        .arg("install")
-        .current_dir(sidecar_dir)
-        .status()
-        .is_ok_and(|s| s.success());
-    if !ok {
-        eprintln!("Warning: `npm install` failed in {}", sidecar_dir.display());
-    }
-    ok
 }
 
 #[cfg(feature = "gateway")]

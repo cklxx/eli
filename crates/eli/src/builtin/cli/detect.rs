@@ -149,10 +149,14 @@ pub(crate) async fn detect_local() -> Option<DetectResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    fn local_env_guard() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap()
+    }
 
     fn clear_local_env() {
-        // SAFETY: tests in this module run on a single thread under cargo test
-        // by default for env-mutating logic; we restore state on exit.
         unsafe {
             std::env::remove_var("ELI_LOCAL_URL");
             std::env::remove_var("AGENT_INFER_URL");
@@ -219,6 +223,7 @@ mod tests {
 
     #[test]
     fn candidates_local_url_env_is_exclusive() {
+        let _guard = local_env_guard();
         clear_local_env();
         unsafe {
             std::env::set_var("ELI_LOCAL_URL", "http://explicit-host:9000");
@@ -230,6 +235,7 @@ mod tests {
 
     #[test]
     fn candidates_legacy_agent_infer_url_still_works() {
+        let _guard = local_env_guard();
         clear_local_env();
         unsafe {
             std::env::set_var("AGENT_INFER_URL", "http://legacy-host:7000");
@@ -241,6 +247,7 @@ mod tests {
 
     #[test]
     fn candidates_extra_ports_appended_after_defaults() {
+        let _guard = local_env_guard();
         clear_local_env();
         unsafe {
             std::env::set_var("ELI_LOCAL_PORTS", "8000,9090, 7000 ,bogus,1234");

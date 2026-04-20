@@ -9,7 +9,7 @@
 const path = require("path");
 const fs = require("fs");
 const { createJiti } = require("jiti");
-const jiti = createJiti(__filename, { interopDefault: true, tryNative: true });
+const jiti = createJiti(__filename, { interopDefault: true, tryNative: false });
 
 const srcEntry = path.join(__dirname, "src", "index.ts");
 if (fs.existsSync(srcEntry)) {

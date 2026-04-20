@@ -1,5 +1,6 @@
 //! CLI commands: run, chat, login, use, status, hooks, gateway, model, tape, decisions.
 
+mod channel;
 mod chat;
 mod decisions;
 mod detect;
@@ -9,6 +10,7 @@ mod login;
 mod model;
 mod profile;
 mod run;
+mod sidecar_support;
 #[cfg(feature = "tape-viewer")]
 mod tape;
 mod task;
@@ -78,6 +80,11 @@ pub enum CliCommand {
     },
     /// Show authentication and configuration status.
     Status,
+    /// Manage external channels such as Weixin.
+    Channel {
+        #[command(subcommand)]
+        action: ChannelAction,
+    },
     /// Show hook implementation mapping.
     #[command(hide = true)]
     Hooks,
@@ -128,6 +135,16 @@ pub enum DecisionAction {
     },
     /// Export decisions as markdown.
     Export,
+}
+
+/// Channel management actions.
+#[derive(Debug, Subcommand)]
+pub enum ChannelAction {
+    /// Log in to a channel account.
+    Login {
+        /// Channel name. Currently supported: weixin.
+        channel: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -321,6 +338,7 @@ pub async fn execute(cmd: CliCommand) -> anyhow::Result<()> {
         CliCommand::Use { profile } => profile::use_command(profile),
         CliCommand::Model { name } => model::model_command(name).await,
         CliCommand::Status => profile::status_command(),
+        CliCommand::Channel { action } => channel::channel_command(action).await,
         CliCommand::Hooks => {
             hooks_command().await;
             Ok(())
@@ -527,6 +545,17 @@ mod tests {
             CliCommand::Evolution {
                 action: EvolutionAction::CaptureRuntimePolicy { artifact_name, .. },
             } => assert_eq!(artifact_name, "auto-evolution"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_channel_login_weixin() {
+        let cmd = TestCli::try_parse_from(["eli", "channel", "login", "weixin"]).unwrap();
+        match cmd.command {
+            CliCommand::Channel {
+                action: ChannelAction::Login { channel },
+            } => assert_eq!(channel, "weixin"),
             other => panic!("unexpected command: {other:?}"),
         }
     }
