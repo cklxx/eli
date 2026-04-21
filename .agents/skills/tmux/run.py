@@ -74,6 +74,10 @@ _NOISE_MARKERS = (
     "explored",
     "read ",
     "if the browser didn't open",
+    "conversation interrupted",
+    "background terminal running",
+    "ctrl + t to view transcript",
+    "print help",
 )
 _STATUS_MARKERS = ("working (", "esc to interrupt", "gpt-5.4", "claude code")
 
@@ -282,7 +286,7 @@ def _meaningful_lines(text: str) -> list[str]:
 
 def _line_kind(line: str) -> str:
     lowered = line.lower()
-    if any(marker in lowered for marker in _NOISE_MARKERS):
+    if any(marker in lowered for marker in _NOISE_MARKERS) or _looks_like_reference(line):
         return "noise"
     if " on  " in line and " via " in line:
         return "status"
@@ -295,6 +299,10 @@ def _line_kind(line: str) -> str:
 
 def _content_lines(text: str) -> list[str]:
     return [line for line in _meaningful_lines(text) if _line_kind(line) == "content"]
+
+
+def _content_excerpt(text: str, limit: int = 3) -> list[str]:
+    return [_shorten_line(line) for line in _content_lines(text)[-limit:]]
 
 
 def _last_of_kind(text: str, kind: str) -> str:
@@ -313,7 +321,7 @@ def _line_score(line: str) -> tuple[int, int]:
         score = 4
     elif any(word in lowered for word in ("ran ", "edited ", "updated plan", "working (", "compiling ", "cargo test", "pytest ")):
         score = 3
-    if _looks_like_command_echo(line) or _looks_like_codeish(line):
+    if _looks_like_command_echo(line) or _looks_like_codeish(line) or _looks_like_reference(line):
         score -= 1
     return score, len(line)
 
@@ -372,6 +380,11 @@ def _looks_like_command_echo(line: str) -> bool:
 def _looks_like_codeish(line: str) -> bool:
     stripped = line.strip()
     return bool(re.match(r"^\d+\s+[+-]?", stripped)) or "!(" in stripped or "::" in stripped
+
+
+def _looks_like_reference(line: str) -> bool:
+    stripped = line.strip()
+    return bool(re.search(r"\.(md|rs|py|zig|toml|json):\d+\b", stripped)) or stripped in {"-h, --help", "--help"}
 
 
 def _looks_idle(preview: str, foreground_name: str, activity_age: int | None) -> bool:
@@ -450,6 +463,7 @@ def _inspect_pane(pane: dict[str, Any], lines: int, include_preview: bool) -> di
     focus_line = _focus_line(output)
     prompt_line = _prompt_line(output)
     status_line = _status_line(output)
+    content_lines = _content_excerpt(output)
     extra_lines = [line for line in _key_lines(output) if line not in {prompt_line, focus_line, status_line}]
     key_lines = _dedupe([prompt_line, focus_line, status_line, *extra_lines])[:4]
     kind = _work_kind(foreground["command"], signals)
@@ -469,6 +483,7 @@ def _inspect_pane(pane: dict[str, Any], lines: int, include_preview: bool) -> di
         "focus_line": focus_line,
         "prompt_line": prompt_line,
         "status_line": status_line,
+        "content_lines": content_lines,
         "key_lines": key_lines,
     }
     if include_preview:
@@ -490,12 +505,18 @@ def _compact_pane_view(pane: dict[str, Any]) -> dict[str, Any]:
         "summary",
         "signals",
         "focus_line",
+        "content_lines",
         "prompt_line",
         "status_line",
         "key_lines",
     )
-    compact = {key: pane[key] for key in keys}
+    defaults = {"signals": [], "content_lines": [], "key_lines": [], "focus_line": "", "prompt_line": "", "status_line": ""}
+    compact = {key: pane.get(key, defaults.get(key, "")) for key in keys}
     return compact | {"preview": pane["preview"]} if "preview" in pane else compact
+
+
+def _watch_pane_view(pane: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in _compact_pane_view(pane).items() if key != "preview"}
 
 
 def _find_pane(panes: list[dict[str, Any]], target: str) -> dict[str, Any] | None:
@@ -549,8 +570,42 @@ def survey(args: dict[str, Any]) -> dict[str, Any]:
         return panes
     items = [pane for pane in panes["panes"] if not session or pane["session"] == session]
     inspected = [_compact_pane_view(_inspect_pane(pane, lines, include_preview=False)) for pane in items]
-    ordered = sorted(inspected, key=lambda item: (item["activity_age_secs"] is None, item["activity_age_secs"] or 0))
-    return {"success": True, "count": len(ordered), "panes": ordered}
+    return _survey_result(inspected)
+
+
+def _survey_result(panes: list[dict[str, Any]]) -> dict[str, Any]:
+    ordered = sorted(panes, key=lambda item: (item["activity_age_secs"] is None, item["activity_age_secs"] or 0))
+    running = [pane for pane in ordered if pane["state"] == "active"]
+    idle = [pane for pane in ordered if pane["state"] == "idle"]
+    dead = [pane for pane in ordered if pane["state"] == "dead"]
+    return {
+        "success": True,
+        "count": len(ordered),
+        "summary": _survey_summary(running, idle, dead),
+        "running": running,
+        "idle": idle,
+        "dead": dead,
+    }
+
+
+def _survey_summary(
+    running: list[dict[str, Any]],
+    idle: list[dict[str, Any]],
+    dead: list[dict[str, Any]],
+) -> str:
+    parts = [_survey_count("running", running), _survey_count("idle", idle), _survey_count("dead", dead)]
+    highlights = "; ".join(_pane_highlight(pane) for pane in running[:2])
+    summary = ", ".join(part for part in parts if part)
+    return f"{summary}. {highlights}" if highlights else f"{summary}."
+
+
+def _survey_count(label: str, panes: list[dict[str, Any]]) -> str:
+    return f"{len(panes)} {label}" if panes else ""
+
+
+def _pane_highlight(pane: dict[str, Any]) -> str:
+    headline = pane["content_lines"][-1] if pane["content_lines"] else pane["focus_line"] or pane["summary"]
+    return f'{pane["target"]} {pane["work_kind"]}: {headline}'
 
 
 def _watch_snapshot(args: dict[str, Any], lines: int) -> dict[str, Any]:
@@ -627,15 +682,15 @@ def _changed_fields(
 def _watch_new_lines(previous: dict[str, Any], current: dict[str, Any]) -> list[str]:
     earlier = _content_lines(previous.get("preview", ""))
     later = _content_lines(current.get("preview", ""))
-    index = _common_prefix_len(earlier, later)
+    index = _overlap_start(earlier, later)
     return [_shorten_line(line) for line in later[index:index + 3]]
 
 
-def _common_prefix_len(left: list[str], right: list[str]) -> int:
-    index = 0
-    while index < min(len(left), len(right)) and left[index] == right[index]:
-        index += 1
-    return index
+def _overlap_start(previous: list[str], current: list[str]) -> int:
+    for size in range(min(len(previous), len(current)), 0, -1):
+        if previous[-size:] == current[:size]:
+            return size
+    return 0
 
 
 def _watch_summary(events: list[dict[str, Any]], final_items: list[dict[str, Any]]) -> str:
@@ -684,7 +739,7 @@ def _watch_loop(
         time.sleep(interval)
         current = _watch_snapshot(args, lines)
         if not current["success"]:
-            return current
+            return _watch_missing(previous, initial, events, ticks, interval, current)
         raw_events = _watch_changes(previous, _watch_items(current), tick, args)
         quiet_for = 0.0 if raw_events else quiet_for + interval
         events.extend(raw_events)
@@ -694,6 +749,42 @@ def _watch_loop(
             break
     final_items = _watch_items(current)
     return _watch_result(initial, current, events, final_items, ticks, interval, stopped_reason or "ticks_exhausted")
+
+
+def _watch_missing(
+    previous: dict[str, dict[str, Any]],
+    initial: dict[str, Any],
+    events: list[dict[str, Any]],
+    ticks: int,
+    interval: float,
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    target = _target_of_initial(initial)
+    if not target or "pane not found" not in current.get("error", ""):
+        return current
+    final = {"success": True, "pane": _missing_pane(previous[target])}
+    return _watch_result(initial, final, events, [final["pane"]], ticks, interval, "missing")
+
+
+def _target_of_initial(initial: dict[str, Any]) -> str:
+    return initial.get("pane", {}).get("target", "")
+
+
+def _missing_pane(previous: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **previous,
+        "state": "dead",
+        "work_kind": "process",
+        "worth_messaging": False,
+        "messaging_reason": "pane disappeared during watch",
+        "summary": "Pane disappeared during watch.",
+        "signals": ["missing"],
+        "focus_line": "",
+        "prompt_line": "",
+        "status_line": "",
+        "key_lines": [],
+        "preview": previous.get("preview", ""),
+    }
 
 
 def _watch_changes(
@@ -743,8 +834,8 @@ def _watch_result(
 
 def _watch_compact(snapshot: dict[str, Any]) -> dict[str, Any] | list[dict[str, Any]]:
     if "pane" in snapshot:
-        return _compact_pane_view(snapshot["pane"])
-    return [_compact_pane_view(pane) for pane in snapshot["panes"]]
+        return _watch_pane_view(snapshot["pane"])
+    return [_watch_pane_view(pane) for pane in snapshot["panes"]]
 
 
 def send_text(args: dict[str, Any]) -> dict[str, Any]:

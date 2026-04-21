@@ -31,7 +31,7 @@ Use this skill when the target terminal lives inside `tmux`. Prefer it over desk
 
 ## Workflow
 
-1. Run `survey` first when the current information is insufficient; it returns a compact decision view with `state`, `worth_messaging`, `summary`, `focus_line`, `prompt_line`, `status_line`, and `key_lines`.
+1. Run `survey` first when the current information is insufficient; it returns `summary` plus grouped `running`, `idle`, and `dead` panes. Running panes include direct `content_lines` so you do not need a second inspect just to see what they are doing.
 2. Use `inspect` on the most relevant pane to get real foreground process, recent activity age, and raw `preview`.
 3. Use `watch` when you need a bounded polling loop that only reports meaningful changes across a pane or session. It now emits compact events with `changed` and `new_lines`.
 4. Use `capture` when you need a larger raw scrollback.
@@ -47,6 +47,7 @@ Use this skill when the target terminal lives inside `tmux`. Prefer it over desk
 
 - `survey` uses `tmux` metadata plus the pane TTY foreground process from `ps`, which is usually more accurate than `pane_current_command` alone.
 - `inspect` and `survey` return a compact pane view by default. Raw pane metadata stays available through `list_panes`; `inspect` still includes `preview`.
+- Prefer `survey` for user-facing answers: it already groups panes by state and gives a top-level summary, so avoid repeating raw process bookkeeping unless the user asked for it.
 - `watch` is intentionally finite. It polls and returns `initial`, `events`, `final`, and `summary`; it does not run as a background daemon.
 - `watch --silence-secs N` stops early after `N` seconds with no meaningful change, which is useful when a pane settles back into a prompt or a long-running task goes quiet.
 - `send_keys` accepts repeated `--keys`, comma-separated keys, whitespace-separated keys, and `--repeat` for repeated key presses.

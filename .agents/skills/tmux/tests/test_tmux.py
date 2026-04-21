@@ -101,6 +101,27 @@ class TestInspectAndSurvey:
             result = _MOD.inspect({"target": "%7", "lines": 5})
         assert result["pane"]["state"] == "idle"
 
+    def test_inspect_filters_ui_noise_and_path_refs_from_content(self):
+        pane_stdout = "work\t1\t2\t%7\t/dev/ttys001\tnode\t\tpane\t/tmp\t10\t1\t100\t1\t0\n"
+        preview = "\n".join(
+            [
+                "docs/experience/errors/2026-04-21-metal.md:1",
+                "■ Conversation interrupted - tell the model what to do differently.",
+                "真正的结论：waiting queue 的 consume_one 时机不对。",
+                "1 background terminal running · /ps to view · /stop to close",
+            ]
+        )
+        with (
+            patch.object(_MOD, "_capture_text", return_value={"success": True, "stdout": preview}),
+            patch.object(_MOD, "_ps_rows", return_value=[{"pid": 1, "pgid": 2, "tpgid": 2, "stat": "S+", "command": "node codex"}]),
+            patch.object(_MOD.subprocess, "run", return_value=_completed(stdout=pane_stdout)),
+            patch.object(_MOD.time, "time", return_value=110),
+        ):
+            result = _MOD.inspect({"target": "%7", "lines": 5})
+        pane = result["pane"]
+        assert pane["focus_line"] == "真正的结论：waiting queue 的 consume_one 时机不对。"
+        assert pane["content_lines"] == ["真正的结论：waiting queue 的 consume_one 时机不对。"]
+
     def test_survey_filters_session_and_sorts_by_recent_activity(self):
         pane_stdout = (
             "a\t1\t1\t%1\t/dev/ttys001\tzsh\t\tone\t/tmp\t1\t1\t100\t1\t0\n"
@@ -109,7 +130,8 @@ class TestInspectAndSurvey:
         )
 
         def _capture(target, _lines):
-            return {"success": True, "stdout": f"preview:{target}"}
+            text = "doing work" if target == "a:1.2" else "sh-3.2$ "
+            return {"success": True, "stdout": text}
 
         def _ps_rows(tty):
             return [{"pid": 1, "pgid": 2, "tpgid": 2, "stat": "S+", "command": "node" if tty.endswith("002") else "zsh"}]
@@ -124,8 +146,10 @@ class TestInspectAndSurvey:
 
         assert result["success"] is True
         assert result["count"] == 2
-        assert [pane["pane_id"] for pane in result["panes"]] == ["%3", "%1"]
-        assert [pane["worth_messaging"] for pane in result["panes"]] == [False, True]
+        assert result["running"][0]["pane_id"] == "%3"
+        assert result["running"][0]["content_lines"] == ["doing work"]
+        assert result["idle"][0]["pane_id"] == "%1"
+        assert "panes" not in result
 
 
 class TestWatch:
@@ -190,6 +214,51 @@ class TestWatch:
             result = _MOD.watch({"target": "%7", "ticks": 5, "interval": 1, "lines": 5, "silence_secs": 2})
         assert result["success"] is True
         assert result["stop_reason"] == "silence"
+
+    def test_watch_new_lines_handles_sliding_window(self):
+        snapshots = [
+            {"success": True, "pane": {"target": "7:1.1", "pane_id": "%7", "path": "/tmp", "activity_age_secs": 0, "state": "active", "work_kind": "process", "foreground_command": "python", "focus_line": "c", "prompt_line": "", "status_line": "", "signals": [], "summary": "active", "worth_messaging": False, "messaging_reason": "busy", "key_lines": ["c"], "preview": "a\nb\nc", "last_line": "c"}},
+            {"success": True, "pane": {"target": "7:1.1", "pane_id": "%7", "path": "/tmp", "activity_age_secs": 1, "state": "active", "work_kind": "process", "foreground_command": "python", "focus_line": "d", "prompt_line": "", "status_line": "", "signals": [], "summary": "active", "worth_messaging": False, "messaging_reason": "busy", "key_lines": ["d"], "preview": "b\nc\nd", "last_line": "d"}},
+        ]
+        with (
+            patch.object(_MOD, "_watch_snapshot", side_effect=snapshots),
+            patch.object(_MOD.time, "sleep", return_value=None),
+        ):
+            result = _MOD.watch({"target": "%7", "ticks": 2, "interval": 1, "lines": 3})
+        assert result["events"][0]["new_lines"] == ["d"]
+        assert "preview" not in result["final"]
+
+    def test_watch_target_missing_returns_dead_final(self):
+        first = {
+            "success": True,
+            "pane": {
+                "target": "7:1.1",
+                "pane_id": "%7",
+                "path": "/tmp",
+                "activity_age_secs": 0,
+                "state": "active",
+                "work_kind": "process",
+                "foreground_command": "python",
+                "focus_line": "running",
+                "prompt_line": "",
+                "status_line": "",
+                "signals": [],
+                "summary": "active",
+                "worth_messaging": False,
+                "messaging_reason": "busy",
+                "key_lines": ["running"],
+                "preview": "running",
+                "last_line": "running",
+            },
+        }
+        with (
+            patch.object(_MOD, "_watch_snapshot", side_effect=[first, {"success": False, "error": "pane not found: %7"}]),
+            patch.object(_MOD.time, "sleep", return_value=None),
+        ):
+            result = _MOD.watch({"target": "%7", "ticks": 2, "interval": 1, "lines": 5})
+        assert result["success"] is True
+        assert result["stop_reason"] == "missing"
+        assert result["final"]["state"] == "dead"
 
 
 class TestSendText:
