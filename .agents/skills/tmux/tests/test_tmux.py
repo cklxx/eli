@@ -336,6 +336,23 @@ class TestSendText:
         assert result["success"] is True
         assert calls == [["tmux", "send-keys", "-t", "%5", "-l", "pwd"]]
 
+    def test_send_text_turns_embedded_newlines_into_enter_keys(self):
+        calls: list[list[str]] = []
+
+        def _fake_run(command, **_kwargs):
+            calls.append(command)
+            return _completed()
+
+        with patch.object(_MOD.subprocess, "run", side_effect=_fake_run):
+            result = _MOD.send_text({"target": "%5", "text": "printf one\nprintf two", "enter": False})
+
+        assert result["success"] is True
+        assert calls == [
+            ["tmux", "send-keys", "-t", "%5", "-l", "printf one"],
+            ["tmux", "send-keys", "-t", "%5", "Enter"],
+            ["tmux", "send-keys", "-t", "%5", "-l", "printf two"],
+        ]
+
 
 class TestSendKeys:
     def test_send_keys_uses_explicit_keys(self):
@@ -440,6 +457,33 @@ class TestSendCommand:
         assert result["launch_keys"] == ["C-m"]
         assert result["feedback"]["worth_messaging"] is True
         sleep_mock.assert_called_once_with(0.0)
+
+    def test_send_command_skips_default_launch_when_text_already_ends_with_newline(self):
+        with (
+            patch.object(_MOD, "send_text", return_value={"success": True}) as send_text_mock,
+            patch.object(_MOD, "_send_keys_repeat", return_value={"success": True}) as send_keys_mock,
+            patch.object(
+                _MOD,
+                "inspect",
+                return_value={
+                    "success": True,
+                    "pane": {
+                        "state": "idle",
+                        "summary": "Idle shell pane.",
+                        "content_lines": ["done"],
+                        "status_line": "",
+                        "worth_messaging": True,
+                    },
+                },
+            ),
+            patch.object(_MOD.time, "sleep", return_value=None),
+        ):
+            result = _MOD.send_command({"target": "%5", "text": "printf hi\n", "lines": 8})
+
+        assert result["success"] is True
+        assert result["launch_keys"] == []
+        send_text_mock.assert_called_once_with({"target": "%5", "text": "printf hi\n", "enter": False})
+        send_keys_mock.assert_called_once_with("%5", [], 1)
 
 
 class TestMainRouting:

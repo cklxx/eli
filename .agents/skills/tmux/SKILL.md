@@ -109,6 +109,7 @@ Preferred follow-up prompts:
 - `watch` is intentionally finite. It polls and returns `initial`, `events`, `final`, and `summary`; it does not run as a background daemon.
 - `watch --silence-secs N` stops early after `N` seconds with no meaningful change, which is useful when a pane settles back into a prompt or a long-running task goes quiet.
 - `send_command` is the default choice for "run this in the pane and tell me what happened". It sends the text, launches it with `Enter` by default, then returns feedback from `inspect`.
+- For `send_text` and `send_command`, embedded newlines in `--text` are treated as real `Enter` key presses. Do not rely on literal `\\r` or `\\n` bytes to trigger execution inside tmux.
 - `send_keys` accepts repeated `--keys`, comma-separated keys, whitespace-separated keys, and `--repeat` for repeated key presses.
 
 ## Boundaries

@@ -900,11 +900,31 @@ def send_text(args: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "error": "target is required"}
     if text == "":
         return {"success": False, "error": "text is required"}
-    result = _tmux(["send-keys", "-t", target, "-l", text])
-    if not result["success"] or args.get("enter", True) is False:
-        return _send_text_result(result, target, text, args)
-    enter = _tmux(["send-keys", "-t", target, "Enter"])
-    return _send_text_result(enter, target, text, args)
+    result = _send_text_sequence(target, text, args.get("enter", True))
+    return _send_text_result(result, target, text, args)
+
+
+def _send_text_sequence(target: str, text: str, final_enter: bool) -> dict[str, Any]:
+    parts = re.split(r"\r\n|\r|\n", text)
+    for index, part in enumerate(parts):
+        result = _send_literal_part(target, part)
+        if not result["success"]:
+            return result
+        if _needs_enter(index, parts, final_enter):
+            result = _tmux(["send-keys", "-t", target, "Enter"])
+            if not result["success"]:
+                return result
+    return {"success": True}
+
+
+def _send_literal_part(target: str, part: str) -> dict[str, Any]:
+    if part == "":
+        return {"success": True}
+    return _tmux(["send-keys", "-t", target, "-l", part])
+
+
+def _needs_enter(index: int, parts: list[str], final_enter: bool) -> bool:
+    return index < len(parts) - 1 or final_enter
 
 
 def _send_text_result(
@@ -923,7 +943,7 @@ def send_command(args: dict[str, Any]) -> dict[str, Any]:
     text = _text(args)
     lines = _lines(args)
     wait_secs = _wait_secs(args)
-    launch_keys = _keys(args) or ["Enter"]
+    launch_keys = _launch_keys(args, text)
     if not target:
         return {"success": False, "error": "target is required"}
     if text == "":
@@ -969,6 +989,13 @@ def _command_feedback(
     }
 
 
+def _launch_keys(args: dict[str, Any], text: str) -> list[str]:
+    explicit = _keys(args)
+    if explicit:
+        return explicit
+    return [] if text.endswith(("\r", "\n")) else ["Enter"]
+
+
 def send_keys(args: dict[str, Any]) -> dict[str, Any]:
     target = _target(args)
     keys = _keys(args)
@@ -986,6 +1013,8 @@ def send_keys(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _send_keys_repeat(target: str, keys: list[str], repeat: int) -> dict[str, Any]:
+    if not keys:
+        return {"success": True}
     for _ in range(repeat):
         result = _tmux(["send-keys", "-t", target, *keys])
         if not result["success"]:
