@@ -24,7 +24,7 @@ Use this skill when the target terminal lives inside `tmux`. Prefer it over desk
 | List panes | `$PYTHON $SKILL_DIR/run.py list_panes` | none |
 | Survey pane activity | `$PYTHON $SKILL_DIR/run.py survey --session 7 --lines 8` | `--session`, `--lines` |
 | Inspect one pane | `$PYTHON $SKILL_DIR/run.py inspect --target %5 --lines 20` | `--target`, `--lines` |
-| Watch for changes | `$PYTHON $SKILL_DIR/run.py watch --target %5 --ticks 6 --interval 2 --lines 6` | `--target` or `--session`, `--ticks`, `--interval`, `--lines` |
+| Watch for changes | `$PYTHON $SKILL_DIR/run.py watch --target %5 --ticks 6 --interval 2 --lines 6 --silence-secs 4` | `--target` or `--session`, `--ticks`, `--interval`, `--lines`, `--silence-secs` |
 | Capture pane text | `$PYTHON $SKILL_DIR/run.py capture --target 5:1.1 --lines 80` | `--target`, `--lines` |
 | Send literal text | `$PYTHON $SKILL_DIR/run.py send_text --target %5 --text 'cargo test'` | `--target`, `--text`, `--no-enter` |
 | Send tmux keys | `$PYTHON $SKILL_DIR/run.py send_keys --target %5 --keys C-c,Enter --repeat 2` | `--target`, repeated `--keys`, `--repeat` |
@@ -33,7 +33,7 @@ Use this skill when the target terminal lives inside `tmux`. Prefer it over desk
 
 1. Run `survey` first when the current information is insufficient; it returns a compact decision view with `state`, `worth_messaging`, `summary`, `focus_line`, `prompt_line`, `status_line`, and `key_lines`.
 2. Use `inspect` on the most relevant pane to get real foreground process, recent activity age, and raw `preview`.
-3. Use `watch` when you need a bounded polling loop that only reports meaningful changes across a pane or session.
+3. Use `watch` when you need a bounded polling loop that only reports meaningful changes across a pane or session. It now emits compact events with `changed` and `new_lines`.
 4. Use `capture` when you need a larger raw scrollback.
 5. Use `send_text` for commands and `send_keys` for control sequences such as `Enter` or `C-c`.
 
@@ -48,6 +48,7 @@ Use this skill when the target terminal lives inside `tmux`. Prefer it over desk
 - `survey` uses `tmux` metadata plus the pane TTY foreground process from `ps`, which is usually more accurate than `pane_current_command` alone.
 - `inspect` and `survey` return a compact pane view by default. Raw pane metadata stays available through `list_panes`; `inspect` still includes `preview`.
 - `watch` is intentionally finite. It polls and returns `initial`, `events`, `final`, and `summary`; it does not run as a background daemon.
+- `watch --silence-secs N` stops early after `N` seconds with no meaningful change, which is useful when a pane settles back into a prompt or a long-running task goes quiet.
 - `send_keys` accepts repeated `--keys`, comma-separated keys, whitespace-separated keys, and `--repeat` for repeated key presses.
 
 ## Boundaries

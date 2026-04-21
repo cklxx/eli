@@ -176,6 +176,16 @@ def _repeat(args: dict[str, Any]) -> int | None:
     return value if value > 0 else None
 
 
+def _silence_secs(args: dict[str, Any]) -> float | None:
+    if "silence_secs" not in args:
+        return None
+    try:
+        value = float(args.get("silence_secs"))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def _pane_record(line: str) -> dict[str, Any]:
     values = dict(zip(_PANE_FIELDS, line.split("\t"), strict=False))
     return {
@@ -488,6 +498,10 @@ def _compact_pane_view(pane: dict[str, Any]) -> dict[str, Any]:
     return compact | {"preview": pane["preview"]} if "preview" in pane else compact
 
 
+def _find_pane(panes: list[dict[str, Any]], target: str) -> dict[str, Any] | None:
+    return next((pane for pane in panes if target in {pane["pane_id"], _target_of(pane)}), None)
+
+
 def list_panes(_: dict[str, Any]) -> dict[str, Any]:
     result = _tmux(["list-panes", "-a", "-F", _PANE_FORMAT])
     if not result["success"]:
@@ -519,7 +533,7 @@ def inspect(args: dict[str, Any]) -> dict[str, Any]:
     panes = list_panes({})
     if not panes["success"]:
         return panes
-    pane = next((pane for pane in panes["panes"] if target in {pane["pane_id"], _target_of(pane)}), None)
+    pane = _find_pane(panes["panes"], target)
     if pane is None:
         return {"success": False, "error": f"pane not found: {target}"}
     return {"success": True, "pane": _compact_pane_view(_inspect_pane(pane, lines, include_preview=True))}
@@ -539,8 +553,35 @@ def survey(args: dict[str, Any]) -> dict[str, Any]:
     return {"success": True, "count": len(ordered), "panes": ordered}
 
 
-def _watch_snapshot(args: dict[str, Any]) -> dict[str, Any]:
-    return inspect(args) if _target(args) else survey(args)
+def _watch_snapshot(args: dict[str, Any], lines: int) -> dict[str, Any]:
+    panes = list_panes({})
+    if not panes["success"]:
+        return panes
+    target = _target(args)
+    if target:
+        return _watch_target_snapshot(panes["panes"], target, lines)
+    return _watch_session_snapshot(panes["panes"], _session(args), lines)
+
+
+def _watch_target_snapshot(
+    panes: list[dict[str, Any]],
+    target: str,
+    lines: int,
+) -> dict[str, Any]:
+    pane = _find_pane(panes, target)
+    if pane is None:
+        return {"success": False, "error": f"pane not found: {target}"}
+    return {"success": True, "pane": _inspect_pane(pane, lines, include_preview=True)}
+
+
+def _watch_session_snapshot(
+    panes: list[dict[str, Any]],
+    session: str,
+    lines: int,
+) -> dict[str, Any]:
+    items = [pane for pane in panes if not session or pane["session"] == session]
+    watched = [_inspect_pane(pane, lines, include_preview=False) for pane in items]
+    return {"success": True, "panes": watched}
 
 
 def _watch_items(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -551,6 +592,7 @@ def _watch_fingerprint(pane: dict[str, Any]) -> tuple[Any, ...]:
     return (
         pane["state"],
         pane["foreground_command"],
+        pane.get("last_line", ""),
         pane.get("focus_line", ""),
         pane.get("prompt_line", ""),
         tuple(pane.get("signals", [])),
@@ -558,21 +600,42 @@ def _watch_fingerprint(pane: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def _watch_event(tick: int, pane: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    new_lines = _watch_new_lines(previous, pane)
     return {
         "tick": tick,
         "target": pane["target"],
         "state": pane["state"],
         "worth_messaging": pane["worth_messaging"],
         "summary": pane["summary"],
-        "changed": _changed_fields(pane, previous),
+        "changed": _changed_fields(pane, previous, new_lines),
         "focus_line": pane.get("focus_line", ""),
         "status_line": pane.get("status_line", ""),
+        "new_lines": new_lines,
     }
 
 
-def _changed_fields(current: dict[str, Any], previous: dict[str, Any]) -> list[str]:
+def _changed_fields(
+    current: dict[str, Any],
+    previous: dict[str, Any],
+    new_lines: list[str],
+) -> list[str]:
     fields = ("state", "foreground_command", "focus_line", "prompt_line", "status_line", "signals")
-    return [field for field in fields if current.get(field) != previous.get(field)]
+    changed = [field for field in fields if current.get(field) != previous.get(field)]
+    return changed + (["new_lines"] if new_lines else [])
+
+
+def _watch_new_lines(previous: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    earlier = _content_lines(previous.get("preview", ""))
+    later = _content_lines(current.get("preview", ""))
+    index = _common_prefix_len(earlier, later)
+    return [_shorten_line(line) for line in later[index:index + 3]]
+
+
+def _common_prefix_len(left: list[str], right: list[str]) -> int:
+    index = 0
+    while index < min(len(left), len(right)) and left[index] == right[index]:
+        index += 1
+    return index
 
 
 def _watch_summary(events: list[dict[str, Any]], final_items: list[dict[str, Any]]) -> str:
@@ -580,21 +643,28 @@ def _watch_summary(events: list[dict[str, Any]], final_items: list[dict[str, Any
         return "No panes matched watch target."
     changed = len(events)
     active = sum(1 for item in final_items if item["state"] == "active")
-    latest = next((item.get("focus_line") or item.get("status_line") for item in final_items if item.get("focus_line") or item.get("status_line")), "")
+    latest = _watch_latest(events, final_items)
     summary = f"Observed {changed} change(s); {active} pane(s) still active."
     return f"{summary} Latest: {latest}" if latest else summary
+
+
+def _watch_latest(events: list[dict[str, Any]], final_items: list[dict[str, Any]]) -> str:
+    if events and events[-1]["new_lines"]:
+        return events[-1]["new_lines"][-1]
+    return next((item.get("focus_line") or item.get("status_line") for item in final_items if item.get("focus_line") or item.get("status_line")), "")
 
 
 def watch(args: dict[str, Any]) -> dict[str, Any]:
     lines = _lines(args)
     ticks = _ticks(args)
     interval = _interval(args)
-    if lines is None or ticks is None or interval is None:
-        return {"success": False, "error": "lines, ticks, and interval must be positive"}
-    initial = _watch_snapshot(args | {"lines": lines})
+    silence_secs = _silence_secs(args)
+    if lines is None or ticks is None or interval is None or ("silence_secs" in args and silence_secs is None):
+        return {"success": False, "error": "lines, ticks, interval, and silence_secs must be positive"}
+    initial = _watch_snapshot(args, lines)
     if not initial["success"]:
         return initial
-    return _watch_loop(args, initial, lines, ticks, interval)
+    return _watch_loop(args, initial, lines, ticks, interval, silence_secs)
 
 
 def _watch_loop(
@@ -603,21 +673,27 @@ def _watch_loop(
     lines: int,
     ticks: int,
     interval: float,
+    silence_secs: float | None,
 ) -> dict[str, Any]:
     previous = {pane["target"]: pane for pane in _watch_items(initial)}
     events: list[dict[str, Any]] = []
     current = initial
+    stopped_reason = "ticks_exhausted"
+    quiet_for = 0.0
     for tick in range(1, ticks):
         time.sleep(interval)
-        current = _watch_snapshot(args | {"lines": lines})
+        current = _watch_snapshot(args, lines)
         if not current["success"]:
             return current
-        events.extend(_watch_changes(previous, _watch_items(current), tick, args))
+        raw_events = _watch_changes(previous, _watch_items(current), tick, args)
+        quiet_for = 0.0 if raw_events else quiet_for + interval
+        events.extend(raw_events)
         previous = {pane["target"]: pane for pane in _watch_items(current)}
-        if _stop_on_idle(args, current):
+        stopped_reason = _stop_reason(args, current, quiet_for, silence_secs)
+        if stopped_reason:
             break
     final_items = _watch_items(current)
-    return _watch_result(initial, current, events, final_items, ticks, interval)
+    return _watch_result(initial, current, events, final_items, ticks, interval, stopped_reason or "ticks_exhausted")
 
 
 def _watch_changes(
@@ -630,8 +706,17 @@ def _watch_changes(
     return [event for event in events if not args.get("active_only") or event["state"] == "active"]
 
 
-def _stop_on_idle(args: dict[str, Any], snapshot: dict[str, Any]) -> bool:
-    return bool(args.get("stop_on_idle")) and any(pane["state"] == "idle" for pane in _watch_items(snapshot))
+def _stop_reason(
+    args: dict[str, Any],
+    snapshot: dict[str, Any],
+    quiet_for: float,
+    silence_secs: float | None,
+) -> str | None:
+    if bool(args.get("stop_on_idle")) and any(pane["state"] == "idle" for pane in _watch_items(snapshot)):
+        return "idle"
+    if silence_secs is not None and quiet_for >= silence_secs:
+        return "silence"
+    return None
 
 
 def _watch_result(
@@ -641,17 +726,25 @@ def _watch_result(
     final_items: list[dict[str, Any]],
     ticks: int,
     interval: float,
+    stop_reason: str,
 ) -> dict[str, Any]:
     return {
         "success": True,
         "mode": "target" if "pane" in initial else "session",
         "ticks": ticks,
         "interval_secs": interval,
-        "initial": initial.get("pane", initial.get("panes", [])),
+        "stop_reason": stop_reason,
+        "initial": _watch_compact(initial),
         "events": events,
-        "final": current.get("pane", current.get("panes", [])),
+        "final": _watch_compact(current),
         "summary": _watch_summary(events, final_items),
     }
+
+
+def _watch_compact(snapshot: dict[str, Any]) -> dict[str, Any] | list[dict[str, Any]]:
+    if "pane" in snapshot:
+        return _compact_pane_view(snapshot["pane"])
+    return [_compact_pane_view(pane) for pane in snapshot["panes"]]
 
 
 def send_text(args: dict[str, Any]) -> dict[str, Any]:

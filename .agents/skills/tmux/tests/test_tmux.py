@@ -131,8 +131,8 @@ class TestInspectAndSurvey:
 class TestWatch:
     def test_watch_reports_changes_for_target(self):
         snapshots = [
-            {"success": True, "pane": {"target": "7:1.1", "state": "active", "foreground_command": "node codex", "focus_line": "step one", "prompt_line": "", "status_line": "", "signals": [], "summary": "active", "worth_messaging": False}},
-            {"success": True, "pane": {"target": "7:1.1", "state": "idle", "foreground_command": "zsh", "focus_line": "done", "prompt_line": "", "status_line": "", "signals": ["waiting"], "summary": "idle", "worth_messaging": True}},
+            {"success": True, "pane": {"target": "7:1.1", "pane_id": "%7", "path": "/tmp", "activity_age_secs": 0, "state": "active", "work_kind": "codex", "foreground_command": "node codex", "focus_line": "step one", "prompt_line": "", "status_line": "", "signals": [], "summary": "active", "worth_messaging": False, "messaging_reason": "busy", "key_lines": ["step one"], "preview": "step one", "last_line": "step one"}},
+            {"success": True, "pane": {"target": "7:1.1", "pane_id": "%7", "path": "/tmp", "activity_age_secs": 1, "state": "idle", "work_kind": "shell", "foreground_command": "zsh", "focus_line": "watch-b", "prompt_line": "", "status_line": "", "signals": ["waiting"], "summary": "idle", "worth_messaging": True, "messaging_reason": "safe", "key_lines": ["watch-b"], "preview": "step one\nwatch-b", "last_line": "watch-b"}},
         ]
         with (
             patch.object(_MOD, "_watch_snapshot", side_effect=snapshots),
@@ -142,14 +142,15 @@ class TestWatch:
         assert result["success"] is True
         assert result["mode"] == "target"
         assert len(result["events"]) == 1
-        assert result["events"][0]["changed"] == ["state", "foreground_command", "focus_line", "signals"]
-        assert "pane" not in result["events"][0]
+        assert result["events"][0]["changed"] == ["state", "foreground_command", "focus_line", "signals", "new_lines"]
+        assert result["events"][0]["new_lines"] == ["watch-b"]
         assert result["final"]["state"] == "idle"
+        assert result["stop_reason"] == "idle"
 
     def test_watch_active_only_filters_idle_changes(self):
         snapshots = [
-            {"success": True, "panes": [{"target": "4:1.1", "state": "active", "foreground_command": "node codex", "focus_line": "step one", "prompt_line": "", "status_line": "", "signals": [], "summary": "active", "worth_messaging": False}]},
-            {"success": True, "panes": [{"target": "4:1.1", "state": "idle", "foreground_command": "zsh", "focus_line": "done", "prompt_line": "", "status_line": "", "signals": [], "summary": "idle", "worth_messaging": True}]},
+            {"success": True, "panes": [{"target": "4:1.1", "pane_id": "%4", "path": "/tmp", "activity_age_secs": 0, "state": "active", "work_kind": "codex", "foreground_command": "node codex", "focus_line": "step one", "prompt_line": "", "status_line": "", "signals": [], "summary": "active", "worth_messaging": False, "messaging_reason": "busy", "key_lines": ["step one"], "last_line": "step one"}]},
+            {"success": True, "panes": [{"target": "4:1.1", "pane_id": "%4", "path": "/tmp", "activity_age_secs": 1, "state": "idle", "work_kind": "shell", "foreground_command": "zsh", "focus_line": "done", "prompt_line": "", "status_line": "", "signals": [], "summary": "idle", "worth_messaging": True, "messaging_reason": "safe", "key_lines": ["done"], "last_line": "done"}]},
         ]
         with (
             patch.object(_MOD, "_watch_snapshot", side_effect=snapshots),
@@ -158,6 +159,37 @@ class TestWatch:
             result = _MOD.watch({"session": "4", "ticks": 2, "interval": 1, "lines": 5, "active_only": True})
         assert result["success"] is True
         assert result["events"] == []
+
+    def test_watch_stops_after_silence_window(self):
+        snapshot = {
+            "success": True,
+            "pane": {
+                "target": "7:1.1",
+                "pane_id": "%7",
+                "path": "/tmp",
+                "activity_age_secs": 0,
+                "state": "active",
+                "work_kind": "process",
+                "foreground_command": "python job",
+                "focus_line": "watch-a",
+                "prompt_line": "",
+                "status_line": "",
+                "signals": [],
+                "summary": "active",
+                "worth_messaging": False,
+                "messaging_reason": "busy",
+                "key_lines": ["watch-a"],
+                "preview": "watch-a",
+                "last_line": "watch-a",
+            },
+        }
+        with (
+            patch.object(_MOD, "_watch_snapshot", side_effect=[snapshot, snapshot, snapshot]),
+            patch.object(_MOD.time, "sleep", return_value=None),
+        ):
+            result = _MOD.watch({"target": "%7", "ticks": 5, "interval": 1, "lines": 5, "silence_secs": 2})
+        assert result["success"] is True
+        assert result["stop_reason"] == "silence"
 
 
 class TestSendText:
