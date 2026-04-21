@@ -108,7 +108,7 @@ class TestInspectAndSurvey:
                 "docs/experience/errors/2026-04-21-metal.md:1",
                 "■ Conversation interrupted - tell the model what to do differently.",
                 "真正的结论：waiting queue 的 consume_one 时机不对。",
-                "1 background terminal running · /ps to view · /stop to close",
+                "2 background terminals running · /ps to view · /stop to close",
             ]
         )
         with (
@@ -121,6 +121,53 @@ class TestInspectAndSurvey:
         pane = result["pane"]
         assert pane["focus_line"] == "真正的结论：waiting queue 的 consume_one 时机不对。"
         assert pane["content_lines"] == ["真正的结论：waiting queue 的 consume_one 时机不对。"]
+
+    def test_inspect_filters_low_signal_command_traces_from_content(self):
+        pane_stdout = "work\t1\t2\t%7\t/dev/ttys001\tnode\t\tpane\t/tmp\t10\t1\t100\t1\t0\n"
+        preview = "\n".join(
+            [
+                "• Ran git show HEAD",
+                "└ Search max_batch_tokens in scheduler.rs",
+                "List scheduler",
+                "└ (no output)",
+                "真正的动作：把 shared token budget 改成 decode/prefill 共用。",
+            ]
+        )
+        with (
+            patch.object(_MOD, "_capture_text", return_value={"success": True, "stdout": preview}),
+            patch.object(_MOD, "_ps_rows", return_value=[{"pid": 1, "pgid": 2, "tpgid": 2, "stat": "S+", "command": "node codex"}]),
+            patch.object(_MOD.subprocess, "run", return_value=_completed(stdout=pane_stdout)),
+            patch.object(_MOD.time, "time", return_value=110),
+        ):
+            result = _MOD.inspect({"target": "%7", "lines": 5})
+        pane = result["pane"]
+        assert pane["focus_line"] == "真正的动作：把 shared token budget 改成 decode/prefill 共用。"
+        assert pane["content_lines"] == ["真正的动作：把 shared token budget 改成 decode/prefill 共用。"]
+
+    def test_inspect_prefers_prompt_and_latest_content_in_summary(self):
+        pane_stdout = "work\t1\t2\t%7\t/dev/ttys001\tnode\t\tpane\t/tmp\t10\t1\t100\t1\t0\n"
+        preview = "\n".join(
+            [
+                "› Run /review on my current changes",
+                "max_waiting_requests|SchedulerHandle|Continuous batching|prefix cache in scheduler",
+                "└ ## main...origin/main [ahead 1]",
+                "M crates/cuda-kernels/src/paged_kv.rs",
+                "关键结论：scheduler smoke 已经跑通，剩下并发压测。",
+                "关键结论：scheduler smoke 已经跑通，剩下并发压测。",
+                "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+            ]
+        )
+        with (
+            patch.object(_MOD, "_capture_text", return_value={"success": True, "stdout": preview}),
+            patch.object(_MOD, "_ps_rows", return_value=[{"pid": 1, "pgid": 2, "tpgid": 2, "stat": "S+", "command": "node codex"}]),
+            patch.object(_MOD.subprocess, "run", return_value=_completed(stdout=pane_stdout)),
+            patch.object(_MOD.time, "time", return_value=110),
+        ):
+            result = _MOD.inspect({"target": "%7", "lines": 5})
+        pane = result["pane"]
+        assert pane["content_lines"] == ["关键结论：scheduler smoke 已经跑通，剩下并发压测。"]
+        assert "Task: Run /review on my current changes." in pane["summary"]
+        assert "Latest: 关键结论：scheduler smoke 已经跑通，剩下并发压测。" in pane["summary"]
 
     def test_survey_filters_session_and_sorts_by_recent_activity(self):
         pane_stdout = (

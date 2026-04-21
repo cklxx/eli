@@ -75,7 +75,7 @@ _NOISE_MARKERS = (
     "read ",
     "if the browser didn't open",
     "conversation interrupted",
-    "background terminal running",
+    "background terminal",
     "ctrl + t to view transcript",
     "print help",
 )
@@ -298,11 +298,13 @@ def _line_kind(line: str) -> str:
 
 
 def _content_lines(text: str) -> list[str]:
-    return [line for line in _meaningful_lines(text) if _line_kind(line) == "content"]
+    lines = [line for line in _meaningful_lines(text) if _line_kind(line) == "content"]
+    filtered = [line for line in lines if not _looks_low_signal_content(line)]
+    return filtered or lines
 
 
 def _content_excerpt(text: str, limit: int = 3) -> list[str]:
-    return [_shorten_line(line) for line in _content_lines(text)[-limit:]]
+    return [_shorten_line(line) for line in _dedupe(_content_lines(text))[-limit:]]
 
 
 def _last_of_kind(text: str, kind: str) -> str:
@@ -384,7 +386,46 @@ def _looks_like_codeish(line: str) -> bool:
 
 def _looks_like_reference(line: str) -> bool:
     stripped = line.strip()
-    return bool(re.search(r"\.(md|rs|py|zig|toml|json):\d+\b", stripped)) or stripped in {"-h, --help", "--help"}
+    path_like = re.search(r"[\w./-]+\.(md|rs|py|zig|toml|json)\b", stripped)
+    return bool(re.search(r"\.(md|rs|py|zig|toml|json):\d+\b", stripped) or (path_like and " " not in stripped)) or stripped in {"-h, --help", "--help"}
+
+
+def _looks_like_imperative_trace(line: str) -> bool:
+    return bool(re.match(r"^(list|search|find|read|open|grep|rg)\b", line.strip(), re.IGNORECASE)) and len(line.strip()) <= 48
+
+
+def _looks_like_topic_list(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.count("|") >= 2 and not any(mark in stripped for mark in ".。!?！？:：")
+
+
+def _without_trace_prefix(line: str) -> str:
+    return re.sub(r"^[└├│• ]+", "", line.strip())
+
+
+def _looks_like_empty_test_result(line: str) -> bool:
+    lowered = line.strip().lower()
+    return lowered.startswith("test result: ok.") and "0 passed" in lowered and "0 failed" in lowered
+
+
+def _looks_like_git_status(line: str) -> bool:
+    stripped = _without_trace_prefix(line)
+    return stripped.startswith("## ") or bool(re.match(r"^(M|A|D|R|UU|\?\?)\s+\S+", stripped))
+
+
+def _looks_low_signal_content(line: str) -> bool:
+    stripped = _without_trace_prefix(line)
+    lowered = stripped.lower()
+    prefixes = ("ran ", "search ", "(no output)", "searched ", "searching the web", "explored")
+    return (
+        lowered.startswith(prefixes)
+        or _looks_like_reference(stripped)
+        or _looks_like_imperative_trace(stripped)
+        or _looks_like_topic_list(stripped)
+        or _looks_like_empty_test_result(stripped)
+        or _looks_like_git_status(stripped)
+        or bool(re.fullmatch(r"[0-9() /-]+", stripped))
+    )
 
 
 def _looks_idle(preview: str, foreground_name: str, activity_age: int | None) -> bool:
@@ -434,7 +475,8 @@ def _summary(
     state: str,
     kind: str,
     signals: list[str],
-    focus_line: str,
+    prompt_line: str,
+    headline: str,
     status_line: str,
 ) -> str:
     if state == "dead":
@@ -442,8 +484,10 @@ def _summary(
     summary = f'{"Idle" if state == "idle" else "Active"} {kind} pane.'
     if signals:
         summary += f" Signals: {', '.join(signals)}."
-    if focus_line:
-        summary += f" Focus: {focus_line}"
+    if prompt_line:
+        summary += f" Task: {prompt_line.removeprefix('› ').strip()}."
+    if headline:
+        summary += f" Latest: {headline}"
     elif status_line:
         summary += f" Status: {status_line}"
     return summary
@@ -467,6 +511,7 @@ def _inspect_pane(pane: dict[str, Any], lines: int, include_preview: bool) -> di
     extra_lines = [line for line in _key_lines(output) if line not in {prompt_line, focus_line, status_line}]
     key_lines = _dedupe([prompt_line, focus_line, status_line, *extra_lines])[:4]
     kind = _work_kind(foreground["command"], signals)
+    headline = content_lines[-1] if content_lines else focus_line
     pane_view = {
         **pane,
         "target": target,
@@ -477,7 +522,7 @@ def _inspect_pane(pane: dict[str, Any], lines: int, include_preview: bool) -> di
         "work_kind": kind,
         "worth_messaging": worth_messaging,
         "messaging_reason": reason,
-        "summary": _summary(state, kind, signals, focus_line, status_line),
+        "summary": _summary(state, kind, signals, prompt_line, headline, status_line),
         "signals": signals,
         "last_line": last_line,
         "focus_line": focus_line,
