@@ -190,6 +190,16 @@ def _silence_secs(args: dict[str, Any]) -> float | None:
     return value if value > 0 else None
 
 
+def _wait_secs(args: dict[str, Any], default: float = 0.5) -> float | None:
+    if "wait_secs" not in args:
+        return default
+    try:
+        value = float(args.get("wait_secs"))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
 def _pane_record(line: str) -> dict[str, Any]:
     values = dict(zip(_PANE_FIELDS, line.split("\t"), strict=False))
     return {
@@ -908,6 +918,57 @@ def _send_text_result(
     return {"success": True, "target": target, "text": text, "enter": args.get("enter", True)}
 
 
+def send_command(args: dict[str, Any]) -> dict[str, Any]:
+    target = _target(args)
+    text = _text(args)
+    lines = _lines(args)
+    wait_secs = _wait_secs(args)
+    launch_keys = _keys(args) or ["Enter"]
+    if not target:
+        return {"success": False, "error": "target is required"}
+    if text == "":
+        return {"success": False, "error": "text is required"}
+    if lines is None:
+        return {"success": False, "error": "lines must be a positive integer"}
+    if wait_secs is None:
+        return {"success": False, "error": "wait_secs must be zero or a positive number"}
+    typed = send_text({"target": target, "text": text, "enter": False})
+    if not typed["success"]:
+        return typed
+    launched = _send_keys_repeat(target, launch_keys, 1)
+    if not launched["success"]:
+        return launched
+    return _command_feedback(target, text, launch_keys, lines, wait_secs)
+
+
+def _command_feedback(
+    target: str,
+    text: str,
+    launch_keys: list[str],
+    lines: int,
+    wait_secs: float,
+) -> dict[str, Any]:
+    time.sleep(wait_secs)
+    pane_result = inspect({"target": target, "lines": lines})
+    if not pane_result["success"]:
+        return pane_result
+    pane = pane_result["pane"]
+    return {
+        "success": True,
+        "target": target,
+        "text": text,
+        "launch_keys": launch_keys,
+        "wait_secs": wait_secs,
+        "feedback": {
+            "state": pane["state"],
+            "summary": pane["summary"],
+            "content_lines": pane["content_lines"],
+            "status_line": pane["status_line"],
+            "worth_messaging": pane["worth_messaging"],
+        },
+    }
+
+
 def send_keys(args: dict[str, Any]) -> dict[str, Any]:
     target = _target(args)
     keys = _keys(args)
@@ -941,6 +1002,7 @@ def run(args: dict[str, Any]) -> dict[str, Any]:
         "survey": survey,
         "watch": watch,
         "send_text": send_text,
+        "send_command": send_command,
         "send_keys": send_keys,
     }
     handler = handlers.get(action)

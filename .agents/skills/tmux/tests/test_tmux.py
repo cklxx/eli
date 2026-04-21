@@ -371,6 +371,77 @@ class TestSendKeys:
         ]
 
 
+class TestSendCommand:
+    def test_send_command_types_launches_and_returns_feedback(self):
+        calls: list[tuple] = []
+
+        def _send_text(args):
+            calls.append(("text", args))
+            return {"success": True, "target": args["target"], "text": args["text"], "enter": False}
+
+        def _send_keys(target, keys, repeat):
+            calls.append(("keys", target, keys, repeat))
+            return {"success": True}
+
+        def _inspect(args):
+            calls.append(("inspect", args))
+            return {
+                "success": True,
+                "pane": {
+                    "state": "active",
+                    "summary": "Active process pane. Latest: compiling scheduler",
+                    "content_lines": ["compiling scheduler"],
+                    "status_line": "running",
+                    "worth_messaging": False,
+                },
+            }
+
+        with (
+            patch.object(_MOD, "send_text", side_effect=_send_text),
+            patch.object(_MOD, "_send_keys_repeat", side_effect=_send_keys),
+            patch.object(_MOD, "inspect", side_effect=_inspect),
+            patch.object(_MOD.time, "sleep", side_effect=lambda secs: calls.append(("sleep", secs))),
+        ):
+            result = _MOD.send_command({"target": "%5", "text": "cargo test", "lines": 12})
+
+        assert result["success"] is True
+        assert result["launch_keys"] == ["Enter"]
+        assert result["feedback"]["content_lines"] == ["compiling scheduler"]
+        assert calls == [
+            ("text", {"target": "%5", "text": "cargo test", "enter": False}),
+            ("keys", "%5", ["Enter"], 1),
+            ("sleep", 0.5),
+            ("inspect", {"target": "%5", "lines": 12}),
+        ]
+
+    def test_send_command_accepts_custom_launch_keys_and_zero_wait(self):
+        with (
+            patch.object(_MOD, "send_text", return_value={"success": True}),
+            patch.object(_MOD, "_send_keys_repeat", return_value={"success": True}),
+            patch.object(
+                _MOD,
+                "inspect",
+                return_value={
+                    "success": True,
+                    "pane": {
+                        "state": "idle",
+                        "summary": "Idle shell pane.",
+                        "content_lines": ["done"],
+                        "status_line": "",
+                        "worth_messaging": True,
+                    },
+                },
+            ),
+            patch.object(_MOD.time, "sleep", return_value=None) as sleep_mock,
+        ):
+            result = _MOD.send_command({"target": "%5", "text": "continue", "keys": ["C-m"], "wait_secs": 0, "lines": 8})
+
+        assert result["success"] is True
+        assert result["launch_keys"] == ["C-m"]
+        assert result["feedback"]["worth_messaging"] is True
+        sleep_mock.assert_called_once_with(0.0)
+
+
 class TestMainRouting:
     def test_unknown_action_returns_structured_error(self):
         with (
