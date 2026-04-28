@@ -864,7 +864,7 @@ fn test_builder_default() {
 
 #[test]
 fn test_builder_register_provider() {
-    use crate::core::provider_registry::{ProviderConfig, ProviderRegistry};
+    use crate::core::provider_registry::ProviderConfig;
 
     let llm = LLM::builder()
         .model("my-llm:custom-model")

@@ -129,6 +129,10 @@ fn provider_resolvers() -> Vec<ProviderResolver> {
                 resolver("github-copilot")
             }),
         ),
+        (
+            "volcano",
+            Box::new(|| crate::builtin::config::load_api_key_entry("volcano")),
+        ),
     ]
 }
 

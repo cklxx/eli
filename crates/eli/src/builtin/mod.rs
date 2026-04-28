@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod cli;
+pub(crate) mod coding_plan;
 pub mod command_semantics;
 pub mod config;
 mod model_specs;

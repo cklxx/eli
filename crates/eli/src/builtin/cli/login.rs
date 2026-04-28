@@ -3,7 +3,18 @@
 use std::path::PathBuf;
 
 use super::detect;
+use crate::builtin::coding_plan;
 use crate::builtin::config::{EliConfig, Profile, default_model_for_provider, normalize_provider};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginTarget {
+    OpenAi,
+    Claude,
+    GitHubCopilot,
+    CodingPlan,
+    Volcano,
+    Local(Option<&'static str>),
+}
 
 /// Mask an account ID for display: show first 3 and last 3 chars only.
 fn mask_account_id(id: Option<&str>) -> String {
@@ -24,30 +35,65 @@ pub(crate) async fn login_command(
     timeout: f64,
     api_key_mode: bool,
 ) -> anyhow::Result<()> {
-    match provider.as_str() {
-        "openai" => login_openai(codex_home, browser, manual, timeout).await,
-        "claude" | "anthropic" => {
-            if api_key_mode {
-                login_claude_api_key().await
-            } else {
-                login_claude_oauth(browser).await
-            }
-        }
-        "github-copilot" | "copilot" => login_github_copilot(browser, timeout).await,
-        // All keyless local OpenAI-compatible servers share one detection
-        // + save flow. The brand only affects the saved profile name and
-        // the "how to start" hint shown when no server responds.
-        "local" => login_local(None).await,
-        "agent-infer" | "agent_infer" | "agentinfer" => login_local(Some("agent-infer")).await,
-        "ollama" => login_local(Some("ollama")).await,
-        "vllm" => login_local(Some("vllm")).await,
-        "lmstudio" => login_local(Some("lmstudio")).await,
-        "llama-cpp" | "llamacpp" | "llama.cpp" => login_local(Some("llama-cpp")).await,
-        _ => anyhow::bail!(
-            "Unsupported auth provider: {provider}\n\
-             Supported providers: openai, claude, github-copilot, \
-             local (or any of: agent-infer, ollama, vllm, lmstudio, llama-cpp)"
-        ),
+    match parse_login_target(&provider)? {
+        LoginTarget::OpenAi => login_openai(codex_home, browser, manual, timeout).await,
+        LoginTarget::Claude => login_claude(browser, api_key_mode).await,
+        LoginTarget::GitHubCopilot => login_github_copilot(browser, timeout).await,
+        LoginTarget::CodingPlan => login_coding_plan().await,
+        LoginTarget::Volcano => login_volcano().await,
+        LoginTarget::Local(brand) => login_local(brand).await,
+    }
+}
+
+fn parse_login_target(provider: &str) -> anyhow::Result<LoginTarget> {
+    parse_known_login_target(provider).ok_or_else(|| unsupported_provider(provider))
+}
+
+fn parse_known_login_target(provider: &str) -> Option<LoginTarget> {
+    let key = provider.trim().to_ascii_lowercase();
+    parse_named_login_target(&key).or_else(|| parse_local_login_target(&key))
+}
+
+fn parse_named_login_target(provider: &str) -> Option<LoginTarget> {
+    match provider {
+        "openai" => Some(LoginTarget::OpenAi),
+        "claude" | "anthropic" => Some(LoginTarget::Claude),
+        "github-copilot" | "copilot" => Some(LoginTarget::GitHubCopilot),
+        "coding-plan" | "coding_plan" | "codingplan" => Some(LoginTarget::CodingPlan),
+        "volcano" | "volcengine" | "ark" => Some(LoginTarget::Volcano),
+        _ => None,
+    }
+}
+
+fn parse_local_login_target(provider: &str) -> Option<LoginTarget> {
+    match provider {
+        "local" => Some(LoginTarget::Local(None)),
+        "agent-infer" | "agent_infer" | "agentinfer" => local_brand("agent-infer"),
+        "ollama" => local_brand("ollama"),
+        "vllm" => local_brand("vllm"),
+        "lmstudio" => local_brand("lmstudio"),
+        "llama-cpp" | "llamacpp" | "llama.cpp" => local_brand("llama-cpp"),
+        _ => None,
+    }
+}
+
+fn local_brand(brand: &'static str) -> Option<LoginTarget> {
+    Some(LoginTarget::Local(Some(brand)))
+}
+
+fn unsupported_provider(provider: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Unsupported auth provider: {provider}\n\
+         Supported providers: openai, claude, github-copilot, coding-plan, \
+         volcano, local (or any of: agent-infer, ollama, vllm, lmstudio, llama-cpp)"
+    )
+}
+
+async fn login_claude(open_browser: bool, api_key_mode: bool) -> anyhow::Result<()> {
+    if api_key_mode {
+        login_claude_api_key().await
+    } else {
+        login_claude_oauth(open_browser).await
     }
 }
 
@@ -72,31 +118,66 @@ fn save_profile_with_overrides(
     set_active: bool,
 ) -> anyhow::Result<()> {
     let provider = normalize_provider(provider_raw);
-    let profile_name = profile_name_override
-        .map(|s| s.to_owned())
-        .unwrap_or_else(|| provider.clone());
-
+    let profile_name = profile_name(&provider, profile_name_override);
     let mut config = EliConfig::load();
     let had_active = config.active_profile.is_some();
 
-    config.add_profile(
+    add_profile(
+        &mut config,
         &profile_name,
+        &provider,
+        model,
+        api_base.clone(),
+    );
+    let became_active = maybe_activate_profile(&mut config, &profile_name, set_active, had_active);
+    config.save()?;
+    print_profile_summary(&profile_name, &provider, model, api_base);
+    print_active_summary(&config, &profile_name, had_active, became_active);
+    Ok(())
+}
+
+fn profile_name(provider: &str, override_name: Option<&str>) -> String {
+    override_name
+        .map(str::to_owned)
+        .unwrap_or_else(|| provider.to_owned())
+}
+
+fn add_profile(
+    config: &mut EliConfig,
+    profile_name: &str,
+    provider: &str,
+    model: &str,
+    api_base: Option<String>,
+) {
+    config.add_profile(
+        profile_name,
         Profile {
-            provider: provider.clone(),
-            model: model.to_string(),
-            api_base: api_base.clone(),
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            api_base,
         },
     );
+}
 
-    let became_active = if set_active || !had_active {
-        config.active_profile = Some(profile_name.clone());
-        true
-    } else {
-        false
-    };
+fn maybe_activate_profile(
+    config: &mut EliConfig,
+    profile_name: &str,
+    set_active: bool,
+    had_active: bool,
+) -> bool {
+    if set_active || !had_active {
+        config.active_profile = Some(profile_name.to_owned());
+        return true;
+    }
+    false
+}
 
-    config.save()?;
-
+fn print_profile_summary(
+    profile_name: &str,
+    provider: &str,
+    model: &str,
+    api_base: Option<String>,
+) {
     println!();
     println!("  Profile:  {profile_name}");
     println!("  Provider: {provider}");
@@ -104,23 +185,139 @@ fn save_profile_with_overrides(
     if let Some(base) = api_base {
         println!("  Endpoint: {base}");
     }
+}
 
+fn print_active_summary(
+    config: &EliConfig,
+    profile_name: &str,
+    had_active: bool,
+    became_active: bool,
+) {
     if became_active {
-        if had_active {
-            println!("  Active:   yes");
-        } else {
-            println!("  Active:   yes (auto-selected as first profile)");
-        }
+        print_new_active_summary(had_active);
     } else {
-        let current = config.active_profile.as_deref().unwrap_or("(none)");
-        if current != profile_name {
-            println!();
-            println!("  Tip: run `eli use {profile_name}` to switch to this profile");
-            println!("  (current active profile: {current})");
-        }
+        print_inactive_summary(config, profile_name);
     }
+}
 
+fn print_new_active_summary(had_active: bool) {
+    if had_active {
+        println!("  Active:   yes");
+    } else {
+        println!("  Active:   yes (auto-selected as first profile)");
+    }
+}
+
+fn print_inactive_summary(config: &EliConfig, profile_name: &str) {
+    let current = config.active_profile.as_deref().unwrap_or("(none)");
+    if current == profile_name {
+        return;
+    }
+    println!();
+    println!("  Tip: run `eli use {profile_name}` to switch to this profile");
+    println!("  (current active profile: {current})");
+}
+
+async fn login_coding_plan() -> anyhow::Result<()> {
+    match pick_coding_plan_provider()?.as_str() {
+        coding_plan::VOLCANO_PROVIDER => login_volcano().await,
+        provider => anyhow::bail!("Unsupported Coding Plan provider: {provider}"),
+    }
+}
+
+fn pick_coding_plan_provider() -> anyhow::Result<String> {
+    println!("Select Coding Plan provider:");
+    println!("  [1] Volcano");
+    let answer = read_optional_line("Enter number or name (default 1): ")?;
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "volcano" | "volcengine" | "ark" => Ok(coding_plan::VOLCANO_PROVIDER.into()),
+        other => anyhow::bail!("Unsupported Coding Plan provider: {other}"),
+    }
+}
+
+async fn login_volcano() -> anyhow::Result<()> {
+    println!("Volcano Coding Plan login");
+    println!("Endpoint: {}", coding_plan::VOLCANO_OPENAI_BASE);
+    let api_key = read_api_key("Enter your Volcano API key: ")?;
+    let model = pick_volcano_model()?;
+    save_volcano_profile(&api_key, &model)?;
+    print_volcano_done(&model);
     Ok(())
+}
+
+fn pick_volcano_model() -> anyhow::Result<String> {
+    println!();
+    println!("Select model:");
+    print_volcano_models();
+    let answer = read_optional_line("Enter number or model name (default 1): ")?;
+    resolve_volcano_model_choice(answer.trim())
+}
+
+fn print_volcano_models() {
+    for (idx, model) in coding_plan::volcano_models().iter().enumerate() {
+        println!("  [{}] {}", idx + 1, model);
+    }
+}
+
+fn resolve_volcano_model_choice(choice: &str) -> anyhow::Result<String> {
+    if choice.is_empty() {
+        return Ok(coding_plan::volcano_model_at(1)
+            .unwrap_or("ark-code-latest")
+            .into());
+    }
+    if let Ok(index) = choice.parse::<usize>() {
+        return coding_plan::volcano_model_at(index)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("model selection out of range: {index}"));
+    }
+    Ok(choice.to_owned())
+}
+
+fn save_volcano_profile(api_key: &str, model: &str) -> anyhow::Result<()> {
+    crate::builtin::config::save_api_key_entry(coding_plan::VOLCANO_PROVIDER, api_key)?;
+    let model = format!("{}:{model}", coding_plan::VOLCANO_PROVIDER);
+    save_profile_with_overrides(
+        coding_plan::VOLCANO_PROVIDER,
+        Some(coding_plan::VOLCANO_PROFILE),
+        &model,
+        Some(coding_plan::VOLCANO_OPENAI_BASE.to_owned()),
+        true,
+    )
+}
+
+fn print_volcano_done(model: &str) {
+    println!();
+    println!("Done. Active profile: volcano");
+    println!("  Model:    {model}");
+    println!("  Endpoint: {}", coding_plan::VOLCANO_OPENAI_BASE);
+    println!();
+    println!("Try: eli chat");
+}
+
+fn read_required_line(prompt: &str) -> anyhow::Result<String> {
+    let value = read_optional_line(prompt)?;
+    if value.is_empty() {
+        anyhow::bail!("value cannot be empty");
+    }
+    Ok(value)
+}
+
+fn read_api_key(prompt: &str) -> anyhow::Result<String> {
+    let value = read_required_line(prompt)?;
+    if value.chars().all(|ch| ch == '*') {
+        anyhow::bail!("masked API key cannot be used");
+    }
+    Ok(value)
+}
+
+fn read_optional_line(prompt: &str) -> anyhow::Result<String> {
+    use std::io::{self, Write};
+
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut value = String::new();
+    io::stdin().read_line(&mut value)?;
+    Ok(value.trim().to_owned())
 }
 
 /// OpenAI Codex OAuth login flow.
@@ -381,4 +578,32 @@ async fn login_github_copilot(open_browser: bool, timeout: f64) -> anyhow::Resul
     post_login_save_profile("github-copilot")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_coding_plan_aliases() {
+        assert_eq!(
+            parse_login_target("coding-plan").unwrap(),
+            LoginTarget::CodingPlan
+        );
+        assert_eq!(parse_login_target("ark").unwrap(), LoginTarget::Volcano);
+        assert_eq!(
+            parse_login_target("volcengine").unwrap(),
+            LoginTarget::Volcano
+        );
+    }
+
+    #[test]
+    fn resolves_volcano_model_selection() {
+        assert_eq!(
+            resolve_volcano_model_choice("2").unwrap(),
+            "doubao-seed-2.0-code"
+        );
+        assert_eq!(resolve_volcano_model_choice("").unwrap(), "ark-code-latest");
+        assert!(resolve_volcano_model_choice("99").is_err());
+    }
 }

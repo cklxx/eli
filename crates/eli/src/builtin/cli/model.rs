@@ -7,6 +7,7 @@
 //! optional so local servers (agent-infer, ollama, vllm, lmstudio) work
 //! without provider-specific surgery here.
 
+use crate::builtin::coding_plan;
 use crate::builtin::config::EliConfig;
 use crate::builtin::settings::EnvConfig;
 use nexil::core::provider_policies::{
@@ -100,19 +101,39 @@ fn resolve_from_env(provider: &str) -> Option<String> {
     let provider = normalized_provider_name(provider);
     EnvConfig::api_key(None)
         .filter(|key| !key.is_empty())
-        .or_else(|| match provider.as_str() {
-            "anthropic" => std::env::var("ANTHROPIC_API_KEY").ok(),
-            "openai" => std::env::var("OPENAI_API_KEY").ok(),
-            "openrouter" => std::env::var("OPENROUTER_API_KEY").ok(),
-            "github-copilot" => std::env::var("GITHUB_TOKEN").ok(),
-            _ => None,
-        })
+        .or_else(|| resolve_provider_env_key(&provider))
         .filter(|key| !key.is_empty())
+}
+
+fn resolve_provider_env_key(provider: &str) -> Option<String> {
+    let eli_key = format!("ELI_{}_API_KEY", provider.to_uppercase().replace('-', "_"));
+    std::env::var(eli_key)
+        .ok()
+        .filter(|key| !key.is_empty())
+        .or_else(|| resolve_standard_env_key(provider))
+}
+
+fn resolve_standard_env_key(provider: &str) -> Option<String> {
+    match provider {
+        "anthropic" => first_env(&["ANTHROPIC_API_KEY"]),
+        "openai" => first_env(&["OPENAI_API_KEY"]),
+        "openrouter" => first_env(&["OPENROUTER_API_KEY"]),
+        "github-copilot" => first_env(&["GITHUB_TOKEN"]),
+        "volcano" => first_env(&["VOLCANO_API_KEY", "ARK_API_KEY"]),
+        _ => None,
+    }
+}
+
+fn first_env(names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
 }
 
 fn resolve_from_config(provider: &str) -> Option<String> {
     match normalized_provider_name(provider).as_str() {
         "anthropic" => crate::builtin::config::load_anthropic_api_key(),
+        "volcano" => crate::builtin::config::load_api_key_entry("volcano"),
         _ => None,
     }
 }
@@ -130,6 +151,9 @@ fn resolve_via_oauth(provider: &str) -> anyhow::Result<String> {
         ),
         "openrouter" => anyhow::bail!(
             "No API key found for OpenRouter.\nSet OPENROUTER_API_KEY environment variable."
+        ),
+        "volcano" => anyhow::bail!(
+            "No API key found for Volcano.\nRun `eli login volcano` or set ARK_API_KEY."
         ),
         _ => anyhow::bail!(
             "Cannot resolve API key for unknown provider: {provider}\nSet ELI_API_KEY environment variable."
@@ -174,6 +198,7 @@ async fn fetch_models(ctx: &RequestContext) -> anyhow::Result<Vec<String>> {
         }
         // Anthropic's model list is curated — no dynamic API needed.
         "anthropic" => Ok(known_models("anthropic")),
+        "volcano" => Ok(known_models("volcano")),
         "github-copilot" => {
             let key = ctx.api_key.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -421,6 +446,7 @@ fn known_models(provider: &str) -> Vec<String> {
             "anthropic/claude-sonnet-4-20250514",
             "google/gemini-2.5-pro",
         ],
+        "volcano" => return coding_plan::volcano_models(),
         _ => &[],
     };
     list.iter().map(|s| s.to_string()).collect()

@@ -68,6 +68,13 @@ impl ProviderRegistry {
             "github-copilot".to_owned(),
             ProviderConfig::new("https://api.githubcopilot.com", ApiFormat::Auto),
         );
+        providers.insert(
+            "volcano".to_owned(),
+            ProviderConfig::new(
+                super::provider_policies::VOLCANO_CODING_OPENAI_BASE,
+                ApiFormat::Completion,
+            ),
+        );
         // Generic local OpenAI-Chat-Completions-compatible backend.
         // One slot covers agent-infer / ollama / vllm / lmstudio / llama.cpp /
         // any other keyless local server — the brand only differs in the
@@ -126,6 +133,7 @@ mod tests {
         assert!(reg.contains("openrouter"));
         assert!(reg.contains("github-copilot"));
         assert!(reg.contains("local"));
+        assert!(reg.contains("volcano"));
         assert!(!reg.contains("custom-provider"));
     }
 
@@ -134,6 +142,17 @@ mod tests {
         let reg = ProviderRegistry::new();
         let cfg = reg.get("local").expect("local registered");
         assert_eq!(cfg.api_base, "http://127.0.0.1:8000/v1");
+        assert_eq!(cfg.api_format, ApiFormat::Completion);
+    }
+
+    #[test]
+    fn volcano_provider_defaults_to_coding_plan_chat_api() {
+        let reg = ProviderRegistry::new();
+        let cfg = reg.get("ark").expect("volcano alias registered");
+        assert_eq!(
+            cfg.api_base,
+            crate::core::provider_policies::VOLCANO_CODING_OPENAI_BASE
+        );
         assert_eq!(cfg.api_format, ApiFormat::Completion);
     }
 

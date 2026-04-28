@@ -52,9 +52,9 @@ pub enum CliCommand {
         #[arg(long)]
         session_id: Option<String>,
     },
-    /// Authenticate with a provider (openai, claude, github-copilot).
+    /// Authenticate with a provider (openai, claude, github-copilot, coding-plan).
     Login {
-        /// Authentication provider (openai, claude, github-copilot).
+        /// Authentication provider (openai, claude, github-copilot, coding-plan).
         provider: String,
         /// Directory to store credentials.
         #[arg(long)]
@@ -556,6 +556,15 @@ mod tests {
             CliCommand::Channel {
                 action: ChannelAction::Login { channel },
             } => assert_eq!(channel, "weixin"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_login_coding_plan() {
+        let cmd = TestCli::try_parse_from(["eli", "login", "coding-plan"]).unwrap();
+        match cmd.command {
+            CliCommand::Login { provider, .. } => assert_eq!(provider, "coding-plan"),
             other => panic!("unexpected command: {other:?}"),
         }
     }

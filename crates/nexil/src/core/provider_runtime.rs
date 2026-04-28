@@ -121,6 +121,7 @@ impl<'a> ProviderRuntime<'a> {
             "openai" => "https://api.openai.com/v1",
             "openrouter" => "https://openrouter.ai/api/v1",
             "github-copilot" => "https://api.githubcopilot.com",
+            "volcano" => super::provider_policies::VOLCANO_CODING_OPENAI_BASE,
             _ => "https://api.openai.com/v1",
         }
     }

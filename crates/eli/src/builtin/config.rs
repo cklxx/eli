@@ -387,7 +387,20 @@ fn set_file_private(path: &std::path::Path) {
 
 /// Save an Anthropic API key to ~/.eli/auth.json.
 pub fn save_anthropic_api_key_entry(api_key: &str) -> anyhow::Result<()> {
-    save_auth_entry("anthropic", serde_json::json!({ "api_key": api_key }))
+    save_api_key_entry("anthropic", api_key)
+}
+
+pub fn save_api_key_entry(provider: &str, api_key: &str) -> anyhow::Result<()> {
+    let provider = normalize_provider(provider);
+    save_auth_entry(&provider, serde_json::json!({ "api_key": api_key }))
+}
+
+pub fn load_api_key_entry(provider: &str) -> Option<String> {
+    let provider = normalize_provider(provider);
+    let auth_path = eli_home().join("auth.json");
+    let contents = std::fs::read_to_string(&auth_path).ok()?;
+    let payload: Value = serde_json::from_str(&contents).ok()?;
+    payload.get(&provider).and_then(resolve_api_key)
 }
 
 /// Load all stored auth entries from `~/.eli/auth.json`.
@@ -588,6 +601,24 @@ mod tests {
     fn test_redact_key() {
         assert_eq!(redact_key("sk-ant-api03-abcdefghij"), "sk-ant-...ghij");
         assert_eq!(redact_key("short"), "****");
+    }
+
+    #[test]
+    fn test_generic_api_key_entry_uses_normalized_provider() {
+        let tmp = TempDir::new().unwrap();
+        unsafe {
+            std::env::set_var("ELI_HOME", tmp.path());
+        }
+
+        save_api_key_entry("ark", "volcano-key").unwrap();
+
+        assert_eq!(
+            load_api_key_entry("volcengine").as_deref(),
+            Some("volcano-key")
+        );
+        unsafe {
+            std::env::remove_var("ELI_HOME");
+        }
     }
 
     #[test]

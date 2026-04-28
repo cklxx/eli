@@ -207,6 +207,9 @@ fn print_env_overrides() {
         "ELI_API_FORMAT",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
+        "ELI_VOLCANO_API_KEY",
+        "VOLCANO_API_KEY",
+        "ARK_API_KEY",
     ];
     println!();
     println!("Environment overrides:");

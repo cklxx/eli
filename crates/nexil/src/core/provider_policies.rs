@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const VOLCANO_CODING_OPENAI_BASE: &str = "https://ark.cn-beijing.volces.com/api/coding/v3";
+
 /// Provider-specific behavioural toggles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderPolicy {
@@ -36,6 +38,7 @@ fn provider_alias(provider_name: &str) -> String {
         // user-facing profile label.
         "local" | "agent-infer" | "agent_infer" | "agentinfer" | "ollama" | "vllm" | "lmstudio"
         | "llama-cpp" | "llamacpp" | "llama.cpp" => "local".to_owned(),
+        "volcano" | "volcengine" | "ark" => "volcano".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -54,7 +57,7 @@ pub fn normalized_provider_name(provider_name: &str) -> String {
 pub fn is_known_provider(name: &str) -> bool {
     matches!(
         provider_alias(name).as_str(),
-        "anthropic" | "openai" | "openrouter" | "github-copilot" | "local"
+        "anthropic" | "openai" | "openrouter" | "github-copilot" | "local" | "volcano"
     )
 }
 
@@ -65,6 +68,7 @@ pub fn default_api_base(provider_name: &str) -> String {
         "openai" => "https://api.openai.com/v1".to_owned(),
         "openrouter" => "https://openrouter.ai/api/v1".to_owned(),
         "github-copilot" => "https://api.githubcopilot.com".to_owned(),
+        "volcano" => VOLCANO_CODING_OPENAI_BASE.to_owned(),
         // The first port across the canonical local-LLM defaults
         // (agent-infer/vllm:8000). Every saved profile is expected to carry
         // its own `api_base` from autodetection, so this is a fallback only.
@@ -79,6 +83,7 @@ pub fn default_model_for_provider(provider_name: &str) -> &'static str {
         "openai" => "openai:gpt-5.4-mini",
         "anthropic" => "anthropic:claude-sonnet-4-6",
         "github-copilot" => "github-copilot:gpt-5.4-mini",
+        "volcano" => "volcano:ark-code-latest",
         // Local backends have no canonical model; the login flow queries
         // /v1/models and writes the real served model into the profile.
         // This placeholder is only used when no profile exists and the user
@@ -182,6 +187,8 @@ mod tests {
         assert_eq!(normalized_provider_name("llama-cpp"), "local");
         assert_eq!(normalized_provider_name("llamacpp"), "local");
         assert_eq!(normalized_provider_name("local"), "local");
+        assert_eq!(normalized_provider_name("volcengine"), "volcano");
+        assert_eq!(normalized_provider_name("ark"), "volcano");
     }
 
     #[test]
@@ -194,6 +201,8 @@ mod tests {
         assert!(is_known_provider("copilot"));
         assert!(is_known_provider("openrouter"));
         assert!(is_known_provider("local"));
+        assert!(is_known_provider("volcano"));
+        assert!(is_known_provider("ark"));
         assert!(is_known_provider("ollama"));
         assert!(is_known_provider("llama-cpp"));
         // The "prefix" part of an ollama tag like "llama3.2:3b" is NOT a provider.
@@ -211,6 +220,7 @@ mod tests {
         assert_eq!(default_api_base("agent-infer"), "http://127.0.0.1:8000/v1");
         assert_eq!(default_api_base("ollama"), "http://127.0.0.1:8000/v1");
         assert_eq!(default_api_base("vllm"), "http://127.0.0.1:8000/v1");
+        assert_eq!(default_api_base("volcano"), VOLCANO_CODING_OPENAI_BASE);
     }
 
     #[test]
@@ -226,6 +236,10 @@ mod tests {
         assert_eq!(
             default_model_for_provider("cohere"),
             "openrouter:openai/gpt-5.4-mini"
+        );
+        assert_eq!(
+            default_model_for_provider("volcengine"),
+            "volcano:ark-code-latest"
         );
     }
 }
