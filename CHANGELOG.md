@@ -6,6 +6,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [0.5.1] — 2026-04-28
+
+### Added
+- **Volcano Coding Plan setup** — `eli login coding-plan` and `eli login volcano` configure the Coding Plan OpenAI-compatible endpoint, API key, and supported model list.
+
+---
+
 ## [0.5.0] — 2026-04-08
 
 ### Breaking
